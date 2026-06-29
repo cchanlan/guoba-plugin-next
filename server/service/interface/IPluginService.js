@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import lodash from 'lodash'
 import fetch from 'node-fetch'
-import {exec} from 'child_process'
+import {exec, spawn} from 'child_process'
 import {Service} from '#guoba.framework';
 import {cfg, Constant, GuobaSupportMap, PluginsMap} from '#guoba.platform';
 import {BotActions} from '#guoba.utils'
@@ -233,7 +233,6 @@ export default class IPluginService extends Service {
     let result = await new Promise((resolve) => {
       const args = ['clone', '--depth', '1', '--single-branch', cloneUrl, pluginPath];
       logger.info(`[Guoba] 执行命令：${logger.blue('git ' + args.join(' '))}`);
-      const {spawn} = require('child_process');
       const child = spawn('git', args, {windowsHide: true});
       let stdout = '', stderr = '';
       child.stdout.on('data', (data) => stdout += data);
