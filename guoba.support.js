@@ -79,6 +79,16 @@ export function supportGuoba () {
             placeholder: '请输入Github反代地址'
           }
         },
+        {
+          field: 'base.gitInstallWhitelist',
+          label: 'Git安装白名单',
+          helpMessage: '只允许从白名单中的域名安装插件',
+          bottomHelpMessage: '每行一个域名，例如：github.com',
+          component: 'InputTextArea',
+          componentProps: {
+            placeholder: '每行一个域名，例如：\ngithub.com\ngitee.com',
+          }
+        },
         // {
         //   field: 'base.city',
         //   label: '天气城市',
@@ -157,6 +167,10 @@ export function supportGuoba () {
         if (Array.isArray(host)) {
           lodash.set(config, 'server.host', host[0])
         }
+        let whitelist = lodash.get(config, 'base.gitInstallWhitelist')
+        if (Array.isArray(whitelist)) {
+          lodash.set(config, 'base.gitInstallWhitelist', whitelist.join('\n'))
+        }
         return config
       },
       // 设置配置的方法（前端点确定后调用的方法）
@@ -170,6 +184,9 @@ export function supportGuoba () {
               host[0] = value
               value = host
             }
+          }
+          if (keyPath === 'base.gitInstallWhitelist' && typeof value === 'string') {
+            value = value.split('\n').map(s => s.trim()).filter(Boolean)
           }
           lodash.set(config, keyPath, value)
         }

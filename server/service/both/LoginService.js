@@ -71,8 +71,14 @@ export class LoginService extends Service {
   }
 
   async codeLoginCheck(code) {
+    if (!code || typeof code !== 'string') {
+      return false
+    }
     let redisKey = `${Constant.REDIS_PREFIX}login-code`
     let redisCode = await redis.get(redisKey)
+    if (!redisCode) {
+      return false
+    }
     if (redisCode === code) {
       await redis.del(redisKey)
       return await this.signToken('admin')

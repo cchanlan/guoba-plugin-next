@@ -1,5 +1,5 @@
 import {autowired, Result} from '#guoba.framework';
-import {ApiController, GuobaSupportMap} from '#guoba.platform'
+import {ApiController, GuobaSupportMap, cfg} from '#guoba.platform'
 
 export default class PluginController extends ApiController {
 
@@ -52,8 +52,26 @@ export default class PluginController extends ApiController {
 
   async installPlugin(req) {
     let {link, autoRestart = true, autoNpmInstall = true} = req.body
-    if (!link) {
+    if (!link || typeof link !== 'string') {
       return Result.error('link不能为空')
+    }
+    link = link.trim()
+    if (/[;&|`$(){}#!<>]/.test(link)) {
+      return Result.error('链接包含非法字符')
+    }
+    const whitelist = cfg.get('base.gitInstallWhitelist') || ['github.com', 'gitee.com', 'gitlab.com', 'gitcode.com']
+    let parsed
+    try {
+      parsed = new URL(link)
+    } catch {
+      return Result.error('无效的仓库地址')
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return Result.error('仅支持 http/https 协议')
+    }
+    const hostname = parsed.hostname.toLowerCase()
+    if (!whitelist.some(domain => hostname === domain || hostname.endsWith('.' + domain))) {
+      return Result.error(`不允许从 ${hostname} 安装插件，请在锅巴设置中添加白名单`)
     }
     let text = await this.pluginService.installPlugin(link, autoRestart, autoNpmInstall)
     return Result.ok(text)

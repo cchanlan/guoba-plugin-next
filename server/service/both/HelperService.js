@@ -16,14 +16,33 @@ export default class HelperService extends Service {
       return Result.error('url不能为空', 400)
     }
     url = decodeURIComponent(url)
-    url = new URL(url)
+    let parsed
+    try {
+      parsed = new URL(url)
+    } catch {
+      return Result.error('无效的URL', 400)
+    }
+    const hostname = parsed.hostname.toLowerCase()
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      hostname === '0.0.0.0' ||
+      hostname.endsWith('.local') ||
+      /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(hostname)
+    ) {
+      return Result.error('禁止访问内部地址', 403)
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return Result.error('仅支持 http/https 协议', 400)
+    }
     for (const [name, value] of Object.entries(req.query)) {
       if (name === 'url') {
         continue
       }
-      url.searchParams.append(name, value)
+      parsed.searchParams.append(name, value)
     }
-    let response = await fetch(url.toString(), {
+    let response = await fetch(parsed.toString(), {
       method: req.method,
       body: req.method === 'GET' ? undefined : req.body,
     })

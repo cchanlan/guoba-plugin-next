@@ -230,7 +230,23 @@ export default class IPluginService extends Service {
       ? `${githubProxyUrl}${link}`
       : link;
 
-    let result = await Bot.exec(`git clone --depth 1 --single-branch ${cloneUrl} "${pluginPath}"`);
+    let result = await new Promise((resolve) => {
+      const args = ['clone', '--depth', '1', '--single-branch', cloneUrl, pluginPath];
+      logger.info(`[Guoba] 执行命令：${logger.blue('git ' + args.join(' '))}`);
+      const {spawn} = require('child_process');
+      const child = spawn('git', args, {windowsHide: true});
+      let stdout = '', stderr = '';
+      child.stdout.on('data', (data) => stdout += data);
+      child.stderr.on('data', (data) => stderr += data);
+      child.on('close', (code) => {
+        const error = code !== 0 ? new Error(stderr || `git clone exited with code ${code}`) : null;
+        logger.mark(`[Guoba] 执行命令完成：${logger.blue('git clone')}${stdout ? `\n${stdout.trim()}` : ''}${stderr ? logger.red(`\n${stderr.trim()}`) : ''}`);
+        if (error) {
+          logger.mark(`[Guoba] 执行命令错误：${logger.blue('git clone')}\n${logger.red(error.message.trim())}`);
+        }
+        resolve({error, stdout, stderr});
+      });
+    });
 
     if (result.error) {
       logger.error(`[Guoba] 插件安装失败：${result.error}`);

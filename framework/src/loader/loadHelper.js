@@ -11,6 +11,9 @@ export function useHelper(guobaApp) {
     // 静态资源
     app.set('views', _args.staticPath)
     app.use(_args.prefix, express.static(_args.staticPath))
+    app.get('/robots.txt', (req, res) => {
+      res.type('text/plain').send('User-agent: *\nDisallow: /\n')
+    })
   }
   // parse application/json
   app.use(express.json({limit: '50mb'}))
