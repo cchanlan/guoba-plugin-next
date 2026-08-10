@@ -29,41 +29,88 @@ export function toPairsMap(arg) {
   return obj
 }
 
-async function getMasterQQ() {
+/**
+ * 获取主人列表，元素为 {botId, userId}
+ *
+ * TRSS 的 cfg.master 是 `botId:userId` 的映射，能明确知道该用哪个账号发消息；
+ * 其余情况只有 masterQQ 列表，botId 留空由框架自行挑选。
+ */
+async function getMasterList() {
+  let config
   if (isV3 || isV4) {
-    return (await import( '../../../lib/config/config.js')).default.masterQQ
+    config = (await import('../../../lib/config/config.js')).default
   } else {
-    return BotConfig.masterQQ
+    config = BotConfig
   }
+  if (isTRSS) {
+    const list = []
+    for (const [botId, users] of Object.entries(config.master ?? {})) {
+      for (const userId of users ?? []) {
+        list.push({botId, userId})
+      }
+    }
+    if (list.length > 0) return list
+  }
+  let masterQQ = config.masterQQ ?? []
+  if (!Array.isArray(masterQQ)) masterQQ = [masterQQ]
+  return masterQQ.map(userId => ({botId: null, userId}))
 }
 
 /**
  * 给主人发送消息
+ *
+ * 默认发给所有主人：主人列表里第一个常常是 stdin（控制台）之类的非 QQ 账号，
+ * 只发第一个会导致真正的主人收不到消息。
+ *
  * @param msg 消息内容
- * @param all 是否发送给所有主人，默认false
+ * @param all 是否发送给所有主人，默认true
  * @param idx 不发送给所有主人时，指定发送给第几个主人，默认发送给第一个主人
+ * @return {Promise<number>} 发送成功的主人数量
  */
-export async function sendToMaster(msg, all = false, idx = 0) {
-  let masterQQ = await getMasterQQ()
-  let sendTo = all ? masterQQ : [masterQQ[idx]]
-  for (let qq of sendTo) {
-    await replyPrivate(qq, msg)
+export async function sendToMaster(msg, all = true, idx = 0) {
+  let masters = await getMasterList()
+  if (masters.length === 0) {
+    logger.warn('[Guoba] 未配置主人账号，无法发送私聊消息')
+    return 0
   }
+  let sendTo = all ? masters : [masters[idx]]
+  let success = 0
+  for (let master of sendTo) {
+    if (!master) continue
+    if (await replyPrivate(master, msg)) {
+      success++
+    }
+  }
+  return success
 }
 
 /**
- * 发送私聊消息，仅给好友发送
- * @param userId qq号
+ * 发送私聊消息
+ * @param master {{botId: ?string, userId: string|number}} 目标主人
  * @param msg 消息
+ * @return {Promise<boolean>} 是否发送成功
  */
-async function replyPrivate(userId, msg) {
+async function replyPrivate({botId, userId}, msg) {
   userId = Number(userId) || userId
-  let friend = Bot.fl.get(userId)
-  if (friend) {
-    logger.mark(`发送好友消息[${friend.nickname}](${userId})`)
-    return await Bot.pickUser(userId).sendMsg(msg).catch((err) => {
-      logger.mark(err)
-    })
+  try {
+    let bot = botId != null ? Bot.bots?.[botId] : null
+    if (botId != null && !bot) {
+      // 不走 Bot.sendFriendMsg：账号离线时它会挂起等待上线（默认5分钟），
+      // 会把调用方（如登录接口）一起拖死
+      logger.mark(`[Guoba] Bot(${botId}) 不在线，跳过给主人(${userId})发消息`)
+      return false
+    }
+    let friend = (bot ?? Bot).pickFriend(userId)
+    logger.mark(`[Guoba] 发送主人私聊消息(${botId ?? Bot.uin}:${userId})`)
+    // 加超时兜底，避免适配器卡住导致接口一直不返回
+    await Promise.race([
+      friend.sendMsg(msg),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('发送超时')), 20000)),
+    ])
+    return true
+  } catch (err) {
+    logger.mark(`[Guoba] 给主人(${userId})发消息失败：${err.message ?? err}`)
+    return false
   }
 }
 

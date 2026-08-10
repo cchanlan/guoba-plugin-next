@@ -1,0 +1,264 @@
+import os from 'os'
+import moment from 'moment'
+import {Service} from '#guoba.framework'
+import {diskInfo} from '#guoba.libs'
+
+/** 采样两次 /proc 计算 CPU 占用的间隔 */
+const CPU_SAMPLE_INTERVAL = 200
+
+/**
+ * 只统计真实磁盘，过滤内存盘和容器叠加层，
+ * 否则 df 里的 tmpfs / overlay 会混进来把容量算歪。
+ */
+const IGNORE_FS = /^(udev|tmpfs|devtmpfs|overlay|squashfs|shm|none)$/i
+
+/**
+ * 系统状态与消息统计。
+ *
+ * 消息数来自 Yunzai 自身在 lib/plugins/loader.js 里累加的 `Yz:count:*`，
+ * 锅巴只读不写。
+ */
+export class StatusService extends Service {
+
+  constructor(app) {
+    super(app)
+  }
+
+  /** 取一次各 CPU 核心的累计时间片 */
+  #cpuSnapshot() {
+    let idle = 0
+    let total = 0
+    for (const cpu of os.cpus()) {
+      for (const type of Object.keys(cpu.times)) {
+        total += cpu.times[type]
+      }
+      idle += cpu.times.idle
+    }
+    return {idle, total}
+  }
+
+  /**
+   * CPU 占用率。
+   * os.cpus() 给的是开机以来的累计值，直接算只能得到一个平均值，
+   * 所以隔一小段时间采样两次做差。
+   */
+  async getCpuUsage() {
+    const start = this.#cpuSnapshot()
+    await new Promise(resolve => setTimeout(resolve, CPU_SAMPLE_INTERVAL))
+    const end = this.#cpuSnapshot()
+    const totalDiff = end.total - start.total
+    const idleDiff = end.idle - start.idle
+    if (totalDiff <= 0) {
+      return 0
+    }
+    return Math.min(100, Math.max(0, ((totalDiff - idleDiff) / totalDiff) * 100))
+  }
+
+  /** 根分区（Windows 下取占用最高的盘）使用情况 */
+  async getDiskUsage() {
+    let drives
+    try {
+      drives = await diskInfo.getDrives()
+    } catch (e) {
+      logger.warn('[Guoba] 获取磁盘信息失败：', e.message || e)
+      return null
+    }
+    if (!Array.isArray(drives) || drives.length === 0) {
+      return null
+    }
+    const real = drives.filter(d => d.filesystem && !IGNORE_FS.test(d.filesystem))
+    if (real.length === 0) {
+      return null
+    }
+    // 优先根分区；Windows 没有 `/`，退化为空间最大的那块盘
+    let target = real.find(d => d.mounted === '/')
+    if (!target) {
+      target = real.reduce((a, b) => (Number(b.blocks) > Number(a.blocks) ? b : a))
+    }
+    // df 输出单位是 1K block
+    const total = Number(target.blocks) * 1024
+    const used = Number(target.used) * 1024
+    if (!total) {
+      return null
+    }
+    return {
+      name: target.mounted || target.filesystem,
+      total,
+      used,
+      percent: (used / total) * 100,
+    }
+  }
+
+  /** 系统状态：负载、CPU、内存、磁盘 */
+  async getSystemStatus() {
+    const totalMem = os.totalmem()
+    const freeMem = os.freemem()
+    const usedMem = totalMem - freeMem
+    const cpuCount = os.cpus().length || 1
+    // Windows 上 loadavg 恒为 [0,0,0]，前端据此隐藏该项
+    const [load1, load5, load15] = os.loadavg()
+
+    const [cpuUsage, disk] = await Promise.all([
+      this.getCpuUsage(),
+      this.getDiskUsage(),
+    ])
+
+    return {
+      load: {
+        avg1: load1,
+        avg5: load5,
+        avg15: load15,
+        cpuCount,
+        // 负载按核心数归一化成百分比，超过 100% 说明已经排队
+        percent: Math.min(100, (load1 / cpuCount) * 100),
+        supported: os.platform() !== 'win32',
+      },
+      cpu: {
+        percent: cpuUsage,
+        count: cpuCount,
+        model: os.cpus()[0]?.model?.trim() ?? '',
+      },
+      memory: {
+        total: totalMem,
+        used: usedMem,
+        percent: (usedMem / totalMem) * 100,
+      },
+      disk,
+      // 进程与主机各自的运行时长，单位秒
+      uptime: {
+        process: process.uptime(),
+        system: os.uptime(),
+      },
+      platform: `${os.type()} ${os.release()}`,
+      arch: os.arch(),
+      nodeVersion: process.version,
+    }
+  }
+
+  /** 批量读 redis 计数，缺失按 0 处理 */
+  async #mget(keys) {
+    if (keys.length === 0) {
+      return []
+    }
+    try {
+      const values = await redis.mGet(keys)
+      return values.map(v => Number(v) || 0)
+    } catch (e) {
+      logger.warn('[Guoba] 读取消息统计失败：', e.message || e)
+      return keys.map(() => 0)
+    }
+  }
+
+  /**
+   * 消息统计：今日 / 本月 / 累计，以及最近 7 天趋势。
+   * key 结构见 Yunzai lib/plugins/loader.js 的 countMsg。
+   */
+  async getMsgStat(days = 7) {
+    const day = moment().format('YYYY:MM:DD')
+    const month = moment().format('YYYY:MM')
+
+    const scopes = [day, month, 'total']
+    const keys = []
+    for (const type of ['receive', 'send']) {
+      for (const scope of scopes) {
+        keys.push(`Yz:count:${type}:msg:total:${scope}`)
+      }
+    }
+
+    // 趋势：从今天往前数 days 天
+    const trendDays = []
+    for (let i = days - 1; i >= 0; i--) {
+      const m = moment().subtract(i, 'days')
+      trendDays.push({date: m.format('MM-DD'), key: m.format('YYYY:MM:DD')})
+    }
+    for (const type of ['receive', 'send']) {
+      for (const d of trendDays) {
+        keys.push(`Yz:count:${type}:msg:total:${d.key}`)
+      }
+    }
+
+    const values = await this.#mget(keys)
+    let i = 0
+    const receive = {today: values[i++], month: values[i++], total: values[i++]}
+    const send = {today: values[i++], month: values[i++], total: values[i++]}
+
+    const trend = trendDays.map((d, idx) => ({
+      date: d.date,
+      receive: values[i + idx] ?? 0,
+      send: values[i + trendDays.length + idx] ?? 0,
+    }))
+
+    return {receive, send, trend}
+  }
+
+  /**
+   * Bot 账号列表 —— 当前正在运行的所有账号。
+   *
+   * 两个来源合并：
+   *  - `Bot.uin`：TRSS 维护的已登录账号数组，正常情况下就是全部；
+   *  - `Bot.bots`：个别适配器只往这里塞对象、没登记进 uin，漏了会看不到。
+   *
+   * `Bot.bots` 不能直接遍历 —— 它同时挂着 url / logger / _events 这类非账号属性，
+   * 甚至有插件往上面挂自己的东西（如 xiaofei_plugin）。真账号的判据是带 adapter，
+   * 这也是 TRSS 上报事件时认的字段（见 lib/bot.js 的 adapter_id / adapter_name）。
+   *
+   * 不用 redis 的计数 key 当名单：那是历史累计，账号停用了也不会消失。
+   */
+  #isBotAccount(v) {
+    return !!v && typeof v === 'object' && !!v.adapter
+  }
+
+  async #getBotList() {
+    const uins = []
+    const push = (v) => {
+      const uin = String(v ?? '').trim()
+      if (uin && !uins.includes(uin)) uins.push(uin)
+    }
+
+    if (Array.isArray(Bot?.uin)) Bot.uin.forEach(push)
+    else if (Bot?.uin) push(Bot.uin)
+
+    // 补上只在 bots 里、没进 uin 的账号
+    for (const [key, value] of Object.entries(Bot?.bots ?? {})) {
+      if (this.#isBotAccount(value)) push(key)
+    }
+
+    return uins.map((uin) => {
+      const bot = Bot?.bots?.[uin] ?? (String(Bot?.uin) === uin ? Bot : null)
+      return {
+        uin,
+        nickname: typeof bot?.nickname === 'string' ? bot.nickname : '',
+        /** 适配器名，多适配器混跑时用来区分账号来源 */
+        adapter: typeof bot?.adapter?.name === 'string' ? bot.adapter.name : '',
+      }
+    })
+  }
+
+  /** 各 Bot 账号的今日 / 累计收发量 */
+  async getBotStat() {
+    const bots = await this.#getBotList()
+    if (bots.length === 0) {
+      return []
+    }
+    const day = moment().format('YYYY:MM:DD')
+    const keys = []
+    for (const {uin} of bots) {
+      for (const scope of [day, 'total']) {
+        keys.push(`Yz:count:receive:msg:bot:${uin}:${scope}`)
+        keys.push(`Yz:count:send:msg:bot:${uin}:${scope}`)
+      }
+    }
+
+    const values = await this.#mget(keys)
+    return bots.map((bot, idx) => {
+      const at = idx * 4
+      return {
+        uin: bot.uin,
+        nickname: bot.nickname,
+        adapter: bot.adapter,
+        today: {receive: values[at], send: values[at + 1]},
+        total: {receive: values[at + 2], send: values[at + 3]},
+      }
+    })
+  }
+}

@@ -1,1 +1,1 @@
-import{_ as _sfc_main}from"./DetailModal.vue_vue_type_script_setup_true_lang.js";import"./index19.js";import"./index.js";import"./useWindowSizeFn.js";import"./FullscreenOutlined.js";import"./index31.js";import"./data.js";export{_sfc_main as default};
+import{_ as e}from"./DetailModal.vue_vue_type_script_setup_true_lang.js";import"./index19.js";import"./index.js";import"./useWindowSizeFn.js";import"./FullscreenOutlined.js";import"./index31.js";import"./data.js";export{e as default};

@@ -7,8 +7,10 @@ const pluginsStoreMenu = {
   component: '/guoba/plugins/index',
   meta: {
     title: '插件管理',
-    // icon: 'uil:store',
-    icon: 'clarity:plugin-line',
+    // 面板自身的菜单统一用 ant-design 图标集：前端已内置（icons/offline.ts），
+    // 不走 iconify 公共 API，离线可用且能跟随菜单选中色。
+    // 插件自己声明的 icon 仍按插件作者写的解析，不在此限。
+    icon: 'ant-design:appstore-outlined',
   },
 }
 
@@ -18,7 +20,7 @@ const pluginsIndexMenu = {
   component: '/guoba/plugins/index',
   meta: {
     title: '插件列表',
-    icon: 'ic:round-view-list',
+    icon: 'ant-design:unordered-list-outlined',
   },
 }
 
@@ -38,7 +40,7 @@ export async function usePluginsMenu() {
       component: `/guoba/plugins/plugin-detail/index`,
       meta: {
         title: value.pluginInfo?.title ?? name,
-        icon: value.pluginInfo?.icon ?? 'clarity:plugin-line',
+        icon: value.pluginInfo?.icon ?? 'ant-design:appstore-outlined',
         ignoreRoute: true,
       },
       guobaMeta: {
@@ -74,9 +76,7 @@ export async function usePluginsMenu() {
         component: '/guoba/plugins/index',
         meta: {
           title: '插件配置',
-          // icon: 'clarity:plugin-line',
-          // icon: 'arcticons:game-plugins',
-          icon: 'ion:settings-outline',
+          icon: 'ant-design:tool-outlined',
         },
         // 重定向到
         redirect: pluginsIndexMenu.path,
@@ -97,7 +97,7 @@ const miaoMenu = {
   component: '/guoba/plugins/extra-config/miao-plugin/index',
   meta: {
     title: '喵喵帮助',
-    icon: 'twemoji:heart-with-ribbon',
+    icon: 'ant-design:heart-outlined',
   },
 }
 

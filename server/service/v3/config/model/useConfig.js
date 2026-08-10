@@ -1,6 +1,9 @@
 // todo adapter
+import fs from 'fs'
+import path from 'path'
 import loader from '../../../../../../../lib/plugins/loader.js'
 import {hasGenshin, isTRSS} from '#guoba.adapter'
+import {_paths} from '#guoba.platform'
 
 const CfgAdapter = await (() => {
   if (isTRSS) {
@@ -11,6 +14,101 @@ const CfgAdapter = await (() => {
 })()
 
 const addGroupPromptProps = CfgAdapter['addGroupPromptProps']
+
+// 只有存在 db.yaml 的版本才显示数据库配置卡片
+const hasDbConfig = fs.existsSync(path.join(_paths.root, '/config/config/db.yaml'))
+
+/**
+ * 数据库（Sequelize）配置，对应 config/config/db.yaml。
+ * 该配置由 `new Sequelize(cfg.db)` 直接消费（见 plugins/genshin/model/db/BaseModel.js），
+ * 所以字段名必须与 Sequelize 的构造参数保持一致。
+ */
+const databaseConfig = {
+  key: 'system.db',
+  title: '数据库配置',
+  desc: '机器人数据存储，默认使用SQLite，修改后需重启生效',
+  schemas: [
+    {
+      field: 'dialect',
+      label: '数据库类型',
+      required: true,
+      bottomHelpMessage: '默认SQLite，无需额外部署。改用其他类型需自行安装对应驱动',
+      component: 'Select',
+      componentProps: {
+        options: [
+          {label: 'SQLite', value: 'sqlite'},
+          {label: 'MySQL', value: 'mysql'},
+          {label: 'MariaDB', value: 'mariadb'},
+          {label: 'PostgreSQL', value: 'postgres'},
+          {label: 'SQL Server', value: 'mssql'},
+          {label: 'DB2', value: 'db2'},
+        ],
+        placeholder: '请选择数据库类型',
+      },
+    },
+    {
+      field: 'storage',
+      label: 'SQLite文件路径',
+      bottomHelpMessage: '仅SQLite使用，相对于Yunzai根目录。改动前请先备份原文件',
+      component: 'Input',
+      componentProps: {
+        placeholder: 'data/db/data.db',
+      },
+    },
+    {
+      label: '以下仅在使用 MySQL 等外部数据库时需要填写',
+      component: 'Divider',
+    },
+    {
+      field: 'host',
+      label: '数据库地址',
+      component: 'Input',
+      componentProps: {
+        placeholder: '127.0.0.1',
+      },
+    },
+    {
+      field: 'port',
+      label: '数据库端口',
+      component: 'InputNumber',
+      componentProps: {
+        placeholder: 'MySQL默认3306，PostgreSQL默认5432',
+        min: 1,
+        max: 65535,
+      },
+    },
+    {
+      field: 'database',
+      label: '数据库名',
+      component: 'Input',
+      componentProps: {
+        placeholder: '请输入数据库名',
+      },
+    },
+    {
+      field: 'username',
+      label: '用户名',
+      component: 'Input',
+      componentProps: {
+        placeholder: '请输入用户名',
+      },
+    },
+    {
+      field: 'password',
+      label: '密码',
+      component: 'InputPassword',
+      componentProps: {
+        placeholder: '请输入密码',
+      },
+    },
+    {
+      field: 'logging',
+      label: 'SQL日志',
+      bottomHelpMessage: '开启后会把每条SQL打进日志，排查问题时再开',
+      component: 'Switch',
+    },
+  ],
+}
 
 // 基础配置
 const baseConfig = {
@@ -143,10 +241,22 @@ const baseConfig = {
           component: 'InputNumber',
           componentProps: {
             placeholder: '请输入Redis数据库',
+            min: 0,
+            max: 15,
+          },
+        },
+        {
+          field: 'path',
+          label: 'Redis命令路径',
+          bottomHelpMessage: '本机未启动Redis时，Yunzai会用它拉起redis-server。已用外部Redis可留空',
+          component: 'Input',
+          componentProps: {
+            placeholder: 'redis-server',
           },
         },
       ],
     },
+    ...(hasDbConfig ? [databaseConfig] : []),
   ],
 }
 
@@ -430,6 +540,7 @@ export const configFile = {
   'system.redis': '/config/config/redis.yaml',
   'system.other': '/config/config/other.yaml',
   'system.server': '/config/config/server.yaml',
+  'system.db': '/config/config/db.yaml',
 
   'genshin.gacha': '/plugins/genshin/config/gacha.set.yaml',
   'genshin.mys.pubCk': '/plugins/genshin/config/mys.pubCk.yaml',

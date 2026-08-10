@@ -1,1 +1,1 @@
-const _imports_0="/guoba-plugin-mock-root/assets/illustration.svg";export{_imports_0 as _};
+const o="/guoba-plugin-mock-root/assets/illustration.svg";export{o as _};

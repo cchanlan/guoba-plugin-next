@@ -1,3 +1,4 @@
+import fs from 'fs'
 import path from 'path'
 import {pluginName} from './package.js'
 
@@ -12,7 +13,9 @@ function initPaths() {
   // Guoba插件根目录
   const pluginRoot = path.join(_path, 'plugins', pluginName)
   // Guoba静态资源路径
-  const staticPath = path.join(pluginRoot, 'server/static')
+  // 新版前端（web/ 目录构建产物）输出到 server/static-next，
+  // 存在则优先使用；删掉该目录即可回退到旧版 server/static。
+  const staticPath = resolveStaticPath(pluginRoot)
   // 插件资源目录
   const pluginResources = path.join(pluginRoot, 'resources')
 
@@ -30,4 +33,16 @@ function initPaths() {
       realMountPrefix: "/guoba-plugin-mock-root"
     },
   }
+}
+
+/**
+ * 选择前端静态目录。
+ * 只有当 static-next 里确实有 index.html 时才启用，避免半成品目录导致白屏。
+ */
+function resolveStaticPath(pluginRoot) {
+  const next = path.join(pluginRoot, 'server/static-next')
+  if (fs.existsSync(path.join(next, 'index.html'))) {
+    return next
+  }
+  return path.join(pluginRoot, 'server/static')
 }

@@ -27,6 +27,11 @@ export default class HelperController extends ApiController {
     // 此时另一方启动的锅巴可以尝试调用此接口，来关闭当前的端口占用
     // 安全性：仅限 localhost 访问
     this.delete('/release_port', this.tryReleasePort)
+    // 天气城市的读取与切换
+    this.get('/city', this.getCityInfo)
+    this.post('/city', this.setCity)
+    // 城市候选（供前端搜索选择）
+    this.get('/city/options', this.getCityOptions)
   }
 
   transitRequest(req, res) {
@@ -35,6 +40,29 @@ export default class HelperController extends ApiController {
 
   getCity() {
     return cfg.get('base.city')
+  }
+
+  /** 当前配置的城市 */
+  getCityInfo() {
+    return Result.ok({city: this.getCity()})
+  }
+
+  /** 切换城市。缓存 key 里带城市名，换了城市自然命中不同 key，无需手动清理 */
+  setCity(req) {
+    const city = String(req.body?.city ?? '').trim()
+    if (!city) {
+      return Result.error('城市不能为空', 400)
+    }
+    if (!this.helperService.isCitySupported(city)) {
+      return Result.error(`城市 ${city} 不存在或不支持`, 400)
+    }
+    cfg.set('base.city', city)
+    return Result.ok({city})
+  }
+
+  /** 全部可选城市名，前端本地搜索 */
+  getCityOptions() {
+    return Result.ok(this.helperService.getCityNames())
   }
 
   async getCityWeather() {

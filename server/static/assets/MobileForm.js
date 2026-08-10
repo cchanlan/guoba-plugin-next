@@ -1,1 +1,1 @@
-import{_ as _sfc_main}from"./MobileForm.vue_vue_type_script_setup_true_lang.js";import"./index.js";import"./index24.js";import"./useFormItem.js";import"./LoginFormTitle.vue_vue_type_script_setup_true_lang.js";export{_sfc_main as default};
+import{_ as e}from"./MobileForm.vue_vue_type_script_setup_true_lang.js";import"./index.js";import"./index24.js";import"./useFormItem.js";import"./LoginFormTitle.vue_vue_type_script_setup_true_lang.js";export{e as default};

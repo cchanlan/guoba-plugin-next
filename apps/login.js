@@ -15,9 +15,46 @@ export class GuobaLogin extends plugin {
         {
           reg: '^#?锅巴(登录|登陆)$',
           fnc: 'login'
+        },
+        {
+          // 网页上点了「聊天登录」后，发这个即可直接进面板；同时有多个请求时可带短码
+          reg: '^#?锅巴确认(登录|登陆)\\s*([A-Za-z0-9]{4})?$',
+          fnc: 'confirmLogin'
         }
       ]
     }, e)
+  }
+
+  async confirmLogin () {
+    if (!this.e.isMaster) return false
+
+    const code = this.e.msg.match(/([A-Za-z0-9]{4})\s*$/)?.[1]
+    let result
+    try {
+      result = await this.loginService.confirmLogin(this.e.user_id, code)
+    } catch (err) {
+      logger.error(err)
+      return this.reply('确认登录失败，请查看控制台日志。')
+    }
+
+    if (result.ok) {
+      return this.reply(`已确认登录（${result.code}）~\n来自 ${result.ip}，网页会自动进入面板。`)
+    }
+    switch (result.reason) {
+      case 'none':
+        return this.reply('当前没有等待确认的登录请求，请先在网页上点击“聊天登录”。')
+      case 'multi':
+        return this.reply(
+          `有 ${result.codes.length} 个登录请求在等待确认：${result.codes.join('、')}\n`
+          + '请发送“#锅巴确认登录 短码”指定其中一个。'
+        )
+      case 'code':
+        return this.reply(
+          `没找到短码为 ${code} 的登录请求。\n当前等待确认的：${result.codes.join('、')}`
+        )
+      default:
+        return this.reply('确认登录失败，请重试。')
+    }
   }
 
   async login () {
@@ -37,21 +74,31 @@ export class GuobaLogin extends plugin {
     const { custom, local, remote } = webAddress
     const message = ['欢迎回来主人~\n这是您的登录地址：']
 
+    // 文案与网址分条发送，方便手机端长按复制
+    const pushAddress = (title, list) => {
+      message.push(title)
+      if (list.length > 0) {
+        message.push(...list)
+      } else {
+        message.push('获取失败……')
+      }
+    }
+
     if (onlyCustomAddress) {
       if (custom && custom.length > 0) {
-        message.push('自定义地址：\n' + custom.join('\n'))
+        pushAddress('自定义地址：', custom)
       } else {
         message.push('当前启用了“仅发送自定义地址”，但未配置自定义地址。')
       }
     } else {
       if (custom && custom.length > 0) {
-        message.push('自定义地址：\n' + custom.join('\n'))
+        pushAddress('自定义地址：', custom)
       }
       if (local) {
-        message.push('内网地址：\n' + (local.length > 0 ? local.join('\n') : '获取失败……'))
+        pushAddress('内网地址：', local)
       }
       if (remote) {
-        message.push('外网地址：\n' + (remote.length > 0 ? remote.join('\n') : '获取失败……'))
+        pushAddress('外网地址：', remote)
       }
     }
 

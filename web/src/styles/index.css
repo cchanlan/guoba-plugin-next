@@ -1,0 +1,259 @@
+/* ---------------- 基础重置 ---------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 主题变量：供自定义样式使用，antd 组件自身由 ConfigProvider 控制 */
+:root {
+  --g-brand: #d19f56;
+  --g-brand-soft: rgba(209, 159, 86, 0.14);
+}
+
+html[data-theme='dark'] {
+  --g-bg: #0d1017;
+  --g-bg-card: #181c25;
+  --g-bg-elevated: #1e2430;
+  --g-bg-soft: #1c222d;
+  --g-border: #2a3140;
+  --g-danger: #d9614c;
+  --g-text: rgba(255, 255, 255, 0.88);
+  --g-text-sub: rgba(255, 255, 255, 0.6);
+  --g-text-dim: rgba(255, 255, 255, 0.4);
+  --g-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  color-scheme: dark;
+}
+
+html[data-theme='light'] {
+  --g-bg: #f4f6fa;
+  --g-bg-card: #ffffff;
+  --g-bg-elevated: #ffffff;
+  --g-bg-soft: #f5f7fa;
+  --g-border: #e2e6ee;
+  --g-danger: #d9614c;
+  --g-text: rgba(0, 0, 0, 0.88);
+  --g-text-sub: rgba(0, 0, 0, 0.6);
+  --g-text-dim: rgba(0, 0, 0, 0.4);
+  --g-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+  color-scheme: light;
+}
+
+/* ---------------- 滚动条 ---------------- */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--g-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--g-brand);
+}
+
+/* ---------------- 通用工具类 ---------------- */
+
+.g-page {
+  padding: 20px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+/* ---------------- 窄屏适配 ---------------- */
+
+@media (max-width: 768px) {
+  .g-page {
+    padding: 12px;
+  }
+
+  .g-page-title {
+    font-size: 17px;
+  }
+
+  /* 表单在窄屏改为上下排布，label 不再占一列挤压控件 */
+  .ant-form-horizontal .ant-form-item-label {
+    padding-bottom: 2px !important;
+  }
+
+  /* 弹窗留出左右边距，不要贴边 */
+  .ant-modal {
+    max-width: calc(100vw - 24px);
+    margin: 8px auto;
+  }
+
+  /* 宽表格改为横向滚动，避免整页被撑开 */
+  .ant-table-wrapper {
+    overflow-x: auto;
+  }
+
+  /* 抽屉在窄屏几乎全屏 */
+  .ant-drawer-content-wrapper {
+    max-width: 100vw;
+  }
+}
+
+.g-page-title {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--g-text);
+}
+
+.g-page-desc {
+  margin: 0 0 20px;
+  font-size: 13px;
+  color: var(--g-text-sub);
+}
+
+.g-flex {
+  display: flex;
+  align-items: center;
+}
+
+.g-flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.g-gap-8 {
+  gap: 8px;
+}
+
+.g-gap-12 {
+  gap: 12px;
+}
+
+/* 页面切换动画 */
+.g-fade-enter-active,
+.g-fade-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.g-fade-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.g-fade-leave-to {
+  opacity: 0;
+}
+
+/* 让 antd 的表单说明文字更克制一些 */
+.ant-form-item-extra {
+  font-size: 12px;
+  line-height: 1.6;
+  margin-top: 4px;
+}
+
+/* ant-design-vue 4.2.6 的 Table 没有暴露 headerBg 组件 token，只能走 CSS */
+.ant-table-thead > tr > th.ant-table-cell {
+  background: var(--g-bg-soft);
+}
+
+/* markdown 渲染区域 */
+.g-markdown {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--g-text);
+  word-break: break-word;
+}
+
+.g-markdown h1,
+.g-markdown h2,
+.g-markdown h3 {
+  margin: 20px 0 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.g-markdown h1 {
+  font-size: 22px;
+}
+
+.g-markdown h2 {
+  font-size: 18px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--g-border);
+}
+
+.g-markdown h3 {
+  font-size: 16px;
+}
+
+.g-markdown p {
+  margin: 10px 0;
+}
+
+.g-markdown img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+.g-markdown pre {
+  padding: 12px 14px;
+  overflow: auto;
+  background: var(--g-bg);
+  border: 1px solid var(--g-border);
+  border-radius: 8px;
+}
+
+.g-markdown code {
+  padding: 1px 5px;
+  font-size: 0.9em;
+  background: var(--g-brand-soft);
+  border-radius: 4px;
+}
+
+.g-markdown pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.g-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+}
+
+.g-markdown th,
+.g-markdown td {
+  padding: 8px 10px;
+  border: 1px solid var(--g-border);
+  text-align: left;
+}
+
+.g-markdown blockquote {
+  margin: 12px 0;
+  padding: 8px 14px;
+  border-left: 3px solid var(--g-brand);
+  background: var(--g-brand-soft);
+  border-radius: 0 6px 6px 0;
+}
+
+.g-markdown a {
+  color: var(--g-brand);
+}

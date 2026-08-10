@@ -1,0 +1,73 @@
+
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <!-- 后端 ConfigPreload 会把注入脚本替换到下面这个标记处，切勿删除 -->
+    <!--#GUO{PRELOAD_JS}BA#-->
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>锅巴面板</title>
+    <!-- 用绝对路径，避免自定义挂载路径下相对解析出错 -->
+    <link rel="icon" href="/guoba-plugin-mock-root/favicon.ico" />
+    <style>
+      html,
+      body,
+      #app {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+          'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+        background: #10131a;
+      }
+      /* 首屏 loading，避免白屏 */
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        align-items: center;
+        justify-content: center;
+        background: #10131a;
+        color: #d19f56;
+        transition: opacity 0.3s;
+      }
+      #boot .ring {
+        width: 42px;
+        height: 42px;
+        border: 3px solid rgba(209, 159, 86, 0.25);
+        border-top-color: #d19f56;
+        border-radius: 50%;
+        animation: boot-spin 0.8s linear infinite;
+      }
+      #boot .txt {
+        font-size: 14px;
+        letter-spacing: 2px;
+        opacity: 0.75;
+      }
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+    <script type="module" crossorigin src="/guoba-plugin-mock-root/assets/index-BHFhlIaF.js"></script>
+    <link rel="modulepreload" crossorigin href="/guoba-plugin-mock-root/assets/rolldown-runtime-hePW80VL.js">
+    <link rel="modulepreload" crossorigin href="/guoba-plugin-mock-root/assets/antd-Bye0r4lN.js">
+    <link rel="modulepreload" crossorigin href="/guoba-plugin-mock-root/assets/vue-D7S8k5Tp.js">
+    <link rel="modulepreload" crossorigin href="/guoba-plugin-mock-root/assets/vendor-D_oNwDu0.js">
+    <link rel="modulepreload" crossorigin href="/guoba-plugin-mock-root/assets/api-IBV2ifcd.js">
+    <link rel="stylesheet" crossorigin href="/guoba-plugin-mock-root/assets/index-BCY81QEO.css">
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="boot">
+      <div class="ring"></div>
+      <div class="txt">锅巴面板加载中</div>
+    </div>
+  </body>
+</html>

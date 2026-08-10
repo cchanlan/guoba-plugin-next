@@ -1,1 +1,1 @@
-import{_ as _sfc_main}from"./LoadGitee.vue_vue_type_script_setup_true_lang.js";import"./index.js";import"./MarkdownViewer.vue_vue_type_script_setup_true_lang.js";import"./onMountedOrActivated.js";export{_sfc_main as default};
+import{_ as e}from"./LoadGitee.vue_vue_type_script_setup_true_lang.js";import"./index.js";import"./MarkdownViewer.vue_vue_type_script_setup_true_lang.js";import"./onMountedOrActivated.js";export{e as default};

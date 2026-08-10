@@ -18,6 +18,23 @@ export class LoginController extends ApiController {
     // 前端验证码登录
     this.post('/login/code/request', this.codeLoginRequest)
     this.post('/login/code/check', this.codeLoginCheck)
+    // 聊天确认登录：页面发起请求，主人发「#锅巴确认登录」批准
+    this.post('/login/confirm/request', this.confirmRequest)
+    this.post('/login/confirm/poll', this.confirmPoll)
+  }
+
+  async confirmRequest(req) {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+      || req.socket?.remoteAddress
+      || ''
+    const data = await this.loginService.createConfirmRequest(ip)
+    logger.mark(`[Guoba] 收到登录确认请求(${data.code})，来自 ${ip || '未知IP'}，发送“#锅巴确认登录”即可登录`)
+    return Result.ok(data)
+  }
+
+  async confirmPoll(req) {
+    const {id} = req.body
+    return Result.ok(await this.loginService.pollConfirmRequest(id))
   }
 
   async login(req) {
@@ -55,7 +72,13 @@ export class LoginController extends ApiController {
       logger.info('# 验证码五分钟内有效且失效前不会再次打印，请尽快输入 #')
       logger.info('# ' + chalk.red('若非本人操作请忽略并考虑是否泄露了登录地址') + '         #')
       logger.info('#'.repeat(54))
-      return Result.ok({}, 'code generated')
+      const pushed = await this.loginService.sendCodeToMaster(code)
+      if (pushed > 0) {
+        logger.mark(`[Guoba] 验证码已私聊发送给 ${pushed} 位主人`)
+      } else {
+        logger.mark('[Guoba] 验证码未能私发给主人，请从控制台获取')
+      }
+      return Result.ok({pushed}, 'code generated')
     }
     return Result.error('code generate failed')
   }

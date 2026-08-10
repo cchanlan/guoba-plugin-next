@@ -12,3 +12,5 @@ export const PluginsMap = new Map()
 export const GuobaSupportMap = new Map()
 /** git仓库工具类 */
 export const GitRepoMap = new Map()
+/** 插件注册的自定义页面，key 为页面 id */
+export const CustomPagesMap = new Map()

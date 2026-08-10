@@ -14,6 +14,15 @@ export class OicqController extends ApiController {
     this.get('/pick/user', this.pickUser)
     this.get('/pick/group', this.pickGroup)
 
+    this.post('/send-msg', this.sendMsg)
+    // 群发是后台任务，起任务后靠轮询查进度，可中途叫停
+    this.post('/broadcast', this.startBroadcast)
+    this.get('/broadcast/:taskId', this.getBroadcast)
+    this.post('/broadcast/:taskId/cancel', this.cancelBroadcast)
+    // 均为不可逆操作，用 delete 语义并要求前端二次确认
+    this.delete('/friend', this.deleteFriend)
+    this.delete('/group', this.quitGroup)
+
     // avatarUrl: `https://q1.qlogo.cn/g?b=qq&s=${0}&nk=${qq}`,
     this.get('/friend/list', this.queryFriendList)
     this.get('/friend/count', () => Result.ok(this.oicqService.getFriendCount()))
@@ -29,6 +38,48 @@ export class OicqController extends ApiController {
     }
     let user = await this.oicqService.pickUser(qq)
     return Result.ok(user)
+  }
+
+  /** 给好友或群发消息 */
+  async sendMsg(req) {
+    let {type, id, msg, botId} = req.body ?? {}
+    if (!id) {
+      return Result.error(`参数 id 不能为空`)
+    }
+    let data = await this.oicqService.sendMsg(type, id, msg, botId)
+    return Result.ok(data, '发送成功')
+  }
+
+  /** 删除好友（不可逆） */
+  async deleteFriend(req) {
+    let {userId, botId} = req.body ?? {}
+    let data = await this.oicqService.deleteFriend(userId, botId)
+    return Result.ok(data, '已删除该好友')
+  }
+
+  /** 起一个群发任务，立刻返回任务信息，实际发送在后台进行 */
+  async startBroadcast(req) {
+    let {type, targets, msg, interval} = req.body ?? {}
+    let task = this.oicqService.startBroadcast(type, targets, msg, interval)
+    return Result.ok(task, `已开始群发，共 ${task.total} 个目标`)
+  }
+
+  /** 查询群发进度 */
+  async getBroadcast(req) {
+    return Result.ok(this.oicqService.getBroadcastTask(req.params.taskId))
+  }
+
+  /** 停止群发，已发出的收不回来，只是不再往下发 */
+  async cancelBroadcast(req) {
+    let task = this.oicqService.cancelBroadcast(req.params.taskId)
+    return Result.ok(task, '已请求停止群发')
+  }
+
+  /** 退出群聊（不可逆） */
+  async quitGroup(req) {
+    let {groupId, isDismiss, botId} = req.body ?? {}
+    let data = await this.oicqService.quitGroup(groupId, isDismiss, botId)
+    return Result.ok(data, data.isDismiss ? '已解散该群' : '已退出该群')
   }
 
   /** 获取一个QQ群组信息 */
