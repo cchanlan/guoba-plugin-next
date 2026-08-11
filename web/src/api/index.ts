@@ -462,6 +462,13 @@ export const apiDbDeleteRow = (body: { path: string; table: string; rowid: numbe
 
 /* ---------------- 沙盒 ---------------- */
 
+/**
+ * 模拟的目标平台。
+ * default 是普通适配器（OneBot 等），按钮与 markdown 段会被忽略；
+ * qqbot 假装成 QQ 官方 Bot，这两类段会渲染出来，插件里判断 QQBot 的分支也会走通。
+ */
+export type SandboxPlatform = 'default' | 'qqbot'
+
 /** 沙盒会话场景。id 全用字符串存，适配器不一定是数字 QQ 号 */
 export interface SandboxScene {
   /** 用哪个账号的身份收这条消息，空则取第一个在线账号 */
@@ -478,12 +485,25 @@ export interface SandboxScene {
   isAdmin: boolean
   /** 群聊里是否在消息前加一个 at 机器人 */
   atBot: boolean
+  platform: SandboxPlatform
 }
 
 export interface SandboxBot {
   uin: string
   nickname: string
   adapter: string
+}
+
+/** 回复里的一个按钮 */
+export interface SandboxButton {
+  text: string
+  /** 点击即以该文本触发指令 */
+  callback?: string
+  /** 点击只填进输入框，等用户补完参数再发 */
+  input?: string
+  link?: string
+  /** 官方按钮限定了可点用户，沙盒里不校验，只做标注 */
+  limited?: boolean
 }
 
 /** 回复里的一个消息段，字段见 server/service/both/SandboxService.js 的 #normalizeMsg */
@@ -513,7 +533,13 @@ export interface SandboxSegment {
   }>
   /** 转发层数超限，未继续展开 */
   truncated?: boolean
-  /** 无法还原的段（button/markdown 等）的原始 JSON */
+  /** 按钮段，一个元素是一行 */
+  rows?: SandboxButton[][]
+  /** markdown 段的正文 */
+  content?: string
+  /** 当前模拟的平台不渲染这个段（按钮/markdown 发到 OneBot 那边就是被丢掉的） */
+  ignored?: boolean
+  /** 无法还原的段的原始 JSON */
   raw?: string
 }
 

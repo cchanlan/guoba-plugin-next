@@ -7,6 +7,19 @@ const ADAPTER_ID = 'guoba-sandbox'
 const ADAPTER_NAME = '锅巴沙盒'
 
 /**
+ * 模拟的目标平台。
+ *
+ * 插件在 TRSS 上一般是无条件带上 button / markdown 段的，能不能真显示出来取决于目标平台：
+ * OneBot 那边这些段会被适配器直接丢掉，只有 QQ 官方 Bot 才渲染。另有不少插件读
+ * `e.bot.adapter.name` 决定发什么（各插件的 QQBot 分支），所以切平台时连适配器身份一起换，
+ * 两种效果才都预览得准。rich 为 false 的平台，按钮与 markdown 段会标上 ignored。
+ */
+const PLATFORMS = {
+  default: {id: ADAPTER_ID, name: ADAPTER_NAME, rich: false},
+  qqbot: {id: 'QQBot', name: 'QQBot', rich: true},
+}
+
+/**
  * deal() 返回后再等这么久收尾。
  *
  * 插件里 `e.reply()` 前面挂了 await 的情况 deal() 自己会等，但也有不少插件把回复丢进
@@ -34,6 +47,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 /** 剥掉日志字符串里的 ANSI 颜色码，e.logFnc 是带色的 */
 const stripAnsi = (str) => String(str ?? '').replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
 
+const isHttp = (v) => typeof v === 'string' && /^https?:\/\//.test(v)
+
 /**
  * 沙盒。
  *
@@ -58,6 +73,8 @@ export default class SandboxService extends Service {
   #msgSeq = 0
   /** 同一时刻只跑一条，避免两次执行的回复串在一起 */
   #running = false
+  /** 本次执行模拟的平台是否渲染按钮/markdown，靠 #running 的串行保证不串场 */
+  #rich = false
 
   constructor(guobaApp) {
     super(guobaApp)
@@ -122,6 +139,7 @@ export default class SandboxService extends Service {
         isOwner: false,
         isAdmin: false,
         atBot: true,
+        platform: 'default',
       },
     }
   }
@@ -259,6 +277,7 @@ export default class SandboxService extends Service {
 
     const sc = this.#normalizeScene(scene)
     const e = this.#buildEvent(sc, message)
+    this.#rich = (PLATFORMS[sc.platform] ?? PLATFORMS.default).rich
 
     // 黑白名单在 deal() 里是静默 return 的，先自己判一次好给出原因
     if (!PluginsLoader.checkBlack(e)) {
@@ -371,6 +390,7 @@ export default class SandboxService extends Service {
       isOwner: !!scene.isOwner,
       isAdmin: !!scene.isAdmin,
       atBot: !!scene.atBot,
+      platform: Object.hasOwn(PLATFORMS, scene.platform) ? scene.platform : 'default',
     }
   }
 
@@ -411,6 +431,7 @@ export default class SandboxService extends Service {
    */
   #buildEvent(sc, message) {
     const self = this
+    const platform = PLATFORMS[sc.platform] ?? PLATFORMS.default
     const raw = message.map((i) => (i.type === 'text' ? i.text : `[${i.type}]`)).join('')
     const messageId = `sandbox-${Date.now().toString(36)}-${++this.#msgSeq}`
 
@@ -471,15 +492,15 @@ export default class SandboxService extends Service {
         card: sc.isGroup ? (sc.card || sc.nickname) : undefined,
         role: sc.isGroup ? member.info.role : undefined,
       },
-      adapter_id: ADAPTER_ID,
-      adapter_name: ADAPTER_NAME,
+      adapter_id: platform.id,
+      adapter_name: platform.name,
       /**
        * deal() 里只会把 isMaster 置 true、不会置 false（loader.js dealEvent），
        * 所以这里预设 true 能存活，勾掉主人身份时也不会被真实 master 配置反向覆盖成 true
        * —— 除非沙盒 QQ 号本身就是配置里的主人，那属实是主人，符合预期。
        */
       isMaster: sc.isMaster,
-      bot: this.#makeBotProxy(sc, friend, group, member),
+      bot: this.#makeBotProxy(sc, friend, group, member, platform),
       friend,
       reply: push('reply'),
       /** 面板自己用的标记，插件里判断 e.isSandbox 可以跳过高危操作 */
@@ -525,7 +546,7 @@ export default class SandboxService extends Service {
    * .sendMsg()` 这种写法也能被截住。pick 到别的目标就是真的 —— 这是「只拦 e 上下文」的
    * 边界，页面上有说明。
    */
-  #makeBotProxy(sc, friend, group, member) {
+  #makeBotProxy(sc, friend, group, member, platform) {
     const real = Bot?.bots?.[sc.selfId] ?? Bot
     const sameUser = (id) => String(id) === String(sc.userId)
     const sameGroup = (id) => String(id) === String(sc.groupId)
@@ -536,7 +557,12 @@ export default class SandboxService extends Service {
       pickGroup: (id) => (sameGroup(id) ? group : real.pickGroup?.(id)),
       pickMember: (gid, uid) =>
         sameGroup(gid) && sameUser(uid) ? member : real.pickMember?.(gid, uid),
+      /** 插件普遍读 adapter.name 判平台，这里给模拟的那个，不是真实账号的 */
+      adapter: {id: platform.id, name: platform.name},
     }
+
+    // QQBot 适配器的 markdown 开关，插件会读它决定发不发 md（如 kkkkkk-10086 的 mkbutton）
+    if (platform.rich) overrides.config = {markdown: {type: 1}}
 
     return new Proxy(overrides, {
       get(target, prop) {
@@ -633,14 +659,72 @@ export default class SandboxService extends Service {
         out.push(await this.#nodeSeg(msg, depth))
         return
       case 'button':
+        out.push(this.#buttonSeg(msg))
+        return
       case 'markdown':
+        out.push(this.#markdownSeg(msg))
+        return
       case 'raw':
-        // 这几类没法在网页上还原成原样，原始数据丢给前端折叠显示
+        // 没法在网页上还原成原样，原始数据丢给前端折叠显示
         out.push({type, raw: this.#dump(msg)})
         return
       default:
         out.push({type: type || 'unknown', raw: this.#dump(msg)})
     }
+  }
+
+  /**
+   * markdown 段。原生模板（模板 id + params）的内容在 QQ 服务端，本地还原不出来，
+   * 只有 content 形式的能渲染，其余照旧摊原始数据。
+   */
+  #markdownSeg(msg) {
+    const data = msg.data
+    const content = typeof data === 'string' ? data : data?.content
+    const seg = {type: 'markdown'}
+    if (typeof content === 'string' && content) seg.content = content
+    else seg.raw = this.#dump(msg)
+    if (!this.#rich) seg.ignored = true
+    return seg
+  }
+
+  /**
+   * 按钮段。`segment.button(...行)` 的 data 就是参数列表，每个参数是一行、
+   * 行内是按钮数组（lib/modules/oicq/index.js），但也有插件直接传单个按钮对象，
+   * 这里一律拍成二维。认不出结构时保留原始 JSON，别让按钮悄悄消失。
+   */
+  #buttonSeg(msg) {
+    const rows = []
+    for (const row of Array.isArray(msg.data) ? msg.data : [msg.data]) {
+      if (!row) continue
+      const btns = []
+      for (const item of Array.isArray(row) ? row : [row]) {
+        const btn = this.#button(item)
+        if (btn) btns.push(btn)
+      }
+      if (btns.length) rows.push(btns)
+    }
+    const seg = {type: 'button', rows}
+    if (!rows.length) seg.raw = this.#dump(msg)
+    if (!this.#rich) seg.ignored = true
+    return seg
+  }
+
+  /**
+   * 单个按钮。字段各家写法不一，常见的都认一遍：
+   * callback 点击即以该文本触发指令，input 只填进输入框等用户补参数，link 是外链。
+   */
+  #button(item) {
+    if (!item || typeof item !== 'object') return null
+    const btn = {text: String(item.text ?? item.label ?? item.render_data?.label ?? '')}
+    // 官方 QQBot 的原始结构把动作塞在 action.data 里，是链接还是指令看内容判断
+    const act = item.action?.data
+    const callback = item.callback ?? item.data ?? (isHttp(act) ? null : act)
+    const link = item.link ?? item.url ?? (isHttp(act) ? act : null)
+    if (callback != null && typeof callback !== 'object') btn.callback = String(callback)
+    if (item.input != null) btn.input = String(item.input)
+    if (link != null) btn.link = String(link)
+    if (item.permission ?? item.action?.permission) btn.limited = true
+    return btn.text || btn.callback || btn.input || btn.link ? btn : null
   }
 
   /**
@@ -653,7 +737,7 @@ export default class SandboxService extends Service {
     const seg = {type, name: typeof msg.name === 'string' ? msg.name : ''}
     const src = msg.file ?? msg.url ?? msg.data
 
-    if (typeof src === 'string' && /^https?:\/\//.test(src)) {
+    if (isHttp(src)) {
       seg.url = src
       return seg
     }

@@ -6,7 +6,7 @@
  * 不经过任何适配器，所以不会真的发到 QQ 上。用来验证插件是否响应某句指令、
  * 回复长什么样，不用真去群里刷屏。
  */
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, provide, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
 import MsgSegment from './components/MsgSegment.vue'
@@ -17,6 +17,7 @@ import {
   apiSandboxSend,
   type SandboxBlocked,
   type SandboxBot,
+  type SandboxButton,
   type SandboxReply,
   type SandboxScene,
   type SandboxSegment,
@@ -57,6 +58,7 @@ const defaultScene: SandboxScene = {
   isOwner: false,
   isAdmin: false,
   atBot: true,
+  platform: 'default',
 }
 
 const scene = ref<SandboxScene>({ ...defaultScene })
@@ -73,6 +75,7 @@ const rulesOpen = ref(false)
 
 const boxEl = ref<HTMLElement>()
 const fileEl = ref<HTMLInputElement>()
+const inputEl = ref<any>(null)
 
 let seq = 0
 const nextId = () => `c${Date.now().toString(36)}-${++seq}`
@@ -125,24 +128,29 @@ watch(
 
 /* ---------------- 发送 ---------------- */
 
-async function send() {
+/** override 有值时发它、不动输入框（点 callback 按钮走这条） */
+async function send(override?: string) {
   if (sending.value) return
-  const content = text.value.trim()
-  if (!content && !images.value.length) return
+  const useInput = override === undefined
+  const content = (useInput ? text.value : override).trim()
+  const imgs = useInput ? [...images.value] : []
+  if (!content && !imgs.length) return
   if (!scene.value.userId) {
     message.warning('请先在场景配置里填写发送者 QQ')
     return
   }
 
   const outSegments: SandboxSegment[] = [
-    ...images.value.map((url) => ({ type: 'image', url })),
+    ...imgs.map((url) => ({ type: 'image', url })),
     ...(content ? [{ type: 'text', text: content }] : []),
   ]
   chat.value.push({ id: nextId(), role: 'user', time: Date.now(), segments: outSegments })
 
-  const payload = { scene: scene.value, text: content, images: [...images.value] }
-  text.value = ''
-  images.value = []
+  const payload = { scene: scene.value, text: content, images: imgs }
+  if (useInput) {
+    text.value = ''
+    images.value = []
+  }
   sending.value = true
   scrollToEnd()
 
@@ -183,6 +191,26 @@ function onEnter(e: KeyboardEvent) {
   e.preventDefault()
   send()
 }
+
+/* ---------------- 按钮 ---------------- */
+
+/**
+ * 回复里的按钮点击。link 交给浏览器，callback 直接当成一条新消息发出去，
+ * input 只填进输入框等用户补参数 —— 跟 QQ 官方 Bot 的按钮行为一致。
+ * 用 provide 传给 MsgSegment，转发消息里嵌套的按钮才能一并接上。
+ */
+function onButtonClick(btn: SandboxButton) {
+  if (btn.callback) {
+    send(btn.callback)
+    return
+  }
+  if (btn.input) {
+    text.value = btn.input
+    nextTick(() => inputEl.value?.focus())
+  }
+}
+
+provide('sandboxButtonClick', onButtonClick)
 
 /* ---------------- 图片 ---------------- */
 
@@ -256,6 +284,11 @@ function metaText(meta: NonNullable<ChatItem['meta']>) {
 
 const senderName = computed(() => scene.value.card || scene.value.nickname || '我')
 
+const platformTip =
+  '模拟目标平台：普通消息下按钮与 Markdown 段会被忽略（OneBot 等适配器的真实行为）；' +
+  '切到 Markdown / 按钮则假装成 QQ 官方 Bot，这两类段会渲染出来，' +
+  '插件里判断 e.bot.adapter.name === "QQBot" 的分支也会走通。'
+
 const currentBot = computed(() => {
   const bot = bots.value.find((b) => b.uin === String(scene.value.selfId))
   return bot?.nickname || bot?.uin || '未选择账号'
@@ -289,6 +322,13 @@ const currentBot = computed(() => {
         <a-radio-button :value="true">群聊</a-radio-button>
         <a-radio-button :value="false">私聊</a-radio-button>
       </a-radio-group>
+
+      <a-tooltip :title="platformTip">
+        <a-radio-group v-model:value="scene.platform" size="small" button-style="solid">
+          <a-radio-button value="default">普通消息</a-radio-button>
+          <a-radio-button value="qqbot">Markdown / 按钮</a-radio-button>
+        </a-radio-group>
+      </a-tooltip>
 
       <span class="g-sandbox-gap" />
 
@@ -363,6 +403,7 @@ const currentBot = computed(() => {
       </div>
 
       <a-textarea
+        ref="inputEl"
         v-model:value="text"
         placeholder="输入消息，Enter 发送，Shift+Enter 换行；可粘贴或选择图片…"
         :auto-size="{ minRows: 2, maxRows: 6 }"
@@ -389,7 +430,7 @@ const currentBot = computed(() => {
           size="small"
           :loading="sending"
           :disabled="!text.trim() && !images.length"
-          @click="send"
+          @click="send()"
         >
           <GIcon icon="ant-design:send-outlined" :size="13" />
           发送
