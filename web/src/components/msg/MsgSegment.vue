@@ -1,14 +1,20 @@
 <script setup lang="ts">
+/**
+ * 一个消息段的渲染。
+ *
+ * 沙盒与消息记录共用 —— 后端两边都走 `server/service/both/model/msgSegment.js`，
+ * 段结构完全一致。两页的差异通过 provide / inject 注入：资源地址怎么拼、按钮点了
+ * 干什么、引用的那条消息去哪儿查，都由页面决定。
+ */
 import { computed, inject, ref } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import GIcon from '@/components/GIcon.vue'
-import { sandboxAssetUrl, type SandboxButton, type SandboxSegment } from '@/api'
-import { useAuthStore } from '@/stores/auth'
+import type { MsgBtn, MsgSeg } from '@/api'
 
-const props = defineProps<{ seg: SandboxSegment }>()
+const props = defineProps<{ seg: MsgSeg }>()
 
-const auth = useAuthStore()
+const emit = defineEmits<{ forward: [seg: MsgSeg] }>()
 
 /**
  * 缩略图尺寸，与样式里 .g-seg-img 的 max-width / .is-long 的 max-height 保持一致。
@@ -20,6 +26,9 @@ const IMG_MAX_H = 440
 
 const imgLong = ref(false)
 const imgPreview = ref(false)
+/** 直链失效后切服务端代理，再失败就只显示一行提示 */
+const viaProxy = ref(false)
+const imgFailed = ref(false)
 
 function onImgLoad(e: Event) {
   const img = e.target as HTMLImageElement
@@ -29,13 +38,44 @@ function onImgLoad(e: Event) {
   imgLong.value = (w * img.naturalHeight) / img.naturalWidth > IMG_MAX_H
 }
 
+/** 资源地址怎么拼由页面给：沙盒走 /sandbox/asset，消息记录走 /chat/asset */
+const assetUrl = inject<((assetId: string) => string) | null>('msgAssetUrl', null)
+/** QQ 直链的 rkey 会过期，页面给了代理地址就在加载失败后再试一次 */
+const proxyUrl = inject<((url: string) => string) | null>('msgProxyUrl', null)
 /** 按钮点击交给页面处理。用 inject 是为了让转发消息里嵌套的按钮也能拿到 */
-const onButton = inject<((btn: SandboxButton) => void) | null>('sandboxButtonClick', null)
+const onButton = inject<((btn: MsgBtn) => void) | null>('msgButtonClick', null)
+/** 引用的那条消息，能查到就显示「昵称：摘要」，查不到只标一下是引用 */
+const findReply = inject<((id: string) => { name: string; text: string } | null) | null>(
+  'msgReply',
+  null,
+)
+
+/** 资源地址：http 直链原样用，其余走后端资源接口 */
+const src = computed(() => {
+  const url = props.seg.url
+  if (url) return viaProxy.value && proxyUrl ? proxyUrl(url) : url
+  if (props.seg.assetId && assetUrl) return assetUrl(props.seg.assetId)
+  return ''
+})
+
+function onImgError() {
+  if (props.seg.url && proxyUrl && !viaProxy.value) {
+    viaProxy.value = true
+    return
+  }
+  imgFailed.value = true
+}
+
+const replyInfo = computed(() => {
+  const id = props.seg.id
+  if (!id || !findReply) return null
+  return findReply(id)
+})
 
 /** 三个动作字段都没有的按钮，在真实环境里点了也没反应，这里如实置灰 */
-const btnDead = (btn: SandboxButton) => !btn.callback && !btn.input && !btn.link
+const btnDead = (btn: MsgBtn) => !btn.callback && !btn.input && !btn.link
 
-function btnTip(btn: SandboxButton) {
+function btnTip(btn: MsgBtn) {
   if (btn.link) return `打开链接：${btn.link}`
   if (btn.callback) return `点击直接发送：${btn.callback}`
   if (btn.input) return `点击填入输入框：${btn.input}`
@@ -55,13 +95,6 @@ const mdHtml = computed(() => {
     ADD_ATTR: ['target', 'rel'],
     FORBID_TAGS: ['style', 'script', 'iframe', 'form', 'input'],
   })
-})
-
-/** 资源地址：http 直链原样用，其余走后端资源接口 */
-const src = computed(() => {
-  if (props.seg.url) return props.seg.url
-  if (props.seg.assetId) return sandboxAssetUrl(props.seg.assetId, auth.token)
-  return ''
 })
 
 const sizeText = computed(() => {
@@ -85,22 +118,36 @@ const fileIcon: Record<string, string> = {
 
   <span v-else-if="seg.type === 'at'" class="g-seg-at">@{{ seg.name || seg.qq }}</span>
 
-  <!-- 引用：沙盒里没有历史消息，只能标一下这是条引用回复 -->
+  <!-- 引用：查得到被引用的那条就显示摘要，否则只标一下 -->
   <span v-else-if="seg.type === 'reply'" class="g-seg-reply">
-    <GIcon icon="ant-design:message-outlined" :size="12" />
-    引用
+    <GIcon icon="ant-design:rollback-outlined" :size="12" />
+    <template v-if="replyInfo">
+      <span class="g-seg-reply-name">{{ replyInfo.name }}</span>
+      <span class="g-seg-reply-text">{{ replyInfo.text }}</span>
+    </template>
+    <span v-else>引用</span>
   </span>
 
   <span v-else-if="seg.type === 'face'" class="g-seg-face">[表情{{ seg.id }}]</span>
 
   <template v-else-if="seg.type === 'image'">
-    <span v-if="seg.error || seg.tooLarge" class="g-seg-bad">
+    <span v-if="seg.error || seg.tooLarge || imgFailed || !src" class="g-seg-bad">
       <GIcon icon="ant-design:picture-outlined" :size="13" />
-      {{ seg.tooLarge ? `图片过大，未加载${sizeText ? `（${sizeText}）` : ''}` : `图片读取失败：${seg.error}` }}
+      <template v-if="seg.tooLarge">
+        图片过大，未加载{{ sizeText ? `（${sizeText}）` : '' }}
+      </template>
+      <template v-else-if="imgFailed">图片加载失败，链接可能已过期</template>
+      <template v-else>图片读取失败{{ seg.error ? `：${seg.error}` : '' }}</template>
     </span>
     <template v-else>
       <span class="g-seg-img" :class="{ 'is-long': imgLong }" @click="imgPreview = true">
-        <img :src="src" :alt="seg.name || '图片'" loading="lazy" @load="onImgLoad" />
+        <img
+          :src="src"
+          :alt="seg.name || '图片'"
+          loading="lazy"
+          @load="onImgLoad"
+          @error="onImgError"
+        />
         <span v-if="imgLong" class="g-seg-img-more">长图 · 点击查看完整</span>
       </span>
       <!-- 预览层交给 antd，能缩放旋转，比新开标签页顺手；本体不占位 -->
@@ -194,19 +241,37 @@ const fileIcon: Record<string, string> = {
     </details>
   </template>
 
-  <!-- 转发消息：套一层卡片，逐条列出子消息 -->
-  <div v-else-if="seg.type === 'node'" class="g-seg-node">
-    <div class="g-seg-node-head">合并转发</div>
+  <!--
+    合并转发。插件发出来的（node）内容就在段里；真实消息里的（forward）只给一个 id，
+    内容在 QQ 服务端，点开时才去取，取回来由页面填进 seg.nodes。
+  -->
+  <div v-else-if="seg.type === 'node' || seg.type === 'forward'" class="g-seg-node">
+    <div class="g-seg-node-head">
+      <span>合并转发</span>
+      <button
+        v-if="seg.type === 'forward' && !seg.nodes"
+        type="button"
+        class="g-seg-node-open"
+        @click="emit('forward', seg)"
+      >
+        点击展开
+      </button>
+    </div>
     <div v-for="(node, i) in seg.nodes ?? []" :key="i" class="g-seg-node-item">
       <span class="g-seg-node-name">{{ node.nickname || node.userId || '未知' }}</span>
       <span class="g-seg-node-body">
-        <MsgSegment v-for="(sub, j) in node.segments" :key="j" :seg="sub" />
+        <MsgSegment
+          v-for="(sub, j) in node.segments"
+          :key="j"
+          :seg="sub"
+          @forward="emit('forward', $event)"
+        />
       </span>
     </div>
     <div v-if="seg.truncated" class="g-seg-node-more">层数过深，未继续展开</div>
   </div>
 
-  <!-- 按钮、markdown 之类没法还原的段，原始 JSON 折叠着放 -->
+  <!-- 没法还原的段，原始 JSON 折叠着放 -->
   <details v-else class="g-seg-raw">
     <summary>{{ seg.type }}</summary>
     <pre>{{ seg.raw ?? JSON.stringify(seg) }}</pre>
@@ -234,6 +299,19 @@ const fileIcon: Record<string, string> = {
   border-left: 2px solid var(--g-border);
   color: var(--g-text-dim);
   font-size: 12px;
+}
+
+.g-seg-reply-name {
+  flex: none;
+  color: var(--g-text-sub);
+}
+
+/* 引用的正文可能很长，压成一行 */
+.g-seg-reply-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .g-seg-bad {
@@ -475,11 +553,25 @@ const fileIcon: Record<string, string> = {
   overflow: hidden;
   font-size: 13px;
 }
+
 .g-seg-node-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 4px 10px;
   background: var(--g-bg-soft);
   color: var(--g-text-sub);
   font-size: 12px;
+}
+
+.g-seg-node-open {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--g-brand);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .g-seg-node-item {

@@ -12,6 +12,7 @@ export async function useMenuList() {
   menus.push(SystemMenus.home)
   menus.push(SystemMenus.config)
   menus.push(...(await usePluginsMenu()))
+  menus.push(SystemMenus.chat)
   menus.push(SystemMenus.log)
   menus.push(SystemMenus.sandbox)
   menus.push(SystemMenus.data)

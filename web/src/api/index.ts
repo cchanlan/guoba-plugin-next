@@ -619,5 +619,165 @@ export function sandboxAssetUrl(assetId: string, token: string) {
   return `${API_BASE}/sandbox/asset/${encodeURIComponent(assetId)}?token=${encodeURIComponent(token)}`
 }
 
+/* ---------------- 消息记录 ---------------- */
+
+/**
+ * 段结构与沙盒共用一份（server/service/both/model/msgSegment.js），
+ * 这里给两个中性别名，公用的 MsgSegment.vue 用它们，读起来不像只服务沙盒。
+ */
+export type MsgSeg = SandboxSegment
+export type MsgBtn = SandboxButton
+
+export type ChatType = 'friend' | 'group'
+
+/** 活跃摘要：会话 key -> 最后一条 + 未读 */
+export interface ChatActiveItem {
+  /** 秒 */
+  lastTime: number
+  lastText: string
+  unread: number
+}
+
+export interface ChatSession extends ChatActiveItem {
+  key: string
+  botId: string
+  type: ChatType
+  id: string
+  name: string
+}
+
+export interface ChatMsg {
+  /** 实时缓冲里的序号，历史消息没有 */
+  seq?: number
+  key: string
+  botId: string
+  type: ChatType
+  id: string
+  messageId: string
+  /** 向上翻页的游标 */
+  messageSeq: string
+  /** 秒 */
+  time: number
+  /** bot 自己发的 */
+  self: boolean
+  sender: { userId: string; nickname: string; card: string; role: string }
+  segments: MsgSeg[]
+  /** 在面板里撤回过 */
+  recalled?: boolean
+}
+
+export interface ChatTail {
+  messages: ChatMsg[]
+  /** 下次带上它取增量 */
+  cursor: number
+  /** 活跃表版本，变了才会带回 sessions */
+  rev: number
+  sessions: Record<string, ChatActiveItem> | null
+  /** 有消息在两次轮询之间被挤出缓冲 */
+  missed: boolean
+  unread: number
+}
+
+export interface ChatStatus {
+  /** 在线账号，多账号时得选一个来发 */
+  bots: SandboxBot[]
+  messages: number
+  max: number
+  cursor: number
+  rev: number
+  /** 消息监听是否挂上了 */
+  attached: boolean
+  maxImages: number
+}
+
+export const apiChatStatus = () => get<ChatStatus>('/chat/status', undefined, { showError: false })
+
+export const apiChatSessions = (params: {
+  type: ChatType
+  botId?: string
+  keyword?: string
+  pageNo?: number
+  pageSize?: number
+}) =>
+  get<{
+    list: ChatSession[]
+    total: number
+    pageNo: number
+    pageSize: number
+    rev: number
+    sessions: Record<string, ChatActiveItem>
+  }>('/chat/sessions', params)
+
+/** 拉历史消息。seq 为向上翻页的游标，0 取最新 */
+export const apiChatHistory = (params: {
+  botId: string
+  type: ChatType
+  id: string
+  seq?: string | number
+  count?: number
+}) =>
+  get<{
+    /** 适配器不支持拉历史时为 false，只能看面板运行期间的消息 */
+    supported: boolean
+    messages: ChatMsg[]
+    hasMore: boolean
+    cursor: number
+  }>('/chat/history', params)
+
+/** 实时增量，轮询调用，失败不弹提示 */
+export const apiChatTail = (params: { key: string; cursor: number; rev?: number }) =>
+  get<ChatTail>('/chat/tail', params, { showError: false })
+
+/** 发消息，**会真的发到 QQ 上**。images 为 dataURL */
+export const apiChatSend = (body: {
+  botId: string
+  type: ChatType
+  id: string
+  text?: string
+  images?: string[]
+  replyTo?: string
+}) => post<{ messageId: string; message: ChatMsg | null; cursor: number }>('/chat/send', body)
+
+/** 发原始消息段数组（JSON 文本） */
+export const apiChatSendRaw = (body: {
+  botId: string
+  type: ChatType
+  id: string
+  raw: string
+}) => post<{ messageId: string; message: ChatMsg | null; cursor: number }>('/chat/send-raw', body)
+
+/** 撤回，只能撤 bot 自己发的且有时限 */
+export const apiChatRecall = (body: {
+  botId: string
+  type: ChatType
+  id: string
+  messageId: string
+}) => post<{ messageId: string }>('/chat/recall', body)
+
+export const apiChatRead = (key: string) =>
+  post<{ key: string; rev: number }>('/chat/read', { key }, { showError: false })
+
+/** 展开合并转发，内容在 QQ 服务端 */
+export const apiChatForward = (body: {
+  botId: string
+  type: ChatType
+  id: string
+  messageId: string
+}) =>
+  post<{
+    nodes: Array<{ nickname: string; userId: string; time: number | null; segments: MsgSeg[] }>
+  }>('/chat/forward', body)
+
+/** 自己发出去的图片的取用地址 */
+export function chatAssetUrl(assetId: string, token: string) {
+  return `${API_BASE}/chat/asset/${encodeURIComponent(assetId)}?token=${encodeURIComponent(token)}`
+}
+
+/** QQ 直链的 rkey 过期后的兜底：交给服务端代拉一次 */
+export function chatProxyUrl(url: string, token: string) {
+  const q = new URLSearchParams({ url, token })
+  return `${API_BASE}/chat/proxy?${q.toString()}`
+}
+
 export * from './miao'
 export { request, get, post, put, del } from './request'

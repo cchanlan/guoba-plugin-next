@@ -77,6 +77,7 @@ const ANTD_ICONS = {
   'file-outlined': 'FileOutlined',
   'video-camera-outlined': 'VideoCameraOutlined',
   'message-outlined': 'MessageOutlined',
+  'rollback-outlined': 'RollbackOutlined',
   'robot-outlined': 'RobotOutlined',
 }
 

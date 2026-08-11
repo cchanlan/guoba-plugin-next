@@ -1,6 +1,8 @@
 import {GuobaError, Service} from '#guoba.framework'
 import PluginsLoader from '../../../../../lib/plugins/loader.js'
 import cfg from '../../../../../lib/config/config.js'
+import {AssetStore, normalizeMsg, toBase64File} from './model/msgSegment.js'
+import {listBots} from './model/bots.js'
 
 /** 沙盒会话里假装的适配器标识，日志里能一眼认出是面板发的 */
 const ADAPTER_ID = 'guoba-sandbox'
@@ -30,24 +32,15 @@ const TRAIL_MS = 300
 /** 单次执行的总时长上限，插件卡住时别把请求也拖死 */
 const RUN_TIMEOUT = 60_000
 
-/** 资源表（回复里的图片、语音、文件）最多留多少项 */
-const MAX_ASSETS = 60
-/** 单个资源的大小上限，超了不留，只报个尺寸 */
-const MAX_ASSET_SIZE = 20 * 1024 * 1024
-/** 资源存活时长，页面早就关了就没必要留着占内存 */
-const ASSET_TTL = 30 * 60 * 1000
+/** 资源表（回复里的图片、语音、文件）的上限见 model/msgSegment.js */
 
 /** 入站消息最多允许几张图 */
 const MAX_INBOUND_IMAGES = 5
-/** 转发消息最多展开几层，防御自引用的 node */
-const MAX_FORWARD_DEPTH = 3
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** 剥掉日志字符串里的 ANSI 颜色码，e.logFnc 是带色的 */
 const stripAnsi = (str) => String(str ?? '').replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
-
-const isHttp = (v) => typeof v === 'string' && /^https?:\/\//.test(v)
 
 /**
  * 沙盒。
@@ -67,9 +60,8 @@ export default class SandboxService extends Service {
 
   /** 本次执行的捕获队列，null 表示当前没有执行中的会话 */
   #capture = null
-  /** 资源表：assetId -> {buffer, mime, name, time} */
-  #assets = new Map()
-  #assetSeq = 0
+  /** 回复里的图片 / 语音 / 文件，段里只给 id，前端按需来拉 */
+  #assets = new AssetStore()
   #msgSeq = 0
   /** 同一时刻只跑一条，避免两次执行的回复串在一起 */
   #running = false
@@ -82,34 +74,9 @@ export default class SandboxService extends Service {
 
   /* ---------------- 账号 ---------------- */
 
-  /**
-   * 可用账号列表。
-   *
-   * 判据与 StatusService 一致：`Bot.bots` 上挂着 logger、_events 这类非账号属性，
-   * 甚至有插件往上塞自己的东西，只有带 adapter 的才是真账号。
-   */
+  /** 可用账号列表，实现见 model/bots.js（消息记录页也用同一份判据） */
   listBots() {
-    const uins = []
-    const push = (v) => {
-      const uin = String(v ?? '').trim()
-      if (uin && !uins.includes(uin)) uins.push(uin)
-    }
-
-    if (Array.isArray(Bot?.uin)) Bot.uin.forEach(push)
-    else if (Bot?.uin) push(Bot.uin)
-
-    for (const [key, value] of Object.entries(Bot?.bots ?? {})) {
-      if (value && typeof value === 'object' && value.adapter) push(key)
-    }
-
-    return uins.map((uin) => {
-      const bot = Bot?.bots?.[uin]
-      return {
-        uin,
-        nickname: typeof bot?.nickname === 'string' ? bot.nickname : '',
-        adapter: typeof bot?.adapter?.name === 'string' ? bot.adapter.name : '',
-      }
-    })
+    return listBots()
   }
 
   /**
@@ -228,32 +195,11 @@ export default class SandboxService extends Service {
 
   /** 取一个捕获到的资源，供 /sandbox/asset/:id 回传 */
   getAsset(id) {
-    const asset = this.#assets.get(String(id))
+    const asset = this.#assets.get(id)
     if (!asset) {
       throw new GuobaError('资源不存在或已过期')
     }
     return asset
-  }
-
-  /** 存一份资源，返回 id。超限的只记尺寸不留内容 */
-  #putAsset(buffer, mime, name) {
-    this.#gcAssets()
-    const id = `a${++this.#assetSeq}`
-    this.#assets.set(id, {buffer, mime: mime || 'application/octet-stream', name: name || id, time: Date.now()})
-    // Map 保持插入序，超量时从最老的开始丢
-    while (this.#assets.size > MAX_ASSETS) {
-      const oldest = this.#assets.keys().next().value
-      this.#assets.delete(oldest)
-    }
-    return id
-  }
-
-  #gcAssets() {
-    const expired = Date.now() - ASSET_TTL
-    for (const [id, asset] of this.#assets) {
-      if (asset.time < expired) this.#assets.delete(id)
-      else break
-    }
   }
 
   /* ---------------- 执行 ---------------- */
@@ -399,27 +345,12 @@ export default class SandboxService extends Service {
     const message = []
     const list = Array.isArray(images) ? images.slice(0, MAX_INBOUND_IMAGES) : []
     for (const img of list) {
-      const file = this.#toBase64File(img)
+      const file = toBase64File(img)
       if (file) message.push({type: 'image', file, url: file})
     }
     const str = typeof text === 'string' ? text : ''
     if (str) message.push({type: 'text', text: str})
     return message
-  }
-
-  /**
-   * dataURL / 裸 base64 统一成 Yunzai 认的 `base64://` 形式。
-   *
-   * 各适配器与 puppeteer 都按这个约定读图（见 lib/util.js 的 fileType），
-   * 插件拿到 e.img 后无论是转存还是直接发都能用。
-   */
-  #toBase64File(input) {
-    if (typeof input !== 'string' || !input) return null
-    if (input.startsWith('base64://')) return input
-    const m = input.match(/^data:[^;]*;base64,(.+)$/s)
-    if (m) return `base64://${m[1]}`
-    if (/^[A-Za-z0-9+/=\s]+$/.test(input)) return `base64://${input.replace(/\s/g, '')}`
-    return null
   }
 
   /**
@@ -603,203 +534,11 @@ export default class SandboxService extends Service {
   /**
    * 把插件发出来的东西拍平成前端能渲染的段数组。
    *
-   * 插件传给 reply 的形态五花八门：字符串、Segment 对象、嵌套数组、Buffer、
-   * 甚至 `{type:'node'}` 的转发消息，这里统一成 `{type, ...}` 的平坦列表。
+   * 具体规则在 model/msgSegment.js，与「消息记录」页共用一份，两页输出同一套结构，
+   * 前端一个组件就能渲染。沙盒这边 download 为默认的 true —— 插件刚生成的图只在
+   * 本地磁盘或内存里，不读进资源表就看不到。
    */
-  async #normalizeMsg(msg, depth = 0) {
-    const out = []
-    await this.#flatten(msg, out, depth)
-    return out
-  }
-
-  async #flatten(msg, out, depth) {
-    if (msg === null || msg === undefined || msg === false) return
-
-    if (Array.isArray(msg)) {
-      for (const item of msg) await this.#flatten(item, out, depth)
-      return
-    }
-
-    if (typeof msg === 'string' || typeof msg === 'number' || typeof msg === 'boolean') {
-      const text = String(msg)
-      if (text) out.push({type: 'text', text})
-      return
-    }
-
-    // 有插件直接 reply 一个 Buffer，按图片处理（Yunzai 各适配器也是这么认的）
-    if (Buffer.isBuffer(msg)) {
-      out.push(await this.#fileSeg('image', {file: msg}))
-      return
-    }
-
-    if (typeof msg !== 'object') return
-
-    const type = msg.type || (msg.file ? 'image' : '')
-
-    switch (type) {
-      case 'text':
-        if (msg.text) out.push({type: 'text', text: String(msg.text)})
-        return
-      case 'at':
-        out.push({type: 'at', qq: String(msg.qq ?? msg.id ?? ''), name: msg.name ?? msg.text ?? ''})
-        return
-      case 'reply':
-        out.push({type: 'reply', id: String(msg.id ?? msg.text ?? '')})
-        return
-      case 'face':
-        out.push({type: 'face', id: String(msg.id ?? '')})
-        return
-      case 'image':
-      case 'record':
-      case 'video':
-      case 'file':
-        out.push(await this.#fileSeg(type, msg))
-        return
-      case 'node':
-        out.push(await this.#nodeSeg(msg, depth))
-        return
-      case 'button':
-        out.push(this.#buttonSeg(msg))
-        return
-      case 'markdown':
-        out.push(this.#markdownSeg(msg))
-        return
-      case 'raw':
-        // 没法在网页上还原成原样，原始数据丢给前端折叠显示
-        out.push({type, raw: this.#dump(msg)})
-        return
-      default:
-        out.push({type: type || 'unknown', raw: this.#dump(msg)})
-    }
-  }
-
-  /**
-   * markdown 段。原生模板（模板 id + params）的内容在 QQ 服务端，本地还原不出来，
-   * 只有 content 形式的能渲染，其余照旧摊原始数据。
-   */
-  #markdownSeg(msg) {
-    const data = msg.data
-    const content = typeof data === 'string' ? data : data?.content
-    const seg = {type: 'markdown'}
-    if (typeof content === 'string' && content) seg.content = content
-    else seg.raw = this.#dump(msg)
-    if (!this.#rich) seg.ignored = true
-    return seg
-  }
-
-  /**
-   * 按钮段。`segment.button(...行)` 的 data 就是参数列表，每个参数是一行、
-   * 行内是按钮数组（lib/modules/oicq/index.js），但也有插件直接传单个按钮对象，
-   * 这里一律拍成二维。认不出结构时保留原始 JSON，别让按钮悄悄消失。
-   */
-  #buttonSeg(msg) {
-    const rows = []
-    for (const row of Array.isArray(msg.data) ? msg.data : [msg.data]) {
-      if (!row) continue
-      const btns = []
-      for (const item of Array.isArray(row) ? row : [row]) {
-        const btn = this.#button(item)
-        if (btn) btns.push(btn)
-      }
-      if (btns.length) rows.push(btns)
-    }
-    const seg = {type: 'button', rows}
-    if (!rows.length) seg.raw = this.#dump(msg)
-    if (!this.#rich) seg.ignored = true
-    return seg
-  }
-
-  /**
-   * 单个按钮。字段各家写法不一，常见的都认一遍：
-   * callback 点击即以该文本触发指令，input 只填进输入框等用户补参数，link 是外链。
-   */
-  #button(item) {
-    if (!item || typeof item !== 'object') return null
-    const btn = {text: String(item.text ?? item.label ?? item.render_data?.label ?? '')}
-    // 官方 QQBot 的原始结构把动作塞在 action.data 里，是链接还是指令看内容判断
-    const act = item.action?.data
-    const callback = item.callback ?? item.data ?? (isHttp(act) ? null : act)
-    const link = item.link ?? item.url ?? (isHttp(act) ? act : null)
-    if (callback != null && typeof callback !== 'object') btn.callback = String(callback)
-    if (item.input != null) btn.input = String(item.input)
-    if (link != null) btn.link = String(link)
-    if (item.permission ?? item.action?.permission) btn.limited = true
-    return btn.text || btn.callback || btn.input || btn.link ? btn : null
-  }
-
-  /**
-   * 图片 / 语音 / 视频 / 文件段。
-   *
-   * http 直链直接把 url 给前端，让浏览器自己拉，既省一次服务端下载也省内存；
-   * base64、本地路径、Buffer 才走 `Bot.fileType` 取字节存进资源表。
-   */
-  async #fileSeg(type, msg) {
-    const seg = {type, name: typeof msg.name === 'string' ? msg.name : ''}
-    const src = msg.file ?? msg.url ?? msg.data
-
-    if (isHttp(src)) {
-      seg.url = src
-      return seg
-    }
-
-    let file
-    try {
-      file = await Bot.fileType({file: src, name: msg.name})
-    } catch (err) {
-      seg.error = String(err?.message ?? err)
-      return seg
-    }
-
-    if (!Buffer.isBuffer(file?.buffer)) {
-      // fileType 内部把异常吞了，取不到字节时它会返回一个只有 name/url 的壳
-      seg.error = '读取失败'
-      seg.name ||= file?.name ?? ''
-      return seg
-    }
-
-    seg.name = seg.name || file.name || ''
-    seg.size = file.buffer.length
-    const mime = file.type?.mime || (type === 'image' ? 'image/png' : 'application/octet-stream')
-    if (file.buffer.length > MAX_ASSET_SIZE) {
-      // 超大的不往内存里塞，只把尺寸报给前端
-      seg.tooLarge = true
-      return seg
-    }
-    seg.assetId = this.#putAsset(file.buffer, mime, seg.name)
-    seg.mime = mime
-    return seg
-  }
-
-  /** 转发消息。data 是 `{nickname, user_id, message}` 的数组，逐条递归展开 */
-  async #nodeSeg(msg, depth) {
-    const seg = {type: 'node', nodes: []}
-    if (depth >= MAX_FORWARD_DEPTH) {
-      // 自引用的 node 会无限套下去，到这层就不再展开
-      seg.truncated = true
-      return seg
-    }
-    const list = Array.isArray(msg.data) ? msg.data : [msg.data]
-    for (const node of list) {
-      if (!node) continue
-      seg.nodes.push({
-        nickname: String(node.nickname ?? node.name ?? ''),
-        userId: String(node.user_id ?? node.uin ?? ''),
-        time: node.time ?? null,
-        segments: await this.#normalizeMsg(node.message ?? node, depth + 1),
-      })
-    }
-    return seg
-  }
-
-  /** 兜底展示：把不认识的段转成一行 JSON，太长的截掉 */
-  #dump(msg) {
-    let text
-    try {
-      text = JSON.stringify(msg, (key, value) =>
-        Buffer.isBuffer(value) ? `<Buffer ${value.length}>` : value)
-    } catch {
-      text = String(msg)
-    }
-    return text.length > 2000 ? `${text.slice(0, 2000)}…` : text
+  #normalizeMsg(msg) {
+    return normalizeMsg(msg, {assets: this.#assets, rich: this.#rich})
   }
 }

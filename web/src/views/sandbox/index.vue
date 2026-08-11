@@ -9,12 +9,13 @@
 import { computed, nextTick, onMounted, provide, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
-import MsgSegment from './components/MsgSegment.vue'
+import MsgSegment from '@/components/msg/MsgSegment.vue'
 import SceneDrawer from './components/SceneDrawer.vue'
 import RulesDrawer from './components/RulesDrawer.vue'
 import {
   apiSandboxDefaults,
   apiSandboxSend,
+  sandboxAssetUrl,
   type SandboxBlocked,
   type SandboxBot,
   type SandboxButton,
@@ -22,6 +23,9 @@ import {
   type SandboxScene,
   type SandboxSegment,
 } from '@/api'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
 
 /** 会话与场景存本地，刷新页面不丢 */
 const SCENE_KEY = 'guoba-sandbox-scene'
@@ -210,7 +214,9 @@ function onButtonClick(btn: SandboxButton) {
   }
 }
 
-provide('sandboxButtonClick', onButtonClick)
+provide('msgButtonClick', onButtonClick)
+// 沙盒的图片都在服务端的沙盒资源表里，没有 http 直链，所以不用 provide 代理地址
+provide('msgAssetUrl', (assetId: string) => sandboxAssetUrl(assetId, auth.token))
 
 /* ---------------- 图片 ---------------- */
 

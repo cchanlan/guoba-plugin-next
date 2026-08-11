@@ -22,6 +22,16 @@ export const SystemMenus = {
       icon: 'ant-design:user-outlined',
     },
   },
+  // 消息记录
+  chat: {
+    path: '/chat',
+    name: 'Chat',
+    component: '/guoba/chat/index',
+    meta: {
+      title: '消息记录',
+      icon: 'ant-design:message-outlined',
+    },
+  },
   // 运行日志
   log: {
     path: '/log',
