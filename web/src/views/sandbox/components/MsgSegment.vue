@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import GIcon from '@/components/GIcon.vue'
@@ -9,6 +9,25 @@ import { useAuthStore } from '@/stores/auth'
 const props = defineProps<{ seg: SandboxSegment }>()
 
 const auth = useAuthStore()
+
+/**
+ * 缩略图尺寸，与样式里 .g-seg-img 的 max-width / .is-long 的 max-height 保持一致。
+ * 插件出的图多是手机比例的长截图，按高度等比缩会窄到看不清字，所以改成按宽度铺、
+ * 超高的裁掉下半截，点开再看完整的。
+ */
+const IMG_W = 340
+const IMG_MAX_H = 440
+
+const imgLong = ref(false)
+const imgPreview = ref(false)
+
+function onImgLoad(e: Event) {
+  const img = e.target as HTMLImageElement
+  if (!img.naturalWidth || !img.naturalHeight) return
+  // 小图不放大，所以实际宽度取自然宽度与上限的较小值
+  const w = Math.min(IMG_W, img.naturalWidth)
+  imgLong.value = (w * img.naturalHeight) / img.naturalWidth > IMG_MAX_H
+}
 
 /** 按钮点击交给页面处理。用 inject 是为了让转发消息里嵌套的按钮也能拿到 */
 const onButton = inject<((btn: SandboxButton) => void) | null>('sandboxButtonClick', null)
@@ -79,9 +98,18 @@ const fileIcon: Record<string, string> = {
       <GIcon icon="ant-design:picture-outlined" :size="13" />
       {{ seg.tooLarge ? `图片过大，未加载${sizeText ? `（${sizeText}）` : ''}` : `图片读取失败：${seg.error}` }}
     </span>
-    <a v-else :href="src" target="_blank" class="g-seg-img">
-      <img :src="src" :alt="seg.name || '图片'" loading="lazy" />
-    </a>
+    <template v-else>
+      <span class="g-seg-img" :class="{ 'is-long': imgLong }" @click="imgPreview = true">
+        <img :src="src" :alt="seg.name || '图片'" loading="lazy" @load="onImgLoad" />
+        <span v-if="imgLong" class="g-seg-img-more">长图 · 点击查看完整</span>
+      </span>
+      <!-- 预览层交给 antd，能缩放旋转，比新开标签页顺手；本体不占位 -->
+      <a-image
+        :src="src"
+        :style="{ display: 'none' }"
+        :preview="{ visible: imgPreview, onVisibleChange: (v: boolean) => (imgPreview = v) }"
+      />
+    </template>
   </template>
 
   <!-- 语音 / 视频 / 文件：能播的给播放器，其余给下载链接 -->
@@ -196,7 +224,18 @@ const fileIcon: Record<string, string> = {
   color: var(--g-brand);
 }
 
-.g-seg-reply,
+/* 引用：单独一条细带压在气泡顶部，别跟正文混在一行 */
+.g-seg-reply {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--g-border);
+  color: var(--g-text-dim);
+  font-size: 12px;
+}
+
 .g-seg-bad {
   display: inline-flex;
   align-items: center;
@@ -206,16 +245,47 @@ const fileIcon: Record<string, string> = {
 }
 
 .g-seg-img {
+  position: relative;
   display: block;
-  margin: 4px 0;
+  width: fit-content;
+  max-width: 100%;
+  margin: 2px 0;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: zoom-in;
 }
 
 .g-seg-img img {
   display: block;
-  max-width: min(320px, 100%);
-  max-height: 380px;
-  border-radius: 8px;
-  border: 1px solid var(--g-border);
+  /* 必须是纯长度：写成 min(340px, 100%) 的话浏览器算不出图片的固有宽度贡献，
+     气泡会按原图尺寸撑满。与 script 里的 IMG_W 一致 */
+  max-width: 340px;
+}
+
+/* 长图裁掉下半截，底部压一层渐变提示还有内容 */
+.g-seg-img.is-long {
+  max-height: 440px;
+}
+
+.g-seg-img.is-long::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 60px;
+  background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.6));
+}
+
+.g-seg-img-more {
+  position: absolute;
+  right: 0;
+  bottom: 6px;
+  left: 0;
+  z-index: 1;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
 }
 
 .g-seg-audio {
@@ -228,8 +298,17 @@ const fileIcon: Record<string, string> = {
 .g-seg-video {
   display: block;
   margin: 4px 0;
-  max-width: min(320px, 100%);
+  /* 同 .g-seg-img img，宽度上限不能带百分比 */
+  max-width: 320px;
   border-radius: 8px;
+}
+
+/* 窄屏交给百分比，此时气泡本身就窄，不怕被撑宽 */
+@media (max-width: 640px) {
+  .g-seg-img img,
+  .g-seg-video {
+    max-width: 100%;
+  }
 }
 
 .g-seg-file {
@@ -252,7 +331,7 @@ const fileIcon: Record<string, string> = {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 6px 0 2px;
+  margin: 8px 0 2px;
 }
 
 .g-seg-btn-row {
@@ -261,36 +340,45 @@ const fileIcon: Record<string, string> = {
   gap: 6px;
 }
 
-/* a 与 button 两种标签共用，所以字体、边框这些都得写全 */
+/* a 与 button 两种标签共用，所以字体、边框这些都得写全。
+   同一行按钮等分宽度，跟 QQ 那边的 markdown 按钮一致 */
 .g-seg-btn {
+  flex: 1 1 auto;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
-  padding: 4px 12px;
-  background: var(--g-bg);
-  border: 1px solid var(--g-brand);
-  border-radius: 14px;
+  padding: 6px 12px;
+  background: var(--g-bg-soft);
+  border: 1px solid var(--g-border);
+  border-radius: 8px;
   color: var(--g-brand);
   font-family: inherit;
   font-size: 12px;
   line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, border-color 0.15s;
 }
 
 .g-seg-btn:hover {
   background: var(--g-brand-soft);
+  border-color: var(--g-brand);
 }
 
 .g-seg-btn.is-dead {
   border-color: var(--g-border);
   border-style: dashed;
+  background: none;
   color: var(--g-text-dim);
   cursor: not-allowed;
 }
 
 .g-seg-btn.is-dead:hover {
-  background: var(--g-bg);
+  background: none;
+  border-color: var(--g-border);
 }
 
 .g-seg-btn-tag {
@@ -340,7 +428,7 @@ const fileIcon: Record<string, string> = {
 }
 
 .g-seg-md :deep(img) {
-  max-width: 100%;
+  max-width: 340px;
   border-radius: 6px;
 }
 

@@ -323,6 +323,9 @@ const currentBot = computed(() => {
         <a-radio-button :value="false">私聊</a-radio-button>
       </a-radio-group>
 
+      <!-- 两组都是实心选中，挨着容易看成一组，中间隔一道 -->
+      <span class="g-sandbox-sep" />
+
       <a-tooltip :title="platformTip">
         <a-radio-group v-model:value="scene.platform" size="small" button-style="solid">
           <a-radio-button value="default">普通消息</a-radio-button>
@@ -468,13 +471,20 @@ const currentBot = computed(() => {
   flex: 1;
 }
 
+.g-sandbox-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--g-border);
+}
+
 .g-sandbox-box {
   flex: 1;
   min-height: 320px;
   max-height: calc(100vh - 340px);
   overflow-y: auto;
   padding: 14px;
-  background: var(--g-bg-soft);
+  /* 容器压暗、气泡提亮，两个主题下都能看出层次 */
+  background: var(--g-bg);
   border: 1px solid var(--g-border);
   border-radius: 10px;
 }
@@ -490,7 +500,7 @@ const currentBot = computed(() => {
 }
 
 .g-msg {
-  margin-bottom: 14px;
+  margin-bottom: 18px;
 }
 
 .g-msg-row {
@@ -506,9 +516,16 @@ const currentBot = computed(() => {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: var(--g-bg);
+  background: var(--g-bg-soft);
   border: 1px solid var(--g-border);
   color: var(--g-text-sub);
+}
+
+/* 机器人头像上品牌色，跟自己发的分开 */
+.g-msg.is-bot .g-msg-avatar {
+  background: var(--g-brand-soft);
+  border-color: var(--g-brand);
+  color: var(--g-brand);
 }
 
 .g-msg-main {
@@ -517,7 +534,7 @@ const currentBot = computed(() => {
 }
 
 .g-msg-name {
-  margin-bottom: 3px;
+  margin-bottom: 4px;
   color: var(--g-text-dim);
   font-size: 12px;
 }
@@ -525,7 +542,7 @@ const currentBot = computed(() => {
 .g-msg-bubble {
   display: inline-block;
   padding: 8px 12px;
-  background: var(--g-bg);
+  background: var(--g-bg-card);
   border: 1px solid var(--g-border);
   border-radius: 10px;
   font-size: 14px;
@@ -575,8 +592,13 @@ const currentBot = computed(() => {
   margin-top: 10px;
   border: 1px solid var(--g-border);
   border-radius: 10px;
-  background: var(--g-bg);
+  background: var(--g-bg-card);
   overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.g-sandbox-input:focus-within {
+  border-color: var(--g-brand);
 }
 
 .g-sandbox-imgs {
