@@ -32,6 +32,16 @@ export const SystemMenus = {
       icon: 'ant-design:file-search-outlined',
     },
   },
+  // 沙盒调试
+  sandbox: {
+    path: '/sandbox',
+    name: 'Sandbox',
+    component: '/guoba/sandbox/index',
+    meta: {
+      title: '沙盒',
+      icon: 'ant-design:experiment-outlined',
+    },
+  },
   // 数据浏览
   data: {
     path: '/data',

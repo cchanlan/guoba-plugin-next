@@ -68,6 +68,16 @@ const ANTD_ICONS = {
   'key-outlined': 'KeyOutlined',
   'unordered-list-outlined': 'UnorderedListOutlined',
   'tool-outlined': 'ToolOutlined',
+  'experiment-outlined': 'ExperimentOutlined',
+  'send-outlined': 'SendOutlined',
+  'clear-outlined': 'ClearOutlined',
+  'aim-outlined': 'AimOutlined',
+  'picture-outlined': 'PictureOutlined',
+  'audio-outlined': 'AudioOutlined',
+  'file-outlined': 'FileOutlined',
+  'video-camera-outlined': 'VideoCameraOutlined',
+  'message-outlined': 'MessageOutlined',
+  'robot-outlined': 'RobotOutlined',
 }
 
 /** 把 @ant-design/icons-svg 的抽象节点转成 SVG 内部标记 */

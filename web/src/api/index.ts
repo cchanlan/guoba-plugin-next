@@ -460,5 +460,138 @@ export const apiDbUpdateRow = (body: {
 export const apiDbDeleteRow = (body: { path: string; table: string; rowid: number }) =>
   del('/data/db/row', body, { showSuccess: true })
 
+/* ---------------- 沙盒 ---------------- */
+
+/** 沙盒会话场景。id 全用字符串存，适配器不一定是数字 QQ 号 */
+export interface SandboxScene {
+  /** 用哪个账号的身份收这条消息，空则取第一个在线账号 */
+  selfId: string
+  isGroup: boolean
+  userId: string
+  nickname: string
+  groupId: string
+  groupName: string
+  /** 群名片，空则用昵称 */
+  card: string
+  isMaster: boolean
+  isOwner: boolean
+  isAdmin: boolean
+  /** 群聊里是否在消息前加一个 at 机器人 */
+  atBot: boolean
+}
+
+export interface SandboxBot {
+  uin: string
+  nickname: string
+  adapter: string
+}
+
+/** 回复里的一个消息段，字段见 server/service/both/SandboxService.js 的 #normalizeMsg */
+export interface SandboxSegment {
+  type: string
+  text?: string
+  /** at 的目标 QQ */
+  qq?: string
+  name?: string
+  /** reply 段引用的消息 id */
+  id?: string
+  /** 图片等资源的取用 id，走 sandboxAssetUrl */
+  assetId?: string
+  mime?: string
+  /** http 直链资源不落服务端，直接给 url */
+  url?: string
+  size?: number
+  /** 超过大小上限，只报尺寸不留内容 */
+  tooLarge?: boolean
+  error?: string
+  /** 转发消息的子消息 */
+  nodes?: Array<{
+    nickname: string
+    userId: string
+    time: number | null
+    segments: SandboxSegment[]
+  }>
+  /** 转发层数超限，未继续展开 */
+  truncated?: boolean
+  /** 无法还原的段（button/markdown 等）的原始 JSON */
+  raw?: string
+}
+
+export interface SandboxReply {
+  id: string
+  /** 回复是从哪条通道发出来的：reply / friend / group / member */
+  via: string
+  time: number
+  segments: SandboxSegment[]
+}
+
+/** 没有回复时的原因 */
+export type SandboxBlocked = 'blacklist' | 'onlyReplyAt' | 'noRule' | 'noReply' | null
+
+export interface SandboxResult {
+  /** 经预处理后的文本，插件正则匹配的就是这个 */
+  msg: string
+  /** 命中的插件与方法，形如 `插件名(方法名)` */
+  hit: string
+  isMaster: boolean
+  game: string
+  elapsed: number
+  blocked: SandboxBlocked
+  error: string | null
+  replies: SandboxReply[]
+}
+
+export interface SandboxRule {
+  fnc: string
+  reg: string
+  event: string
+  permission: string
+  log: boolean
+}
+
+export interface SandboxPlugin {
+  /** 插件文件，形如 `example/test.js` */
+  key: string
+  name: string
+  dsc: string
+  priority: number
+  event: string
+  rules: SandboxRule[]
+}
+
+export interface SandboxMatch {
+  key: string
+  name: string
+  priority: number
+  fnc: string
+  reg: string
+  permission: string
+}
+
+export const apiSandboxDefaults = () =>
+  get<{ bots: SandboxBot[]; masterQQ: string[]; scene: SandboxScene }>('/sandbox/defaults')
+
+export const apiSandboxRules = () => get<SandboxPlugin[]>('/sandbox/rules')
+
+/** 只做匹配预览，不执行插件 */
+export const apiSandboxMatch = (text: string, isGroup: boolean) =>
+  post<{ msg: string; game: string; matched: SandboxMatch[] }>(
+    '/sandbox/match',
+    { text, isGroup },
+    { showError: false },
+  )
+
+/** 发一条沙盒消息，images 为 dataURL */
+export const apiSandboxSend = (body: {
+  scene: SandboxScene
+  text: string
+  images?: string[]
+}) => post<SandboxResult>('/sandbox/send', body)
+
+/** 回复里图片/文件的取用地址，token 走 query 以便 <img> 直接引用 */
+export function sandboxAssetUrl(assetId: string, token: string) {
+  return `${API_BASE}/sandbox/asset/${encodeURIComponent(assetId)}?token=${encodeURIComponent(token)}`
+}
+
 export * from './miao'
 export { request, get, post, put, del } from './request'

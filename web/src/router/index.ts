@@ -48,6 +48,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '运行日志', icon: 'ant-design:file-search-outlined' },
       },
       {
+        path: 'sandbox',
+        name: 'Sandbox',
+        component: () => import('@/views/sandbox/index.vue'),
+        meta: { title: '沙盒', icon: 'ant-design:experiment-outlined' },
+      },
+      {
         path: 'data',
         name: 'Data',
         component: () => import('@/views/data/index.vue'),
