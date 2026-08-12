@@ -38,6 +38,26 @@ export default class FileService extends Service {
     return abs
   }
 
+  /**
+   * 文件名清洗：去掉路径分隔符，并把 Windows 的非法字符（`<>:"/\|?*` 及控制字符）
+   * 换成下划线 —— 文件管理要能跑在 Windows 上，这些字符建不出文件。
+   * 仍以 `..` 开头的名字由调用方拒绝。
+   */
+  #sanitizeName(name) {
+    return String(name ?? '')
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+      .trim()
+  }
+
+  /** 相对路径拆段（兼容两种分隔符），取 basename 名并清洗后重组 */
+  #sanitizeRel(rel) {
+    const parts = String(rel ?? '').replace(/[\\/]+/g, '/').split('/').filter(Boolean)
+    const raw = parts.pop() ?? ''
+    const name = this.#sanitizeName(raw)
+    if (!name) throw new GuobaError('名称不合法')
+    return [...parts, name].join('/')
+  }
+
   /** 列目录：文件夹在前、按名称排，无权限的项跳过 */
   list(rel = '') {
     const dir = this.#resolve(rel)
@@ -87,7 +107,7 @@ export default class FileService extends Service {
 
   /** 新建文件夹 */
   mkdir(rel = '') {
-    const abs = this.#resolve(rel)
+    const abs = this.#resolve(this.#sanitizeRel(rel))
     if (fs.existsSync(abs)) throw new GuobaError('目录已存在')
     fs.mkdirSync(abs)
     return {ok: true}
@@ -95,15 +115,15 @@ export default class FileService extends Service {
 
   /** 新建文件 */
   create(rel = '', content = '') {
-    const abs = this.#resolve(rel)
+    const abs = this.#resolve(this.#sanitizeRel(rel))
     if (fs.existsSync(abs)) throw new GuobaError('文件已存在')
     fs.writeFileSync(abs, String(content ?? ''), 'utf8')
     return {ok: true}
   }
 
-  /** 重命名。newName 清洗掉路径分隔符，仍以 .. 开头的名字直接拒绝，目标必在根内 */
+  /** 重命名。newName 清洗分隔符与 Windows 非法字符，仍以 .. 开头的名字直接拒绝 */
   rename(rel = '', newName = '') {
-    const name = path.basename(String(newName ?? '').replace(/[\\/]/g, '_')).trim()
+    const name = this.#sanitizeName(newName)
     if (!name || name === '.' || name === '..' || name.startsWith('..')) throw new GuobaError('文件名不合法')
     const abs = this.#resolve(rel)
     if (!fs.existsSync(abs)) throw new GuobaError('源不存在')
@@ -138,7 +158,7 @@ export default class FileService extends Service {
         fs.rmSync(f.path, {force: true})
         throw new GuobaError(`文件过大（上限 ${MAX_UPLOAD_SIZE / 1024 / 1024}MB）`)
       }
-      const safeName = path.basename(String(f.originalname).replace(/[\\/]/g, '_'))
+      const safeName = this.#sanitizeName(f.originalname)
       if (!safeName || safeName === '.' || safeName === '..' || safeName.startsWith('..')) {
         fs.rmSync(f.path, {force: true})
         throw new GuobaError('文件名不合法')
