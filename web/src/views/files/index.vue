@@ -372,12 +372,12 @@ onMounted(load)
         </template>
 
         <template v-else-if="column.key === 'op'">
+          <!-- 文件夹也占一个编辑位，保证下载列对齐（文件夹的编辑禁用） -->
           <a-button
-            v-if="!record.isDir"
             size="small"
             type="text"
-            :disabled="!isEditable(record)"
-            :title="isEditable(record) ? '编辑' : '二进制或超过 2MB，无法在页面编辑'"
+            :disabled="record.isDir || !isEditable(record)"
+            :title="record.isDir ? '文件夹' : isEditable(record) ? '编辑' : '二进制或超过 2MB，无法在页面编辑'"
             @click="onEdit(record)"
           >
             <GIcon icon="ant-design:edit-outlined" :size="13" />
