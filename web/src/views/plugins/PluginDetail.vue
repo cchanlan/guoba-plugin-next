@@ -244,6 +244,29 @@ watch(pluginName, load, { immediate: true })
 @media (max-width: 720px) {
   .g-detail-top {
     flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  /* 文字区占满图标旁剩余宽度，避免被按钮挤成一列一个字 */
+  .g-detail-meta {
+    flex: 1 1 calc(100% - 64px);
+  }
+
+  .g-detail-title {
+    font-size: 17px;
+  }
+
+  /* 按钮换到单独一行 */
+  .g-detail-actions {
+    width: 100%;
+  }
+
+  .g-detail-actions :deep(.ant-btn) {
+    flex: 1;
+  }
+
+  .g-detail-actions :deep(.ant-space-item) {
+    flex: 1;
   }
 }
 </style>
