@@ -72,6 +72,16 @@ export const SystemMenus = {
       icon: 'ant-design:folder-outlined',
     },
   },
+  // 终端
+  terminal: {
+    path: '/terminal',
+    name: 'Terminal',
+    component: '/guoba/terminal/index',
+    meta: {
+      title: '终端',
+      icon: 'ant-design:code-outlined',
+    },
+  },
   // 配置管理
   config: {
     path: '/config',

@@ -63,6 +63,27 @@ const columns = [
 /** 图片扩展名，单击直接预览 */
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif', 'ico'])
 
+/** 二进制扩展名：没法在页面里编辑，只能下载 */
+const BINARY_EXTS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif',
+  'zip', 'gz', 'tar', '7z', 'rar', 'xz', 'bz2',
+  'exe', 'dll', 'so', 'bin', 'dat', 'db', 'sqlite', 'sqlite3',
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+  'mp3', 'mp4', 'avi', 'mkv', 'mov', 'webm', 'flac', 'wav',
+  'pdf', 'jar', 'pyc', 'class', 'node',
+])
+
+/** 文本编辑上限，跟后端 read 的 2MB 一致 */
+const MAX_EDIT_SIZE = 2 * 1024 * 1024
+
+/** 能不能在页面里编辑：非目录、不超 2MB、扩展名不是二进制 */
+function isEditable(f: FsFile) {
+  if (f.isDir) return false
+  if (f.size > MAX_EDIT_SIZE) return false
+  const ext = f.name.split('.').pop()?.toLowerCase() ?? ''
+  return !BINARY_EXTS.has(ext)
+}
+
 /** 面包屑，根不显示在列表里 */
 const breadcrumbs = computed(() => {
   const parts = currentPath.value ? currentPath.value.split('/') : []
@@ -351,7 +372,14 @@ onMounted(load)
         </template>
 
         <template v-else-if="column.key === 'op'">
-          <a-button v-if="!record.isDir" size="small" type="text" @click="onEdit(record)">
+          <a-button
+            v-if="!record.isDir"
+            size="small"
+            type="text"
+            :disabled="!isEditable(record)"
+            :title="isEditable(record) ? '编辑' : '二进制或超过 2MB，无法在页面编辑'"
+            @click="onEdit(record)"
+          >
             <GIcon icon="ant-design:edit-outlined" :size="13" />
             编辑
           </a-button>

@@ -72,6 +72,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '文件管理', icon: 'ant-design:folder-outlined' },
       },
       {
+        path: 'terminal',
+        name: 'Terminal',
+        component: () => import('@/views/terminal/index.vue'),
+        meta: { title: '终端', icon: 'ant-design:code-outlined' },
+      },
+      {
         path: 'plugins',
         name: 'PluginsStore',
         component: () => import('@/views/plugins/index.vue'),

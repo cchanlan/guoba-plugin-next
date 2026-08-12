@@ -339,6 +339,10 @@ export const apiLogStatus = () => get<LogStatus>('/log/status', undefined, { sho
 
 export const apiClearLog = () => post<number>('/log/clear', {}, { showSuccess: true })
 
+/** 把日志渲染图私聊发给主人。走 multipart（base64 塞 JSON 会 413） */
+export const apiLogSendImage = (fd: FormData) =>
+  post<{ ok: boolean; sent: string[] }>('/log/send-image', fd)
+
 /* ---------------- 数据浏览（Redis / SQLite） ---------------- */
 
 /** Redis key 的类型，与 `TYPE` 命令返回值一致 */
@@ -840,6 +844,49 @@ export function fileDownloadUrl(path: string, token: string) {
   const q = new URLSearchParams({ path, token })
   return `${API_BASE}/file/download?${q.toString()}`
 }
+
+/* ---------------- 终端 ---------------- */
+
+/** 一行输出。type: cmd = 输入的命令行，out = stdout，err = stderr */
+export interface TermLine {
+  seq: number
+  type: 'cmd' | 'out' | 'err'
+  text: string
+}
+
+/** 终端会话状态 */
+export interface TermStatus {
+  shell: string
+  cwd: string
+  running: boolean
+  count: number
+  attached: boolean
+  /** 真终端风格提示符，如 `root@chan:~/Yunzai# ` */
+  prompt: string
+}
+
+/** 执行命令，写入 shell 的 stdin */
+export const apiTermExec = (cmd: string) =>
+  post<{ ok: boolean }>('/term/exec', { cmd }, { showError: false })
+
+/** 增量拉取输出 */
+export const apiTermTail = (cursor: number) =>
+  get<{ lines: TermLine[]; cursor: number; running: boolean; shell: string; cwd: string; prompt: string }>(
+    '/term/tail',
+    { cursor },
+    { showError: false },
+  )
+
+/** 中断当前前台进程（键盘 Ctrl+C 的等价物，pm2 log 这类要靠它退） */
+export const apiTermInterrupt = () =>
+  post<{ ok: boolean }>('/term/interrupt', {}, { showError: false })
+
+/** 重启 shell 会话 */
+export const apiTermRestart = () =>
+  post<{ ok: boolean }>('/term/restart', {}, { showError: false })
+
+/** 会话信息 */
+export const apiTermStatus = () => get<TermStatus>('/term/status', {}, { showError: false })
 
 export * from './miao'
 export { request, get, post, put, del } from './request'

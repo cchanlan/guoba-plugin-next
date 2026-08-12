@@ -9,7 +9,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Button, Empty, Input, Select, Switch, Tag, Tooltip, message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
-import { apiClearLog, apiLogStatus, apiTailLog, type LogLine, type LogStatus } from '@/api'
+import {
+  apiClearLog,
+  apiLogSendImage,
+  apiLogStatus,
+  apiTailLog,
+  type LogLine,
+  type LogStatus,
+} from '@/api'
 
 /** 轮询间隔，1 秒足够跟上刷屏，也不至于让面板一直忙着请求 */
 const INTERVAL = 1000
@@ -139,14 +146,130 @@ async function loadStatus() {
   }
 }
 
+/** 复制文本：clipboard API 可用就走它，否则退回 execCommand（http://ip 下 clipborad 是 undefined） */
+function copyText(text: string, done: () => void, fail: () => void) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(done, fail)
+  } else {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    if (ok) done()
+    else fail()
+  }
+}
+
+/** 日志级别在截图里的配色：error 红、warn 黄、info 绿，其余灰 */
+const LOG_LEVEL_COLORS: Record<string, string> = {
+  info: '#7fd6a0',
+  warn: '#e6b566',
+  error: '#ef6f6f',
+  debug: '#7fa8d9',
+  trace: '#8f9aa8',
+  mark: '#c792ea',
+}
+
+/** 把日志画成 PNG（深色终端背景），返回 blob */
+function drawLogImage(text: string, total: number): Promise<{ blob: Blob | null; truncated: boolean }> {
+  const font = '12px ui-monospace, Menlo, Consolas, monospace'
+  const pad = 16
+  const lineH = 18
+  const width = 900
+  // PC 截图最多 100 行，太长画出来贴不下
+  const maxRows = 100
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return Promise.resolve({ blob: null, truncated: false })
+  ctx.font = font
+  const charW = ctx.measureText('M').width || 7.2
+  const maxCols = Math.floor((width - pad * 2) / charW)
+  // 折行 + 限高（日志太长画不下就截断，等宽字体按字符数切行）
+  let rows = 0
+  let truncated = false
+  const wrapped: string[] = []
+  for (const line of text.split('\n')) {
+    if (!line) { wrapped.push(''); rows++ }
+    else {
+      for (let i = 0; i < line.length; i += maxCols) {
+        wrapped.push(line.slice(i, i + maxCols))
+        if (++rows >= maxRows) { truncated = true; break }
+      }
+    }
+    if (rows >= maxRows) { truncated = true; break }
+  }
+  const height = rows * lineH + pad * 2
+  canvas.width = width
+  canvas.height = height
+  ctx.fillStyle = '#1e1e1e'
+  ctx.fillRect(0, 0, width, height)
+  ctx.font = font
+  let y = pad + lineH - 5
+  for (const line of wrapped.slice(0, maxRows)) {
+    // 按行首的 [时间][级别] 给整行上色：error 红、warn 黄、info 绿，默认灰
+    ctx.fillStyle = '#d4d4d4'
+    const m = line.match(/^\[([^\]]*)\]\[([^\]]*)\]/)
+    if (m && LOG_LEVEL_COLORS[m[2]]) ctx.fillStyle = LOG_LEVEL_COLORS[m[2]]
+    ctx.fillText(line, pad, y)
+    y += lineH
+  }
+  if (truncated) {
+    ctx.fillStyle = '#f0a35c'
+    ctx.fillText(`… 日志过长，已截取前 ${maxRows} 行（共 ${total} 行）`, pad, y)
+  }
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve({ blob, truncated }), 'image/png')
+  })
+}
+
+/** 复制最近 100 行日志的文本（要图就点「发给主人」） */
 function copyAll() {
-  const text = lines.value
+  const all = lines.value
+  if (!all.length) return
+  const text = all
+    .slice(-100)
     .map((it) => (it.time ? `[${it.time}][${it.level}]${it.text}` : it.text))
     .join('\n')
-  navigator.clipboard?.writeText(text).then(
-    () => message.success(`已复制 ${lines.value.length} 行`),
+  copyText(
+    text,
+    () => message.success(`已复制最近 ${Math.min(all.length, 100)} 行`),
     () => message.warn('复制失败，浏览器不允许访问剪贴板'),
   )
+}
+
+const sendingImage = ref(false)
+
+/** 把最近 100 行日志渲染成图，私聊发给主人 */
+async function sendImageToMaster() {
+  const all = lines.value
+  if (!all.length) {
+    message.info('还没有日志')
+    return
+  }
+  const rows = all
+    .slice(-100)
+    .map((it) => (it.time ? `[${it.time}][${it.level}]${it.text}` : it.text))
+  const { blob } = await drawLogImage(rows.join('\n'), rows.length)
+  if (!blob) {
+    message.error('截图生成失败')
+    return
+  }
+  // 图片走 multipart：base64 塞 JSON 会撞宿主 express.json 的 body 上限（413）
+  const fd = new FormData()
+  fd.append('image', blob, 'log.png')
+  sendingImage.value = true
+  try {
+    const data = await apiLogSendImage(fd)
+    message.success(`已发送给 ${data.sent.length} 个主人`)
+  } catch {
+    // 发送失败的错误已由请求层弹出
+  } finally {
+    sendingImage.value = false
+  }
 }
 
 onMounted(async () => {
@@ -194,6 +317,11 @@ onBeforeUnmount(() => {
 
       <Tooltip title="把当前显示的日志复制到剪贴板">
         <Button size="small" @click="copyAll">复制</Button>
+      </Tooltip>
+      <Tooltip title="把当前显示的日志渲染成图，私聊发给主人">
+        <Button size="small" :loading="sendingImage" @click="sendImageToMaster">
+          <GIcon icon="ant-design:send-outlined" :size="13" /> 发给主人
+        </Button>
       </Tooltip>
       <Tooltip title="只清面板里的显示，磁盘上的日志文件不动">
         <Button size="small" @click="clear">清空</Button>

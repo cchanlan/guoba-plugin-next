@@ -19,6 +19,12 @@ export class LogController extends ApiController {
     this.get('/tail', this.tail)
     this.get('/status', this.status)
     this.post('/clear', this.clear)
+    this.post('/send-image', this.sendImage)
+  }
+
+  /** 把日志渲染图私聊发给主人。图片走 multipart（base64 塞 JSON 会撞宿主 body 上限 413） */
+  async sendImage(req) {
+    return Result.ok(await this.logService.sendImage(req.files?.[0]))
   }
 
   /**

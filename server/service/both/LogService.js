@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
-import {Service} from '#guoba.framework'
-import {_paths} from '#guoba.platform'
+import {Service, GuobaError} from '#guoba.framework'
+import {_paths, cfg} from '#guoba.platform'
 
 /** 环形缓冲最多留多少行。太小了刷屏时翻不到前面，太大了白占内存 */
 const MAX_LINES = 3000
@@ -15,6 +15,9 @@ const PRELOAD_BYTES = 128 * 1024
 const PRELOAD_LINES = 300
 /** 一次最多返回多少行 */
 const MAX_LIMIT = 2000
+
+/** 日志截图发给主人的图，单张字节上限（约 10MB PNG） */
+const MAX_IMAGE_SIZE = 10 * 1024 * 1024
 
 /**
  * 劫持前的原始 write 存在 process 上。
@@ -275,6 +278,38 @@ export default class LogService extends Service {
   clear() {
     this.#lines = []
     return this.#seq - 1
+  }
+
+  /**
+   * 把日志渲染图私聊发给主人。图走 multipart 上传（multer 落盘在临时目录），
+   * 这里读字节转 base64:// 交给适配器。主人取 `cfg.masterQQ`，可多个，逐个发。
+   */
+  async sendImage(file) {
+    // 锅巴的 cfg 是它自己的配置封装，没有 masterQQ —— TRSS 的真实 config 在 cfg.trssCfg。
+    // masterQQ 里可能混着 stdin（命令行标识），只留数字 QQ
+    const masters = (cfg.trssCfg?.masterQQ ?? []).filter((qq) => /^\d+$/.test(String(qq)))
+    if (!masters.length) throw new GuobaError('未配置主人 QQ（检查 config/config/other.yaml 的 masterQQ）')
+    if (!file?.path) throw new GuobaError('没有收到图片')
+    const buffer = fs.readFileSync(file.path)
+    fs.rmSync(file.path, {force: true})
+    if (buffer.length > MAX_IMAGE_SIZE) {
+      throw new GuobaError(`图片过大（上限 ${MAX_IMAGE_SIZE / 1024 / 1024}MB）`)
+    }
+    const msg = [{type: 'image', file: `base64://${buffer.toString('base64')}`}]
+    const sent = []
+    for (const qq of masters) {
+      try {
+        const friend = Bot?.pickUser ? Bot.pickUser(qq) : null
+        if (friend?.sendMsg) {
+          await friend.sendMsg(msg)
+          sent.push(qq)
+        }
+      } catch (err) {
+        logger.debug(`[Guoba] 日志图发送到 ${qq} 失败：${err?.message ?? err}`)
+      }
+    }
+    if (!sent.length) throw new GuobaError('发送失败，请检查主人配置')
+    return {ok: true, sent}
   }
 
   /** 页面上显示的状态 */
