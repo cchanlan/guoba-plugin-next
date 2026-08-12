@@ -135,6 +135,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '账号管理', icon: 'ant-design:user-outlined' },
       },
       {
+        path: 'account/security',
+        name: 'AccountSecurity',
+        component: () => import('@/views/account/LoginSecurity.vue'),
+        meta: { title: '登录安全' },
+      },
+      {
         path: 'about',
         name: 'About',
         component: () => import('@/views/about/index.vue'),
@@ -176,6 +182,11 @@ router.beforeEach(async (to) => {
       auth.reset()
       return { path: '/login' }
     }
+  }
+
+  // 初始化令牌登录后还没设置账号密码，强制先去登录安全页设置
+  if (!auth.configured && to.path !== '/account/security') {
+    return { path: '/account/security' }
   }
 
   return true

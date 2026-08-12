@@ -19,7 +19,7 @@ export async function useMenuList() {
   menus.push(SystemMenus.fileManager)
   menus.push(SystemMenus.terminal)
   menus.push(...(await useCustomPagesMenu()))
-  menus.push(SystemMenus.account)
+  menus.push(SystemMenus.accountGroup)
   menus.push(SystemMenus.about)
   return menus
 }

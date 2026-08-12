@@ -1,414 +1,257 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Alert, Button, Input, Spin, Tabs, TabPane, Typography, message } from 'ant-design-vue'
+import { Alert, Button, Input, message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
-import { apiCreateConfirmRequest, apiPollConfirmRequest, apiRequestLoginCode } from '@/api'
+import { apiGetLoginStatus, apiRequestLoginCaptcha, apiRequestLoginCode } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { GUOBA_VERSION, ICP_NO } from '@/utils/env'
 
-/**
- * 登录页。
- *
- * 后端不支持账号密码登录（LoginController.login 直接返回错误），
- * 只有三条路：
- *  1. 群里/私聊发送 `#锅巴登录`，Bot 回复带 code 的免密地址；
- *  2. 请求后端在控制台打印验证码，再把验证码填进来；
- *  3. 页面发起待确认请求，主人发 `#锅巴确认登录` 后本页自动进入面板。
- */
 const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
 
-const activeTab = ref('code')
-
-const codeInput = ref('')
-const codeLoading = ref(false)
+const username = ref('')
+const password = ref('')
+const captcha = ref('')
+const loginToken = ref('')
+const configured = ref(true)
+const captchaRequired = ref(false)
+const loading = ref(false)
 const requesting = ref(false)
-const requested = ref(false)
+const tokenLoading = ref(false)
+const tokenRequesting = ref(false)
 
-async function requestCode() {
+async function loadStatus() {
+  try {
+    const status = await apiGetLoginStatus()
+    configured.value = status.configured
+    captchaRequired.value = status.captchaRequired
+  } catch {
+    message.error('无法获取登录状态，请确认锅巴服务已启动')
+  }
+}
+
+async function requestCaptcha() {
   requesting.value = true
   try {
-    const res = await apiRequestLoginCode()
-    requested.value = true
-    // 后端会同时私聊主人，pushed 为收到的主人数量
-    if (res?.pushed) {
-      message.success('验证码已私聊发送给主人，也可在 Yunzai 控制台查看')
-    } else {
-      message.success('已请求验证码，请查看 Yunzai 控制台输出')
-    }
-  } catch {
-    // 请求层已提示（例如上一个验证码还没失效）
+    const result = await apiRequestLoginCaptcha()
+    message.success(result.pushed ? '验证码已私聊发送给主人' : '发送私聊失败，请查看 Yunzai 控制台')
+  } catch (error: any) {
+    message.error(error?.message || '验证码发送失败')
   } finally {
     requesting.value = false
   }
 }
 
-function redirectAfterLogin() {
-  const redirect = route.query.redirect as string | undefined
-  router.replace(redirect || '/home')
-}
-
-/* ---------------- 聊天确认登录 ---------------- */
-
-const confirmCode = ref('')
-const confirmLeft = ref(0)
-const confirmWaiting = ref(false)
-const confirmStarting = ref(false)
-let pollTimer: number | undefined
-let countdownTimer: number | undefined
-
-function stopConfirm() {
-  window.clearInterval(pollTimer)
-  window.clearInterval(countdownTimer)
-  pollTimer = undefined
-  countdownTimer = undefined
-  confirmWaiting.value = false
-}
-
-onUnmounted(stopConfirm)
-
-async function startConfirm() {
-  stopConfirm()
-  confirmStarting.value = true
-  let id: string
-  try {
-    const res = await apiCreateConfirmRequest()
-    id = res.id
-    confirmCode.value = res.code
-    confirmLeft.value = res.expire
-  } catch {
-    // 请求层已提示
-    return
-  } finally {
-    confirmStarting.value = false
-  }
-
-  confirmWaiting.value = true
-
-  countdownTimer = window.setInterval(() => {
-    confirmLeft.value--
-    if (confirmLeft.value <= 0) {
-      stopConfirm()
-      message.warning('登录请求已过期，请重新发起')
-    }
-  }, 1000)
-
-  pollTimer = window.setInterval(async () => {
-    try {
-      const res = await apiPollConfirmRequest(id)
-      if (res.status !== 'approved') return
-      stopConfirm()
-      auth.loginByConfirmToken(res.token)
-      await auth.loadUserInfo()
-      message.success('登录成功')
-      redirectAfterLogin()
-    } catch {
-      // 过期或已被取用，交给倒计时收尾
-      stopConfirm()
-      message.warning('登录请求已失效，请重新发起')
-    }
-  }, 2000)
-}
-
-async function submitCode() {
-  const code = codeInput.value.trim()
-  if (!code) {
-    message.warning('请输入控制台打印的验证码')
+async function submit() {
+  if (!username.value.trim() || !password.value) {
+    message.warning('请输入用户名和密码')
     return
   }
-  codeLoading.value = true
+  if (captchaRequired.value && !captcha.value.trim()) {
+    message.warning('新 IP 首次登录需要验证码')
+    return
+  }
+  loading.value = true
   try {
-    await auth.loginByConsoleCode(code)
+    await auth.loginByPassword(username.value.trim(), password.value, captcha.value.trim() || undefined)
     await auth.loadUserInfo()
     message.success('登录成功')
-    redirectAfterLogin()
-  } catch (e: any) {
-    message.error(e?.message || '验证码错误或已失效')
+    const redirect = route.query.redirect as string | undefined
+    router.replace(redirect || '/home')
+  } catch (error: any) {
+    if (error?.status === 428 || error?.code === 428) captchaRequired.value = true
+    message.error(error?.message || '登录失败')
   } finally {
-    codeLoading.value = false
+    loading.value = false
   }
 }
+
+async function requestToken() {
+  tokenRequesting.value = true
+  try {
+    const result = await apiRequestLoginCode()
+    message.success(result.pushed ? '登录令牌已私聊发送给主人' : '发送私聊失败，请查看 Yunzai 控制台')
+  } catch (error: any) {
+    message.error(error?.message || '令牌发送失败')
+  } finally {
+    tokenRequesting.value = false
+  }
+}
+
+async function submitToken() {
+  const code = loginToken.value.trim()
+  if (!code) {
+    message.warning('请输入登录令牌')
+    return
+  }
+  tokenLoading.value = true
+  try {
+    // 令牌有两种来源：页面按钮请求的初始化验证码，以及 #锅巴登录 下发的快捷令牌
+    try {
+      await auth.loginByConsoleCode(code)
+    } catch {
+      await auth.loginByCode(code)
+    }
+    await auth.loadUserInfo()
+    message.success('登录成功，请先设置账号密码')
+    // 初始化登录后直接进登录安全页，引导先把账号密码设置好
+    router.replace('/account/security')
+  } catch (error: any) {
+    message.error(error?.message || '令牌错误或已失效')
+  } finally {
+    tokenLoading.value = false
+  }
+}
+
+onMounted(loadStatus)
 </script>
 
 <template>
-  <div class="g-login">
+  <main class="g-login">
     <div class="g-login-bg" />
-
-    <div class="g-login-card">
-      <div class="g-login-head">
+    <section class="g-login-card">
+      <header class="g-login-head">
         <img src="/logo.png" alt="Guoba" class="g-login-logo" />
-        <div>
-          <h1 class="g-login-title">锅巴面板</h1>
-          <p class="g-login-sub">Yunzai 后台管理 · v{{ GUOBA_VERSION }}</p>
-        </div>
-      </div>
+        <h1>锅巴 Web 控制台</h1>
+        <p>安全登录认证 · v{{ GUOBA_VERSION }}</p>
+      </header>
 
-      <Tabs v-model:activeKey="activeTab" centered>
-        <TabPane key="code" tab="验证码登录">
-          <Alert
-            type="info"
-            show-icon
-            class="g-login-alert"
-            message="点击下方按钮后，Bot 会把验证码私聊发给主人"
-            description="同时也会打印在 Yunzai 控制台（需日志等级 info 或以上）。验证码 5 分钟内有效。"
-          />
+      <Alert
+        v-if="!configured"
+        type="warning"
+        show-icon
+        class="g-login-alert"
+        message="尚未设置登录账号"
+        description="点击「获取令牌」，机器人会把登录令牌私聊发给主人，输入令牌进入面板后请尽快设置用户名和密码。"
+      />
 
-          <Button
-            block
-            class="g-login-request"
-            :loading="requesting"
-            @click="requestCode"
-          >
-            <GIcon icon="ant-design:code-outlined" :size="14" />
-            <span class="g-btn-text">
-              {{ requested ? '重新请求验证码' : '请求验证码' }}
-            </span>
-          </Button>
-
+      <form v-if="!configured" class="g-login-form" @submit.prevent="submitToken">
+        <label>登录令牌</label>
+        <div class="g-captcha-row">
           <Input
-            v-model:value="codeInput"
+            v-model:value="loginToken"
             size="large"
-            placeholder="请输入收到的验证码"
-            class="g-login-input"
-            allowClear
-            @pressEnter="submitCode"
+            placeholder="请输入机器人发来的登录令牌"
+            autocomplete="one-time-code"
+            @pressEnter="submitToken"
           >
-            <template #prefix>
-              <GIcon icon="ant-design:safety-outlined" :size="15" />
-            </template>
+            <template #prefix><GIcon icon="ant-design:key-outlined" :size="16" /></template>
           </Input>
+          <Button size="large" :loading="tokenRequesting" @click="requestToken">获取令牌</Button>
+        </div>
+        <Button type="primary" size="large" html-type="submit" block :loading="tokenLoading">
+          令牌登录
+        </Button>
+      </form>
 
-          <Button
-            type="primary"
-            size="large"
-            block
-            :loading="codeLoading"
-            @click="submitCode"
-          >
-            登录
-          </Button>
-        </TabPane>
+      <form v-else class="g-login-form" @submit.prevent="submit">
+        <label>用户名</label>
+        <Input v-model:value="username" size="large" placeholder="请输入用户名" autocomplete="username">
+          <template #prefix><GIcon icon="ant-design:user-outlined" :size="16" /></template>
+        </Input>
 
-        <TabPane key="chat" tab="聊天登录">
-          <Alert
-            type="info"
-            show-icon
-            class="g-login-alert"
-            message="向 Bot 发送「#锅巴确认登录」即可进入"
-            description="点击下方按钮后，用主人账号给 Bot 发这条指令，本页会自动登录，无需复制任何内容。"
-          />
+        <label>密码</label>
+        <Input.Password
+          v-model:value="password"
+          size="large"
+          placeholder="请输入密码"
+          autocomplete="current-password"
+          @pressEnter="submit"
+        >
+          <template #prefix><GIcon icon="ant-design:lock-outlined" :size="16" /></template>
+        </Input.Password>
 
-          <template v-if="confirmWaiting">
-            <div class="g-confirm-wait">
-              <Spin />
-              <p class="g-confirm-tip">等待主人确认…</p>
-              <p class="g-confirm-cmd">请向 Bot 发送 <code>#锅巴确认登录</code></p>
-              <p class="g-confirm-meta">
-                本次识别码 <b>{{ confirmCode }}</b> · {{ confirmLeft }} 秒后过期
-              </p>
-            </div>
-
-            <Button block @click="stopConfirm">取消</Button>
-          </template>
-
-          <template v-else>
-            <div class="g-login-steps">
-              <div class="g-step">
-                <span class="g-step-no">1</span>
-                <span>点击下方「发起登录请求」</span>
-              </div>
-              <div class="g-step">
-                <span class="g-step-no">2</span>
-                <span>向 Bot 发送 <code>#锅巴确认登录</code></span>
-              </div>
-              <div class="g-step">
-                <span class="g-step-no">3</span>
-                <span>本页自动进入面板，请求 2 分钟内有效</span>
-              </div>
-            </div>
-
-            <Button
-              type="primary"
+        <template v-if="captchaRequired">
+          <label>验证码</label>
+          <div class="g-captcha-row">
+            <Input
+              v-model:value="captcha"
               size="large"
-              block
-              :loading="confirmStarting"
-              @click="startConfirm"
+              placeholder="请输入机器人私聊验证码"
+              autocomplete="one-time-code"
+              @pressEnter="submit"
             >
-              发起登录请求
-            </Button>
+              <template #prefix><GIcon icon="ant-design:safety-outlined" :size="16" /></template>
+            </Input>
+            <Button size="large" :loading="requesting" @click="requestCaptcha">获取验证码</Button>
+          </div>
+          <p class="g-login-tip">每个新 IP 首次登录需验证，验证码会由机器人单独一行私聊给主人。</p>
+        </template>
 
-            <Typography.Text type="secondary" class="g-login-note">
-              也可以发送「#锅巴登录」，Bot 会回复一个免密登录地址。
-            </Typography.Text>
-          </template>
-        </TabPane>
-      </Tabs>
+        <Button type="primary" size="large" html-type="submit" block :loading="loading" :disabled="!configured">
+          登录
+        </Button>
+        <p class="g-login-tip">忘记密码？主人私聊机器人发送「#锅巴重置密码」即可清空凭证重新初始化。</p>
+      </form>
 
-      <footer v-if="ICP_NO" class="g-login-footer">{{ ICP_NO }}</footer>
-    </div>
-  </div>
+      <footer>
+        <span>锅巴面板</span>
+        <span v-if="ICP_NO">{{ ICP_NO }}</span>
+      </footer>
+    </section>
+  </main>
 </template>
 
 <style scoped>
 .g-login {
   position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
   min-height: 100vh;
   padding: 24px;
-  background: var(--g-bg);
-  overflow: hidden;
+  overflow: auto;
+  background: #f1f4f9;
 }
 
-/* 背景用两团柔和的品牌色光斑，避免纯色死板 */
 .g-login-bg {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  background:
-    radial-gradient(circle at 22% 28%, rgba(209, 159, 86, 0.18), transparent 42%),
-    radial-gradient(circle at 78% 72%, rgba(86, 132, 209, 0.14), transparent 45%);
   pointer-events: none;
+  background:
+    radial-gradient(circle at 18% 20%, rgba(79, 119, 216, 0.13), transparent 35%),
+    radial-gradient(circle at 82% 78%, rgba(83, 153, 218, 0.12), transparent 38%);
 }
 
 .g-login-card {
   position: relative;
-  width: 100%;
-  max-width: 420px;
-  padding: 32px 30px 24px;
+  width: min(100%, 420px);
+  padding: 34px 30px 24px;
+  color: #283244;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid rgba(211, 219, 232, 0.8);
+  border-radius: 18px;
+  box-shadow: 0 20px 55px rgba(36, 54, 85, 0.16);
+}
+
+.g-login-head { text-align: center; margin-bottom: 24px; }
+.g-login-logo { width: 46px; height: 46px; margin-bottom: 10px; }
+.g-login-head h1 { margin: 0; font-size: 22px; font-weight: 650; color: #202938; }
+.g-login-head p { margin: 6px 0 0; font-size: 12px; color: #98a1b2; }
+.g-login-alert { margin-bottom: 18px; }
+.g-login-form { display: flex; flex-direction: column; gap: 10px; }
+.g-login-form label { margin-top: 2px; font-size: 13px; color: #566176; }
+.g-captcha-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+.g-login-tip { margin: -2px 0 4px; font-size: 12px; line-height: 1.6; color: #8993a5; }
+footer { display: flex; justify-content: center; gap: 12px; margin-top: 22px; font-size: 11px; color: #a4acb9; }
+
+:deep(.ant-input-affix-wrapper), :deep(.ant-btn) { border-radius: 9px; }
+:deep(.ant-btn-primary) { margin-top: 6px; background: #4f77d8; box-shadow: 0 7px 15px rgba(79, 119, 216, 0.25); }
+
+@media (max-width: 480px) {
+  .g-login { padding: 14px; }
+  .g-login-card { padding: 28px 20px 20px; }
+  .g-captcha-row { grid-template-columns: 1fr; }
+}
+
+:global([data-theme='dark']) .g-login { background: #0d1017; }
+:global([data-theme='dark']) .g-login-card {
+  color: var(--g-text);
   background: var(--g-bg-card);
-  border: 1px solid var(--g-border);
-  border-radius: 16px;
+  border-color: var(--g-border);
   box-shadow: var(--g-shadow);
 }
-
-.g-login-head {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-bottom: 8px;
-}
-
-.g-login-logo {
-  width: 44px;
-  height: 44px;
-}
-
-.g-login-title {
-  margin: 0;
-  font-size: 21px;
-  font-weight: 600;
-  color: var(--g-text);
-}
-
-.g-login-sub {
-  margin: 2px 0 0;
-  font-size: 12px;
-  color: var(--g-text-dim);
-}
-
-.g-login-alert {
-  margin-bottom: 16px;
-}
-
-.g-login-request {
-  margin-bottom: 12px;
-}
-
-.g-btn-text {
-  margin-left: 6px;
-}
-
-.g-login-input {
-  margin-bottom: 14px;
-}
-
-.g-login-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.g-step {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 13px;
-  color: var(--g-text-sub);
-}
-
-.g-step-no {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--g-brand);
-  background: var(--g-brand-soft);
-  border-radius: 50%;
-}
-
-.g-step code {
-  padding: 1px 5px;
-  background: var(--g-brand-soft);
-  border-radius: 4px;
-  color: var(--g-brand);
-}
-
-.g-login-note {
-  display: block;
-  font-size: 12px;
-}
-
-/* 等待主人确认时的占位块 */
-.g-confirm-wait {
-  padding: 22px 16px 18px;
-  margin-bottom: 12px;
-  text-align: center;
-  background: var(--g-brand-soft);
-  border-radius: 10px;
-}
-
-.g-confirm-tip {
-  margin: 12px 0 0;
-  font-size: 14px;
-  color: var(--g-text);
-}
-
-.g-confirm-cmd {
-  margin: 8px 0 0;
-  font-size: 13px;
-  color: var(--g-text-sub);
-}
-
-.g-confirm-cmd code {
-  padding: 1px 5px;
-  background: var(--g-bg-card);
-  border-radius: 4px;
-  color: var(--g-brand);
-}
-
-.g-confirm-meta {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--g-text-dim);
-}
-
-.g-confirm-meta b {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: 1px;
-  color: var(--g-brand);
-}
-
-.g-login-footer {
-  margin-top: 18px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--g-text-dim);
-}
+:global([data-theme='dark']) .g-login-head h1 { color: var(--g-text); }
+:global([data-theme='dark']) .g-login-form label { color: var(--g-text-sub); }
 </style>

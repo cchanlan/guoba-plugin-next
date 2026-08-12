@@ -5,6 +5,8 @@ import type {
   FsTreeNode,
   HomeData,
   LoginUser,
+  LoginStatus,
+  LoginSecurity,
   MenuItem,
   MsgStat,
   PluginItem,
@@ -12,6 +14,23 @@ import type {
 } from '@/types'
 
 /* ---------------- 登录 / 用户 ---------------- */
+
+export const apiGetLoginStatus = () => get<LoginStatus>('/login/status', undefined, { showError: false })
+
+export const apiLogin = (body: { username: string; password: string; captcha?: string }) =>
+  post<{ token: string }>('/login', body, { showError: false })
+
+export const apiRequestLoginCaptcha = () =>
+  post<{ pushed?: number; expire?: number }>('/login/captcha/request', {}, { showError: false })
+
+export const apiGetLoginSecurity = () => get<LoginSecurity>('/login/security')
+
+export const apiSetLoginCredentials = (body: { username: string; password: string; currentPassword?: string }) =>
+  put<LoginSecurity>('/login/security/credentials', body, { showSuccess: true })
+
+export const apiRevokeTrustedIp = (ip: string) => del<LoginSecurity>(`/login/security/trusted-ips/${encodeURIComponent(ip)}`)
+
+export const apiClearTrustedIps = () => del<LoginSecurity>('/login/security/trusted-ips')
 
 /** 主人快速登录：用 #锅巴登录 生成的 code 换 token */
 export const apiQuickLogin = (code: string) =>

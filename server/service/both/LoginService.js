@@ -24,15 +24,18 @@ export class LoginService extends Service {
     }
   }
 
+  /** 仅获取面板地址，不签发任何令牌（已启用账号密码登录时用） */
+  async getWebAddress() {
+    return getAllWebAddress()
+  }
+
   async setQuickLogin(username) {
     let {redisKey, code} = this.getQuickLoginRedisKey(null)
     let token = this.signToken(username)
     redis.set(redisKey, token, {EX: 180})
+    // 地址保持干净，不再拼接临时令牌路径，令牌单独发送，在登录页输入即可
     let webAddress = await getAllWebAddress()
-    for (let [key, address] of Object.entries(webAddress)) {
-      webAddress[key] = address.map(h => `${h}/#/ml/${code}`)
-    }
-    return webAddress
+    return {webAddress, code}
   }
 
   async getQuickLogin(code) {

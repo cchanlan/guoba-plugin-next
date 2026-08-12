@@ -12,15 +12,30 @@ export const SystemMenus = {
       icon: 'ant-design:home-outlined',
     },
   },
-  // 账号管理
-  account: {
-    path: '/account',
-    name: 'Account',
-    component: '/guoba/system/account/index',
+  // 账号管理（父级，包含子菜单）
+  // 注意：path 不能与子项重复，否则侧边栏菜单键冲突，点击子项会误收起子菜单
+  accountGroup: {
+    path: '/account-group',
+    name: 'AccountGroup',
     meta: {
       title: '账号管理',
       icon: 'ant-design:user-outlined',
     },
+    children: [
+      {
+        path: '/account',
+        name: 'Account',
+        component: '/guoba/system/account/index',
+        meta: {title: 'Bot 账号', icon: 'ant-design:robot-outlined'},
+      },
+      {
+        path: '/account/security',
+        name: 'AccountSecurity',
+        component: '/guoba/system/account/security',
+        // safety-certificate-outlined 不在前端离线图标集里，离线环境会变占位符
+        meta: {title: '登录安全', icon: 'ant-design:safety-outlined'},
+      },
+    ],
   },
   // 消息记录
   chat: {

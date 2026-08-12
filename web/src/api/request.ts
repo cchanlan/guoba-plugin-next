@@ -60,11 +60,13 @@ http.interceptors.response.use(
 /** 带 HTTP 状态码的请求异常，调用方可据此区分 404（如接口未注册）等情况 */
 export class ApiError extends Error {
   status?: number
+  code?: number
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, code?: number) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = code
   }
 }
 
@@ -92,7 +94,7 @@ export async function request<T = any>(
       return data as unknown as T
     }
     if (!data.ok) {
-      throw new ApiError(data.message || '请求失败', resp.status)
+      throw new ApiError(data.message || '请求失败', resp.status, data.code)
     }
     if (showSuccess && data.message && data.message !== 'ok') {
       message.success(data.message)
@@ -103,7 +105,7 @@ export async function request<T = any>(
     if (showError) {
       message.error(text)
     }
-    throw new ApiError(text, error?.status ?? error?.response?.status)
+    throw new ApiError(text, error?.status ?? error?.response?.status, error?.code ?? error?.response?.data?.code)
   }
 }
 

@@ -162,7 +162,7 @@ export function supportGuoba () {
       ],
       // 获取配置数据方法（用于前端填充显示数据）
       getConfigData () {
-        let config = lodash.omit(cfg.merged, 'jwt')
+        let config = lodash.omit(cfg.merged, ['jwt', 'auth'])
         let host = lodash.get(config, 'server.host')
         if (Array.isArray(host)) {
           lodash.set(config, 'server.host', host[0])
@@ -191,6 +191,9 @@ export function supportGuoba () {
           lodash.set(config, keyPath, value)
         }
         config = lodash.merge({}, cfg.merged, config)
+        // 登录凭证只能通过专用安全接口修改，拒绝通用配置表单覆盖。
+        config.auth = cfg.merged.auth
+        config.jwt = cfg.merged.jwt
         cfg.config.reader.setData(config)
         return Result.ok({}, '保存成功~')
       }

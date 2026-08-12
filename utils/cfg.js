@@ -45,6 +45,14 @@ class GuobaConfig {
       // 随机生成32位 secret
       this.set('jwt.secret', randomString(32))
     }
+    // 旧版本配置没有 auth 节点时，仅补齐结构，不覆盖用户已有配置。
+    if (!this.config.reader.jsonData.auth || typeof this.config.reader.jsonData.auth !== 'object') {
+      this.set('auth', {username: '', passwordHash: '', trustedIps: []})
+    } else {
+      if (!Array.isArray(this.config.reader.jsonData.auth.trustedIps)) this.set('auth.trustedIps', [])
+      if (typeof this.config.reader.jsonData.auth.username !== 'string') this.set('auth.username', '')
+      if (typeof this.config.reader.jsonData.auth.passwordHash !== 'string') this.set('auth.passwordHash', '')
+    }
     this.config.reader.watcher.on('change', () => {
       if (!this.config.reader.isSave) {
         logger.mark(`[Guoba] 配置文件重载成功~`)

@@ -4,6 +4,7 @@ import { cfg } from '#guoba.platform'
 
 export class GuobaLogin extends plugin {
   loginService = autowired('loginService')
+  loginSecurityService = autowired('loginSecurityService')
 
   constructor (e) {
     super({
@@ -20,13 +21,33 @@ export class GuobaLogin extends plugin {
           // 网页上点了「聊天登录」后，发这个即可直接进面板；同时有多个请求时可带短码
           reg: '^#?锅巴确认(登录|登陆)\\s*([A-Za-z0-9]{4})?$',
           fnc: 'confirmLogin'
+        },
+        {
+          // 忘记密码时由主人重置：清空账号密码和可信IP，回到初始化登录流程
+          reg: '^#?锅巴重置(登录|登陆|密码)$',
+          fnc: 'resetLogin'
         }
       ]
     }, e)
   }
 
+  async resetLogin () {
+    if (!this.e.isMaster) return false
+    if (!this.loginSecurityService.configured) {
+      return this.reply('当前尚未设置账号密码，无需重置。')
+    }
+    this.loginSecurityService.resetCredentials()
+    return this.reply(
+      '登录凭证已重置，账号密码和可信IP已全部清空。\n'
+      + '现在可以发送“#锅巴登录”获取登录地址，登录后请尽快在“账号管理 - 登录安全”中重新设置账号密码。'
+    )
+  }
+
   async confirmLogin () {
     if (!this.e.isMaster) return false
+    if (this.loginSecurityService.configured) {
+      return this.reply('当前已启用用户名密码登录，请在网页中输入凭证。')
+    }
 
     const code = this.e.msg.match(/([A-Za-z0-9]{4})\s*$/)?.[1]
     let result
@@ -59,10 +80,19 @@ export class GuobaLogin extends plugin {
 
   async login () {
     if (!this.e.isMaster) return false
+    const configured = this.loginSecurityService.configured
 
     let webAddress
+    let loginCode
     try {
-      webAddress = await this.loginService.setQuickLogin(this.e.user_id)
+      if (configured) {
+        // 已启用账号密码登录，不签发临时令牌，只发面板地址
+        webAddress = await this.loginService.getWebAddress()
+      } else {
+        const result = await this.loginService.setQuickLogin(this.e.user_id)
+        webAddress = result.webAddress
+        loginCode = result.code
+      }
     } catch (e) {
       console.error(e)
       return this.reply(
@@ -72,7 +102,9 @@ export class GuobaLogin extends plugin {
 
     const onlyCustomAddress = cfg.get('base.onlyCustomAddress')
     const { custom, local, remote } = webAddress
-    const message = ['欢迎回来主人~\n这是您的登录地址：']
+    const message = configured
+      ? ['这是锅巴面板的地址，请使用用户名密码登录：']
+      : ['欢迎回来主人~\n这是您的登录地址：']
 
     // 文案与网址分条发送，方便手机端长按复制
     const pushAddress = (title, list) => {
@@ -102,9 +134,15 @@ export class GuobaLogin extends plugin {
       }
     }
 
-    message.push(
-      '临时令牌3分钟内有效（请勿轻易告知他人哦），使用过后会立即失效，若登录成功将会在使用者的浏览器上生成个24小时内有效的令牌，过期后需要重新登录~'
-    )
+    if (configured) {
+      message.push('若忘记密码，可发送“#锅巴重置密码”清空凭证重新初始化。')
+    } else {
+      message.push('您的登录令牌（3分钟内有效，用后即失效）：')
+      message.push(loginCode)
+      message.push(
+        '打开登录页后，在“令牌登录”处粘贴令牌即可进入面板（请勿轻易告知他人哦），若登录成功将会在使用者的浏览器上生成个24小时内有效的令牌，过期后需要重新登录~'
+      )
+    }
 
     if (this.e?.platform) {
       message.push('[请在后台查看地址]')
@@ -120,12 +158,19 @@ export class GuobaLogin extends plugin {
         await Bot.pickUser(this.e.user_id).sendMsg(
           await this.e.runtime.common.makeForwardMsg(this.e, message)
         )
-        await this.reply('地址已发送至主人的私信了~')
+        await this.reply(
+          configured
+            ? '当前已启用用户名密码登录，面板地址已私聊发送给主人~'
+            : '地址已发送至主人的私信了~'
+        )
       } catch (e) {
         logger.error(e)
         await this.reply('消息发送失败~请加Bot的好友或者私聊发送#锅巴登录')
       }
     } else {
+      if (configured) {
+        await this.reply('当前已启用用户名密码登录，请使用以下地址打开面板：')
+      }
       await this.reply(await makeForwardMsg(this.e, message))
     }
   }

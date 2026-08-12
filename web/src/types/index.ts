@@ -96,6 +96,23 @@ export interface LoginUser {
   roles?: Array<{ roleName: string; value: string }>
 }
 
+export interface LoginStatus {
+  configured: boolean
+  captchaRequired: boolean
+  ip?: string
+}
+
+export interface TrustedIp {
+  ip: string
+  device?: string
+}
+
+export interface LoginSecurity {
+  configured: boolean
+  username: string
+  trustedIps: TrustedIp[]
+}
+
 export interface HomeData {
   cookieCount?: number
   friendCount?: number

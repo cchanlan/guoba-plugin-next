@@ -16,7 +16,13 @@ const include = [
 
 // 不需要拦截的路径
 const exclude = [
-  new RegExp('^/api/login'),
+  // 仅放行登录所需的公开接口；/login/security 必须经过正式令牌校验。
+  new RegExp('^/api/login$'),
+  new RegExp('^/api/login/status$'),
+  new RegExp('^/api/login/captcha/request$'),
+  new RegExp('^/api/login/quick$'),
+  new RegExp('^/api/login/code/(request|check)$'),
+  new RegExp('^/api/login/confirm/(request|poll)$'),
   new RegExp('^/api/helper/transit'),
   new RegExp('^/api/helper/release_port'),
   new RegExp('^/api/plugin/s/.+/icon'),

@@ -12,9 +12,11 @@ export class UserController extends ApiController {
 
   // 获取登录用户
   async getLoginUser(req) {
+    const username = req.decodeToken?.()?.username || Bot.uin
     return Result.ok({
-      userId: Bot.uin,
-      username: Bot.uin,
+      userId: username,
+      username,
+
       realName: Bot.nickname,
       avatar: '',
       desc: '',

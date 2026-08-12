@@ -3,6 +3,8 @@ import { computed, ref } from 'vue'
 import {
   apiCheckLoginCode,
   apiGetLoginUser,
+  apiLogin,
+  apiGetLoginStatus,
   apiGetMenuList,
   apiGetPermCode,
   apiLogout,
@@ -20,6 +22,8 @@ export const useAuthStore = defineStore('auth', () => {
   const menus = ref<MenuItem[]>([])
   /** 菜单是否已拉取，用于路由守卫决定要不要动态注册路由 */
   const menuLoaded = ref(false)
+  /** 是否已设置账号密码；未设置时路由守卫会强制跳到登录安全页 */
+  const configured = ref(true)
 
   const isLogin = computed(() => !!token.value)
 
@@ -39,6 +43,12 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = null
     menus.value = []
     menuLoaded.value = false
+  }
+
+  async function loginByPassword(username: string, password: string, captcha?: string) {
+    const data = await apiLogin({ username, password, captcha })
+    setToken(data.token)
+    return data.token
   }
 
   /** 主人快速登录：#锅巴登录 给出的链接里带的 code */
@@ -63,24 +73,29 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function logout() {
     const current = token.value
-    reset()
-    if (current) {
-      // 通知后端销毁 token，失败也无所谓，本地已清空
-      await apiLogout(current).catch(() => undefined)
+    try {
+      if (current) {
+        // 保留请求头中的 token，等后端销毁成功或失败后再清空本地状态。
+        await apiLogout(current).catch(() => undefined)
+      }
+    } finally {
+      reset()
     }
   }
 
   /** 拉取用户信息、权限、菜单 */
   async function loadUserInfo() {
-    const [userInfo, perm, menuList] = await Promise.all([
+    const [userInfo, perm, menuList, status] = await Promise.all([
       apiGetLoginUser(),
       apiGetPermCode(),
       apiGetMenuList(),
+      apiGetLoginStatus().catch(() => null),
     ])
     user.value = userInfo
     liteToken.value = perm?.liteToken ?? ''
     menus.value = Array.isArray(menuList) ? menuList : []
     menuLoaded.value = true
+    if (status) configured.value = status.configured
     return menus.value
   }
 
@@ -90,9 +105,11 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     menus,
     menuLoaded,
+    configured,
     isLogin,
     setToken,
     reset,
+    loginByPassword,
     loginByCode,
     loginByConsoleCode,
     loginByConfirmToken,
