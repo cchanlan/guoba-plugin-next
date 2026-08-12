@@ -62,6 +62,16 @@ export const SystemMenus = {
       icon: 'ant-design:database-outlined',
     },
   },
+  // 文件管理
+  fileManager: {
+    path: '/files',
+    name: 'FileManager',
+    component: '/guoba/files/index',
+    meta: {
+      title: '文件管理',
+      icon: 'ant-design:folder-outlined',
+    },
+  },
   // 配置管理
   config: {
     path: '/config',

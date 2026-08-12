@@ -66,6 +66,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '数据浏览', icon: 'ant-design:database-outlined' },
       },
       {
+        path: 'files',
+        name: 'FileManager',
+        component: () => import('@/views/files/index.vue'),
+        meta: { title: '文件管理', icon: 'ant-design:folder-outlined' },
+      },
+      {
         path: 'plugins',
         name: 'PluginsStore',
         component: () => import('@/views/plugins/index.vue'),

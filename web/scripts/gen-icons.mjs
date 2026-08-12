@@ -59,6 +59,8 @@ const ANTD_ICONS = {
   'edit-outlined': 'EditOutlined',
   'eye-outlined': 'EyeOutlined',
   'folder-outlined': 'FolderOutlined',
+  'folder-add-outlined': 'FolderAddOutlined',
+  'file-add-outlined': 'FileAddOutlined',
   'bug-outlined': 'BugOutlined',
   'sun-outlined': 'SunOutlined',
   'moon-outlined': 'MoonOutlined',

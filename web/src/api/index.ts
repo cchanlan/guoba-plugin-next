@@ -795,5 +795,51 @@ export function chatProxyUrl(url: string, token: string) {
   return `${API_BASE}/chat/proxy?${q.toString()}`
 }
 
+/* ---------------- 文件管理 ---------------- */
+
+/** 目录里的一项。path 用相对 Yunzai 根的路径，根本身是空串 */
+export interface FsFile {
+  name: string
+  isDir: boolean
+  size: number
+  mtime: number
+}
+
+/** 列目录 */
+export const apiFileList = (path: string) =>
+  get<FsFile[]>('/file/list', { path }, { showError: false })
+
+/** 读文本文件内容 */
+export const apiFileRead = (path: string) =>
+  get<{ content: string; size: number }>('/file/read', { path })
+
+/** 保存文本文件 */
+export const apiFileSave = (body: { path: string; content: string }) =>
+  post<{ ok: boolean }>('/file/save', body)
+
+/** 新建文件夹 */
+export const apiFileMkdir = (path: string) => post<{ ok: boolean }>('/file/mkdir', { path })
+
+/** 新建文件 */
+export const apiFileCreate = (body: { path: string; content?: string }) =>
+  post<{ ok: boolean }>('/file/create', body)
+
+/** 重命名 */
+export const apiFileRename = (body: { path: string; newName: string }) =>
+  post<{ ok: boolean }>('/file/rename', body)
+
+/** 删除（递归） */
+export const apiFileDelete = (path: string) => post<{ ok: boolean }>('/file/delete', { path })
+
+/** 上传：FormData 带 path 字段 + 文件，走 multipart（同消息记录发图） */
+export const apiFileUpload = (fd: FormData) =>
+  post<{ ok: boolean; saved: string[] }>('/file/upload', fd)
+
+/** 下载地址，token 走 query 才能直接写进 <a href> */
+export function fileDownloadUrl(path: string, token: string) {
+  const q = new URLSearchParams({ path, token })
+  return `${API_BASE}/file/download?${q.toString()}`
+}
+
 export * from './miao'
 export { request, get, post, put, del } from './request'

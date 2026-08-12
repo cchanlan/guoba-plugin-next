@@ -16,6 +16,7 @@ export async function useMenuList() {
   menus.push(SystemMenus.log)
   menus.push(SystemMenus.sandbox)
   menus.push(SystemMenus.data)
+  menus.push(SystemMenus.fileManager)
   menus.push(...(await useCustomPagesMenu()))
   menus.push(SystemMenus.account)
   menus.push(SystemMenus.about)
