@@ -78,6 +78,7 @@ const ANTD_ICONS = {
   'video-camera-outlined': 'VideoCameraOutlined',
   'message-outlined': 'MessageOutlined',
   'rollback-outlined': 'RollbackOutlined',
+  'more-outlined': 'MoreOutlined',
   'robot-outlined': 'RobotOutlined',
 }
 

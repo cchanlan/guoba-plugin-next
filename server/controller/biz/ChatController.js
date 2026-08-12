@@ -22,6 +22,8 @@ export class ChatController extends ApiController {
     this.post('/send', this.send)
     this.post('/send-raw', this.sendRaw)
     this.post('/recall', this.recall)
+    this.post('/resend', this.resend)
+    this.post('/poke', this.poke)
     this.post('/read', this.read)
     this.post('/forward', this.forward)
     // 下面两个要能直接写进 <img src>，token 走 query（TokenInterceptor 支持）
@@ -52,10 +54,13 @@ export class ChatController extends ApiController {
     return Result.ok(this.chatService.tail({key, cursor, rev}))
   }
 
-  /** 发消息，会真的发到 QQ 上 */
+  /** 发消息，会真的发到 QQ 上。图片走 multipart（锅巴全局挂的 multer 已把文件放进 req.files） */
   async send(req) {
-    const {botId, type, id, text, images, replyTo} = req.body ?? {}
-    return Result.ok(await this.chatService.send({botId, type, id, text, images, replyTo}))
+    const {botId, type, id, text, images, replyTo, ats} = req.body ?? {}
+    return Result.ok(await this.chatService.send({
+      botId, type, id, text, images, replyTo, ats,
+      files: req.files,
+    }))
   }
 
   /** 发原始消息段数组 */
@@ -68,6 +73,18 @@ export class ChatController extends ApiController {
   async recall(req) {
     const {botId, type, id, messageId} = req.body ?? {}
     return Result.ok(await this.chatService.recall({botId, type, id, messageId}))
+  }
+
+  /** 复读：把内存里那条消息按段原样再发（图片取回字节、表情带 id） */
+  async resend(req) {
+    const {botId, type, id, messageId} = req.body ?? {}
+    return Result.ok(await this.chatService.resend({botId, type, id, messageId}))
+  }
+
+  /** 戳一戳，群里是 pokeMember、私聊是 poke */
+  async poke(req) {
+    const {botId, type, id, userId} = req.body ?? {}
+    return Result.ok(await this.chatService.poke({botId, type, id, userId}))
   }
 
   /** 清掉某个会话的未读 */

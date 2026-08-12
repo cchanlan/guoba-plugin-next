@@ -4,10 +4,25 @@
  *
  * 「普通」档就是文本 + 图片，「Raw」档直接把 JSON 段数组交给适配器 —— 相当于在
  * 插件里写 `e.reply([...])`，用来试按钮、markdown、自定义段这些普通档拼不出来的东西。
+ *
+ * 图片以原始 File 对象提交（multipart），不再转 base64 —— 共享 TRSS 端口时 body
+ * 解析器是宿主的 express.json，默认 100kb，一张图塞进 JSON 就 413 了。
  */
 import { computed, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
+
+/** 预览用的图片，objectURL 由组件负责回收 */
+interface PickedImage {
+  file: File
+  url: string
+}
+
+/** 右键 @ 攒起来的待 @ 对象，发送时转成 at 段 */
+interface PickedAt {
+  qq: string
+  name: string
+}
 
 const props = defineProps<{
   disabled: boolean
@@ -18,7 +33,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  send: [payload: { text: string; images: string[] }]
+  send: [payload: { text: string; images: File[]; ats: PickedAt[] }]
   sendRaw: [raw: string]
   cancelReply: []
 }>()
@@ -28,7 +43,12 @@ const RAW_PLACEHOLDER = `[{"type": "text", "text": "hello"}]`
 const mode = ref<'normal' | 'raw'>('normal')
 const text = ref('')
 const raw = ref('')
-const images = ref<string[]>([])
+const images = ref<PickedImage[]>([])
+/** 右键 @ 攒起来的人，发送时转 at 段 */
+const ats = ref<PickedAt[]>([])
+
+/** 一次最多 @ 几个人，跟图片一样给个上限 */
+const MAX_ATS = 5
 
 const inputEl = ref<any>(null)
 const fileEl = ref<HTMLInputElement | null>(null)
@@ -61,7 +81,11 @@ function submit() {
     emit('sendRaw', raw.value)
     return
   }
-  emit('send', { text: text.value, images: images.value })
+  emit('send', {
+    text: text.value,
+    images: images.value.map((i) => i.file),
+    ats: ats.value,
+  })
 }
 
 /** 发送成功后由父层调，失败时内容留着好改 */
@@ -69,8 +93,29 @@ function reset() {
   if (mode.value === 'raw') raw.value = ''
   else {
     text.value = ''
-    images.value = []
+    clearImages()
+    ats.value = []
   }
+}
+
+/** 右键 @ 某个人：去重、限数，重复了只把输入焦点捞回来 */
+function addAt(one: { qq: string; name: string }) {
+  if (!one.qq) return
+  if (ats.value.some((a) => a.qq === one.qq)) {
+    nextTick(() => inputEl.value?.focus())
+    return
+  }
+  if (ats.value.length >= MAX_ATS) {
+    message.warning(`一次最多 @ ${MAX_ATS} 个人`)
+    return
+  }
+  ats.value.push(one)
+  nextTick(() => inputEl.value?.focus())
+}
+
+function clearImages() {
+  for (const img of images.value) URL.revokeObjectURL(img.url)
+  images.value = []
 }
 
 function onEnter(e: KeyboardEvent) {
@@ -107,17 +152,15 @@ function addFiles(files: File[]) {
     return
   }
   files.slice(0, room).forEach((file) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (typeof reader.result === 'string') images.value.push(reader.result)
-    }
-    reader.readAsDataURL(file)
+    images.value.push({ file, url: URL.createObjectURL(file) })
   })
 }
 
 defineExpose({
   reset,
   focus: () => inputEl.value?.focus(),
+  /** 右键 @ 某个人，由页面调 */
+  addAt,
   /** 按钮段的 input 会往输入框里填文本，由页面调 */
   setText: (v: string) => {
     mode.value = 'normal'
@@ -129,7 +172,8 @@ defineExpose({
 
 <template>
   <div class="g-cin" :class="{ 'is-disabled': disabled }">
-    <div class="g-cin-bar">
+    <!-- 档位 tab 压在最上，跟参考图一样分两栏 -->
+    <div class="g-cin-tabs">
       <a-radio-group v-model:value="mode" size="small" button-style="solid">
         <a-radio-button value="normal">普通</a-radio-button>
         <a-radio-button value="raw">发送 Raw</a-radio-button>
@@ -154,28 +198,38 @@ defineExpose({
       </button>
     </div>
 
+    <!-- 待 @ 的人：右键菜单攒起来的，发送时转成真 at 段 -->
+    <div v-if="ats.length" class="g-cin-ats">
+      <span v-for="(a, i) in ats" :key="a.qq" class="g-cin-at">
+        @{{ a.name || a.qq }}
+        <button type="button" class="g-cin-at-x" @click="ats.splice(i, 1)">
+          <GIcon icon="ant-design:close-outlined" :size="9" />
+        </button>
+      </span>
+    </div>
+
     <template v-if="mode === 'normal'">
       <div v-if="images.length" class="g-cin-imgs">
-        <div v-for="(img, i) in images" :key="i" class="g-cin-img">
-          <img :src="img" alt="" />
+        <div v-for="(img, i) in images" :key="img.url" class="g-cin-img">
+          <img :src="img.url" alt="" />
           <span class="g-cin-img-del" @click="images.splice(i, 1)">
             <GIcon icon="ant-design:close-outlined" :size="10" />
           </span>
         </div>
       </div>
-
-      <a-textarea
-        ref="inputEl"
-        v-model:value="text"
-        :disabled="disabled"
-        placeholder="输入消息，Enter 发送，Shift+Enter 换行；可粘贴或选择图片…"
-        :auto-size="{ minRows: 2, maxRows: 6 }"
-        :bordered="false"
-        @keydown.enter="onEnter"
-        @paste="onPaste"
-      />
     </template>
 
+    <a-textarea
+      v-if="mode === 'normal'"
+      ref="inputEl"
+      v-model:value="text"
+      :disabled="disabled"
+      :placeholder="'输入消息，Enter 发送，Shift+Enter 换行；可粘贴或选择图片…'"
+      :auto-size="{ minRows: 2, maxRows: 6 }"
+      :bordered="false"
+      @keydown.enter="onEnter"
+      @paste="onPaste"
+    />
     <a-textarea
       v-else
       ref="inputEl"
@@ -190,21 +244,29 @@ defineExpose({
 
     <div class="g-cin-acts">
       <template v-if="mode === 'normal'">
-        <a-button
-          size="small"
-          type="text"
+        <!-- 图片按钮在左下角，圆形发送键在右下角 -->
+        <button
+          type="button"
+          class="g-cin-imgbtn"
           :disabled="disabled || images.length >= maxImages"
+          :title="images.length >= maxImages ? `最多 ${maxImages} 张` : '添加图片'"
           @click="fileEl?.click()"
         >
-          <GIcon icon="ant-design:picture-outlined" :size="15" />
-        </a-button>
+          <GIcon icon="ant-design:picture-outlined" :size="17" />
+        </button>
         <input ref="fileEl" type="file" accept="image/*" multiple hidden @change="onFileChange" />
       </template>
       <span class="g-cin-gap" />
-      <a-button type="primary" size="small" :loading="sending" :disabled="!canSend" @click="submit">
-        <GIcon icon="ant-design:send-outlined" :size="13" />
-        发送
-      </a-button>
+      <button
+        type="button"
+        class="g-cin-send"
+        :class="{ 'is-sending': sending }"
+        :disabled="!canSend"
+        :title="mode === 'raw' ? '发送段数组' : '发送消息'"
+        @click="submit"
+      >
+        <GIcon icon="ant-design:send-outlined" :size="17" />
+      </button>
     </div>
   </div>
 </template>
@@ -212,14 +274,14 @@ defineExpose({
 <style scoped>
 .g-cin {
   border-top: 1px solid var(--g-border);
-  padding: 8px 10px 6px;
+  padding: 8px 10px 8px;
 }
 
 .g-cin.is-disabled {
   opacity: 0.6;
 }
 
-.g-cin-bar {
+.g-cin-tabs {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -275,6 +337,33 @@ defineExpose({
   color: var(--g-danger);
 }
 
+.g-cin-ats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.g-cin-at {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--g-brand-soft);
+  color: var(--g-brand);
+  font-size: 12px;
+}
+
+.g-cin-at-x {
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
 .g-cin-imgs {
   display: flex;
   flex-wrap: wrap;
@@ -326,6 +415,73 @@ defineExpose({
 .g-cin-acts {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.g-cin-imgbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--g-text-sub);
+  cursor: pointer;
+}
+
+.g-cin-imgbtn:hover:not(:disabled) {
+  background: var(--g-bg-soft);
+  color: var(--g-brand);
+}
+
+.g-cin-imgbtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 圆形发送键，跟参考图一致 */
+.g-cin-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: var(--g-brand);
+  color: #fff;
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+
+.g-cin-send:hover:not(:disabled) {
+  transform: scale(1.06);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.g-cin-send:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.g-cin-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.g-cin-send.is-sending {
+  animation: g-cin-pulse 1s infinite;
+}
+
+@keyframes g-cin-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 </style>

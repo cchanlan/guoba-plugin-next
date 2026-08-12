@@ -150,6 +150,9 @@ load(true)
   min-height: 0;
   overflow-y: auto;
   padding: 6px;
+  /* 同消息流：关滚动锚定 + 滚动条槽位常驻，内容变化时列表别自己滚 */
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
 }
 
 .g-sess-err {

@@ -15,8 +15,10 @@ import ChatInput from './components/ChatInput.vue'
 import {
   apiChatForward,
   apiChatHistory,
+  apiChatPoke,
   apiChatRead,
   apiChatRecall,
+  apiChatResend,
   apiChatSend,
   apiChatSendRaw,
   apiChatStatus,
@@ -83,6 +85,9 @@ const newTip = ref(false)
 const boxEl = ref<HTMLElement | null>(null)
 const sideRef = ref<InstanceType<typeof SessionList> | null>(null)
 const inputRef = ref<InstanceType<typeof ChatInput> | null>(null)
+
+/** 「查看原始消息」弹窗里展示的那条 */
+const rawMsg = ref<ChatMsg | null>(null)
 
 let timer: number | undefined
 /** 上次取到的游标，0 表示还没取过 */
@@ -291,19 +296,24 @@ function onScroll() {
 
 /* ---------------- 发送 ---------------- */
 
-async function onSend(payload: { text: string; images: string[] }) {
+async function onSend(payload: { text: string; images: File[]; ats: { qq: string; name: string }[] }) {
   const session = current.value
   if (!session) return
   sending.value = true
   try {
-    const data = await apiChatSend({
-      botId: session.botId,
-      type: session.type,
-      id: session.id,
-      text: payload.text,
-      images: payload.images,
-      replyTo: replyTo.value?.messageId ?? '',
-    })
+    // 图片以原始 File 走 multipart：base64 塞 JSON 会撞宿主 express 的 body 上限（413）
+    const fd = new FormData()
+    fd.set('botId', session.botId)
+    fd.set('type', session.type)
+    fd.set('id', session.id)
+    fd.set('text', payload.text)
+    fd.set('replyTo', replyTo.value?.messageId ?? '')
+    // ats 把 name 也带上，不然后端拼出来的 at 段只有 qq，页面上显示不出被 @ 的人叫啥
+    if (payload.ats?.length) {
+      fd.set('ats', JSON.stringify(payload.ats.map((a) => ({ qq: a.qq, name: a.name }))))
+    }
+    for (const file of payload.images) fd.append('files', file)
+    const data = await apiChatSend(fd)
     inputRef.value?.reset()
     replyTo.value = null
     // 后端也把这条塞进了缓冲，轮询会再送一次，靠 messageId 去重
@@ -371,6 +381,63 @@ async function onRecall(msg: ChatMsg) {
     message.success('已撤回')
   } catch {
     // 撤别人的消息、或超过时限都会失败，错误由请求层弹出
+  }
+}
+
+/** 右键 @：把消息发送者塞进输入框的 @ 列表，发送时转成真 at 段 */
+function onAt(msg: ChatMsg) {
+  inputRef.value?.addAt({ qq: msg.sender.userId, name: senderName(msg) })
+}
+
+/** 右键「查看原始」：把这条消息的完整结构弹出来，排障用 */
+function onRaw(msg: ChatMsg) {
+  rawMsg.value = msg
+}
+
+/** 右键「戳一戳」：对消息发送者 */
+async function onPoke(msg: ChatMsg) {
+  const session = current.value
+  if (!session) return
+  try {
+    await apiChatPoke({
+      botId: session.botId,
+      type: session.type,
+      id: session.id,
+      userId: msg.sender.userId,
+    })
+    message.success(`戳了戳 ${senderName(msg)}`)
+  } catch {
+    // 适配器不支持或群权限不够，错误由请求层弹出
+  }
+}
+
+/** 右键「复读」：按段原样再发一条（图片取回字节、表情带 id），不是只发文字 */
+async function onResend(msg: ChatMsg) {
+  const session = current.value
+  if (!session) return
+  if (!msg.messageId) {
+    message.warning('这条消息没有 id，没法复读')
+    return
+  }
+  sending.value = true
+  try {
+    const data = await apiChatResend({
+      botId: session.botId,
+      type: session.type,
+      id: session.id,
+      messageId: msg.messageId,
+    })
+    // 后端也把这条塞进了缓冲，轮询会再送一次，靠 messageId 去重
+    if (data.message) {
+      const add = dedupe([data.message])
+      messages.value.push(...add)
+    }
+    follow.value = true
+    await scrollToEnd()
+  } catch {
+    // 复读失败（比如图片资源已过期）由请求层弹出
+  } finally {
+    sending.value = false
   }
 }
 
@@ -557,6 +624,10 @@ const dateFlags = computed(() => {
               @reply="onReply"
               @recall="onRecall"
               @forward="onForward"
+              @at="onAt"
+              @raw="onRaw"
+              @poke="onPoke"
+              @resend="onResend"
             />
           </div>
 
@@ -591,6 +662,17 @@ const dateFlags = computed(() => {
         </div>
       </main>
     </div>
+
+    <!-- 右键「查看原始消息」：展示这条消息的完整结构 -->
+    <a-modal
+      :open="!!rawMsg"
+      :title="rawMsg ? `原始消息 · ${rawMsg.messageId || rawMsg.seq || '无 id'}` : ''"
+      :footer="null"
+      width="640"
+      @cancel="rawMsg = null"
+    >
+      <pre class="g-chat-raw">{{ rawMsg ? JSON.stringify(rawMsg, null, 2) : '' }}</pre>
+    </a-modal>
   </div>
 </template>
 
@@ -698,6 +780,11 @@ const dateFlags = computed(() => {
   padding: 12px 14px;
   /* 容器压暗、气泡提亮，两个主题下都能看出层次 */
   background: var(--g-bg);
+  /* 关掉浏览器的滚动锚定：它会在内容高度变化时自动调整 scrollTop，
+     页面翻历史 / 图片懒加载时滚动条会自己动；我们有自己的滚动位置补偿，用不上它 */
+  overflow-anchor: none;
+  /* 滚动条槽位常驻，避免 hover 时滚动条出现/变宽把内容挤得左右晃 */
+  scrollbar-gutter: stable;
 }
 
 .g-chat-loading {
@@ -750,6 +837,21 @@ const dateFlags = computed(() => {
   text-align: center;
   font-size: 12px;
   line-height: 1.8;
+}
+
+/* 原始消息 JSON，等宽 + 可横向滚动 */
+.g-chat-raw {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: var(--g-bg-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* 窄屏放不下两栏，改成上下：列表压成一小块，消息流占剩下的 */

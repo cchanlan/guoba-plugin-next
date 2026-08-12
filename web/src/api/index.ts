@@ -660,7 +660,8 @@ export interface ChatMsg {
   time: number
   /** bot 自己发的 */
   self: boolean
-  sender: { userId: string; nickname: string; card: string; role: string }
+  /** title 是群头衔，role 是群主 / 管理，二者都可能没有 */
+  sender: { userId: string; nickname: string; card: string; role: string; title: string }
   segments: MsgSeg[]
   /** 在面板里撤回过 */
   recalled?: boolean
@@ -728,15 +729,14 @@ export const apiChatHistory = (params: {
 export const apiChatTail = (params: { key: string; cursor: number; rev?: number }) =>
   get<ChatTail>('/chat/tail', params, { showError: false })
 
-/** 发消息，**会真的发到 QQ 上**。images 为 dataURL */
-export const apiChatSend = (body: {
-  botId: string
-  type: ChatType
-  id: string
-  text?: string
-  images?: string[]
-  replyTo?: string
-}) => post<{ messageId: string; message: ChatMsg | null; cursor: number }>('/chat/send', body)
+/**
+ * 发消息，**会真的发到 QQ 上**。
+ *
+ * 图片走 multipart 上传（FormData 的 files 字段）。之前是把 base64 塞进 JSON body，
+ * 共享 TRSS 端口时 body 解析器是宿主的 express.json（默认 100kb 上限），一张图就 413 了。
+ */
+export const apiChatSend = (fd: FormData) =>
+  post<{ messageId: string; message: ChatMsg | null; cursor: number }>('/chat/send', fd)
 
 /** 发原始消息段数组（JSON 文本） */
 export const apiChatSendRaw = (body: {
@@ -756,6 +756,22 @@ export const apiChatRecall = (body: {
 
 export const apiChatRead = (key: string) =>
   post<{ key: string; rev: number }>('/chat/read', { key }, { showError: false })
+
+/** 戳一戳：群里 pokeMember、私聊 poke，适配器不支持会报错 */
+export const apiChatPoke = (body: {
+  botId: string
+  type: ChatType
+  id: string
+  userId: string
+}) => post<{ ok: boolean }>('/chat/poke', body)
+
+/** 复读：后端按段原样重发（图片/表情不会被降级成文字占位） */
+export const apiChatResend = (body: {
+  botId: string
+  type: ChatType
+  id: string
+  messageId: string
+}) => post<{ messageId: string; message: ChatMsg | null; cursor: number }>('/chat/resend', body)
 
 /** 展开合并转发，内容在 QQ 服务端 */
 export const apiChatForward = (body: {

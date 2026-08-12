@@ -1,4 +1,5 @@
 import net from 'node:net'
+import fs from 'node:fs/promises'
 import {lookup as dnsLookup} from 'node:dns/promises'
 import {GuobaError, Service} from '#guoba.framework'
 import {AssetStore, flattenOneBot, normalizeMsg, toBase64File} from './model/msgSegment.js'
@@ -19,10 +20,18 @@ const MAX_HISTORY_COUNT = 50
 const MAX_TAIL = 200
 /** 发送时最多带几张图 */
 const MAX_SEND_IMAGES = 5
+/** 单张图片的大小上限 */
+const MAX_SEND_IMAGE_SIZE = 20 * 1024 * 1024
+/** 一条消息最多 @ 几个人 */
+const MAX_SEND_ATS = 10
 /** Raw JSON 的长度上限 */
 const MAX_RAW_LEN = 20000
 /** 代理白名单最多记多少条 url */
 const MAX_PROXY_URLS = 3000
+/** 昵称兜底缓存上限，超了挤掉最老的一半 */
+const MAX_SENDER_NAMES = 2000
+/** 戳一戳的动作名候选：OneBot v11 各家实现的叫法，逐个试 */
+const POKE_ACTIONS = ['send_poke', 'set_poke', 'send_group_poke', '_send_poke', 'poke']
 /** 代理单个文件的大小上限 */
 const MAX_PROXY_SIZE = 20 * 1024 * 1024
 const PROXY_TIMEOUT = 15000
@@ -112,6 +121,13 @@ export default class ChatService extends Service {
   #sessions = new Map()
   /** 活跃表的版本号，前端据此决定要不要重画左侧列表 */
   #rev = 1
+  /**
+   * userId -> 最近见过的昵称。
+   *
+   * 有的 OneBot 实现（llob 等）上报消息时不带 sender 昵称，只有 qq 号，导致页面上
+   * 显示不出名字。这里把每条消息里带名字的 sender 记下来，之后再见到同一个 id 就能兜底。
+   */
+  #names = new Map()
   /**
    * 自己发出去的图片留一份字节，段里只给 id。
    * 真实消息段自带 QQ 直链不用存，只有面板自己发的图是 base64，得留着才能回显。
@@ -213,11 +229,28 @@ export default class ChatService extends Service {
   }
 
   #sender(sender, userId) {
+    const uin = String(sender?.user_id ?? userId ?? '')
+    const card = String(sender?.card ?? '')
+    const nickname = String(sender?.nickname ?? '')
+    const name = card || nickname
+    if (name) {
+      this.#names.set(uin, name)
+      // 别让缓存无限涨，超了就把最老的一半挤掉
+      if (this.#names.size > MAX_SENDER_NAMES) {
+        for (const key of this.#names.keys()) {
+          this.#names.delete(key)
+          if (this.#names.size <= MAX_SENDER_NAMES / 2) break
+        }
+      }
+    }
+    // 有的实现上报不带昵称，兜底用之前见过的名字
     return {
-      userId: String(sender?.user_id ?? userId ?? ''),
-      nickname: String(sender?.nickname ?? ''),
-      card: String(sender?.card ?? ''),
+      userId: uin,
+      nickname: nickname || this.#names.get(uin) || '',
+      card,
       role: String(sender?.role ?? ''),
+      /** 群头衔，页面上跟在昵称后面显示一个小标签 */
+      title: String(sender?.title ?? ''),
     }
   }
 
@@ -544,14 +577,37 @@ export default class ChatService extends Service {
    * 发一条消息。**会真的发到 QQ 上。**
    *
    * @param text    文本
-   * @param images  图片，元素为 dataURL 或 base64
+   * @param images  图片，元素为 dataURL 或 base64（小图兼容用，大图走 files）
+   * @param files   multipart 上传上来的图片，元素为 `{buffer}` 或 `{path}`
+   * @param ats     要 @ 的 QQ 号，拼在最前面
    * @param replyTo 引用哪条消息的 message_id
    */
-  async send({botId, type, id, text = '', images = [], replyTo = ''} = {}) {
+  async send({botId, type, id, text = '', images = [], files = [], ats = [], replyTo = ''} = {}) {
     const msg = []
     if (replyTo) msg.push({type: 'reply', id: String(replyTo)})
-    const list = Array.isArray(images) ? images.slice(0, MAX_SEND_IMAGES) : []
-    for (const img of list) {
+    for (const item of this.#toArray(this.#parseAts(ats)).slice(0, MAX_SEND_ATS)) {
+      // ats 可能是字符串/数字，也可能带 name 的对象（前端 @ 时一起传的）
+      const uin = String(item && typeof item === 'object' ? item.qq : item ?? '').trim()
+      const atName = item && typeof item === 'object' && item.name ? String(item.name) : ''
+      if (uin) msg.push({type: 'at', qq: uin, ...(atName ? {name: atName} : {})})
+    }
+    /**
+     * 图片优先用 multipart 上来的字节。
+     *
+     * 共享 TRSS 端口时 body 解析器是宿主的 `express.json()`（默认 100kb 上限），
+     * 一张图 base64 塞进 JSON 就 413 了，所以正常路径走 multipart。
+     */
+    const uploads = this.#toArray(files).slice(0, MAX_SEND_IMAGES)
+    // 被 @ 的人和后面的内容之间补一个空格，QQ 客户端里不然会「@张三文字」贴在一起
+    if (msg.some((i) => i.type === 'at') && (uploads.length || this.#toArray(images).length || text)) {
+      msg.push({type: 'text', text: ' '})
+    }
+    for (const file of uploads) {
+      const buffer = await this.#readUpload(file)
+      if (buffer?.length) msg.push({type: 'image', file: buffer})
+    }
+    const left = MAX_SEND_IMAGES - uploads.length
+    for (const img of this.#toArray(images).slice(0, Math.max(left, 0))) {
       const file = toBase64File(img)
       if (file) msg.push({type: 'image', file})
     }
@@ -562,6 +618,81 @@ export default class ChatService extends Service {
       throw new GuobaError('消息内容不能为空')
     }
     return this.#sendMsg({botId, type, id, msg})
+  }
+
+  #toArray(v) {
+    if (Array.isArray(v)) return v
+    return v == null || v === '' ? [] : [v]
+  }
+
+  /**
+   * ats 从 multipart 表单字段来的时候是 JSON 字符串（`["123","456"]`），
+   * 走 JSON body 的时候是数组，两种都要收。解析失败就按逗号分隔兜底。
+   */
+  #parseAts(ats) {
+    if (typeof ats !== 'string') return ats
+    const t = ats.trim()
+    if (!t) return []
+    try {
+      const p = JSON.parse(t)
+      return Array.isArray(p) ? p : [p]
+    } catch {
+      return t.split(',').map((s) => s.trim()).filter(Boolean)
+    }
+  }
+
+  /**
+   * 取上传文件的字节。
+   *
+   * 锅巴全局挂的 multer 是落盘的（`data/upload_tmp/`），读完就删 —— 图片已经进
+   * 消息段了，临时文件留着只是占地方。
+   */
+  async #readUpload(file) {
+    if (Buffer.isBuffer(file?.buffer)) return file.buffer
+    const src = file?.path
+    if (!src) return null
+    try {
+      const buffer = await fs.readFile(src)
+      if (buffer.length > MAX_SEND_IMAGE_SIZE) {
+        throw new GuobaError(`图片过大（单张上限 ${MAX_SEND_IMAGE_SIZE / 1024 / 1024}MB）`)
+      }
+      return buffer
+    } finally {
+      fs.unlink(src).catch(() => {})
+    }
+  }
+
+  /**
+   * 戳一戳。
+   *
+   * OneBot v11 协议里没有标准 poke 动作，各家实现的叫法不一样：
+   * NapCat 是 `send_poke`，Lagrange 是 `set_poke`，llob 是 `poke` / `send_group_poke`。
+   * 直接走适配器底层的 `sendApi` 逐个试，谁认用谁，就不用为每种实现各写一套了。
+   */
+  async poke({botId, type, id, userId = ''} = {}) {
+    const uin = String(userId ?? '').trim()
+    if (!uin) throw new GuobaError('缺少要戳的用户')
+    const owner = (botId && Bot.bots?.[Number(botId) || botId]) || Bot
+    if (typeof owner?.sendApi !== 'function') {
+      throw new GuobaError('当前适配器不支持戳一戳')
+    }
+    // 群戳带 group_id + user_id，私聊戳只带 user_id（各家参数的键名也不统一，一起给上）
+    const params = type === 'group'
+      ? {group_id: Number(id) || id, user_id: Number(uin) || uin}
+      : {user_id: Number(uin) || uin}
+    const actions = POKE_ACTIONS
+    for (const action of actions) {
+      try {
+        const ret = await owner.sendApi(action, params)
+        // sendApi 对不认的动作一般直接抛错，个别实现把错误塞在返回里，也当没成功
+        const code = ret?.retcode ?? ret?.code ?? 0
+        if (code !== 0 && code !== 1) continue
+        return {ok: true, action}
+      } catch {
+        // 这个动作名不认，换下一个
+      }
+    }
+    throw new GuobaError('戳一戳失败：适配器不认这些动作（NapCat 需开启对应扩展动作）')
   }
 
   /**
@@ -632,11 +763,51 @@ export default class ChatService extends Service {
         nickname: String(bot?.nickname ?? ''),
         card: '',
         role: '',
+        title: '',
       },
       segments: await normalizeMsg(msg, {assets: this.#assets}),
     }, {remember: false})
 
     return {messageId, message: pushed, cursor: this.#seq - 1}
+  }
+
+  /**
+   * 复读：把缓冲里那条消息按段原样再发一遍。
+   *
+   * 不能只拿文本拼 —— 图片/表情只发文字占位就没意义了。这里按段类型重建：
+   * 图片优先用回显时存的字节（assetId），没有就用直链；表情直接带 id。
+   * reply / button / markdown / node 这类没法原样重发，跳过。
+   */
+  async resend({botId, type, id, messageId} = {}) {
+    if (!messageId) throw new GuobaError('缺少消息 id')
+    const msg = this.#index.get(String(messageId))
+    if (!msg) throw new GuobaError('这条消息不在内存里，无法复读')
+    const segs = this.#toSendSegs(msg.segments)
+    if (!segs.length) throw new GuobaError('这条消息没有可复读的内容（图片资源可能已过期）')
+    return this.#sendMsg({botId, type, id, msg: segs})
+  }
+
+  /** 缓冲段转回可发送的 OneBot 段，能原样重发的才收 */
+  #toSendSegs(segments) {
+    const out = []
+    for (const seg of segments ?? []) {
+      if (seg.type === 'text' && seg.text) {
+        out.push({type: 'text', text: seg.text})
+      } else if (seg.type === 'at' && seg.qq) {
+        out.push({type: 'at', qq: String(seg.qq)})
+      } else if (seg.type === 'face' && seg.id != null) {
+        out.push({type: 'face', id: Number(seg.id)})
+      } else if (seg.type === 'image') {
+        // 优先用回显时留的字节（自己发的图），没有就退回直链（收到的图，rkey 可能已过期）
+        const asset = seg.assetId ? this.#assets.get(seg.assetId) : null
+        if (asset?.buffer) out.push({type: 'image', file: asset.buffer, name: seg.name})
+        else if (seg.url) out.push({type: 'image', file: seg.url})
+      } else if ((seg.type === 'record' || seg.type === 'video' || seg.type === 'file') && seg.url) {
+        out.push({type: seg.type, file: seg.url, name: seg.name})
+      }
+      // reply / button / markdown / node 复读不了，跳过
+    }
+    return out
   }
 
   /**
