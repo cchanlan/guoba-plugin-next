@@ -1,6 +1,45 @@
 import {autowired, Result} from '#guoba.framework';
 import {ApiController, GuobaSupportMap, cfg} from '#guoba.platform'
 
+/**
+ * 按路径取值，同时支持嵌套格式（{ a: { b: 1 } }）和扁平格式（{ "a.b": 1 }）。
+ * 扁平格式优先：若对象本身以 path 为 key 则直接返回。
+ */
+function getFieldPath(obj, path) {
+  if (obj == null || path == null) return undefined
+  if (Object.hasOwn(obj, path)) return obj[path]
+  const parts = path.split('.')
+  let cur = obj
+  for (const part of parts) {
+    if (cur == null || typeof cur !== 'object') return undefined
+    cur = cur[part]
+  }
+  return cur
+}
+
+/**
+ * 根据schema field将嵌套对象还原为扁平格式 { field: value }。
+ *
+ * 新版锅巴UI使用lodash.set把带点号的field（如 "apps.avatarList"）展开为嵌套对象，
+ * 而旧版插件setConfigData期望的是扁平格式 { "apps.avatarList": value }。
+ * 此函数根据schema定义把嵌套对象还原为扁平格式，保证向下兼容。
+ * 若数据本身已是扁平格式则原样保留。
+ */
+function flattenConfigData(data, schemas) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data
+  if (!schemas || !schemas.length) return data
+  const result = {}
+  for (const schema of schemas) {
+    const field = schema?.field
+    if (!field) continue
+    const value = getFieldPath(data, field)
+    if (value !== undefined) {
+      result[field] = value
+    }
+  }
+  return result
+}
+
 export default class PluginController extends ApiController {
 
   pluginService = autowired('pluginService')
@@ -135,7 +174,9 @@ export default class PluginController extends ApiController {
     if (typeof setConfigData !== 'function') {
       return Result.error('该插件没有配置setConfigData')
     }
-    let flag = await setConfigData(req.body, {Result})
+    // 将新版锅巴UI提交的嵌套对象按schema还原为扁平格式，兼容旧版插件setConfigData
+    const flatData = flattenConfigData(req.body, configInfo?.schemas)
+    let flag = await setConfigData(flatData, {Result})
     if (flag instanceof Result) {
       return flag
     }
