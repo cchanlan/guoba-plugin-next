@@ -8,7 +8,7 @@
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Button, Empty, Input, InputNumber, Modal, Select, Spin, Table, Tabs, TabPane, Tag, message } from 'ant-design-vue'
+import { Button, Empty, Input, InputNumber, Modal, Select, Table, Tabs, TabPane, Tag, message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
 import GCodeEditor from '@/components/GCodeEditor.vue'
 import {
@@ -187,7 +187,6 @@ function visit(page: any) {
     <Table
       :columns="columns"
       :data-source="pages"
-      :loading="loading"
       :pagination="false"
       row-key="id"
       size="middle"

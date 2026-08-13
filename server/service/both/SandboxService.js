@@ -62,7 +62,6 @@ export default class SandboxService extends Service {
   #capture = null
   /** 回复里的图片 / 语音 / 文件，段里只给 id，前端按需来拉 */
   #assets = new AssetStore()
-  #msgSeq = 0
   /** 同一时刻只跑一条，避免两次执行的回复串在一起 */
   #running = false
   /** 本次执行模拟的平台是否渲染按钮/markdown，靠 #running 的串行保证不串场 */
@@ -254,9 +253,11 @@ export default class SandboxService extends Service {
 
     const elapsed = Date.now() - begin
     const replies = []
-    for (const item of captured) {
+    for (const [i, item] of captured.entries()) {
       replies.push({
-        id: `m${++this.#msgSeq}`,
+        // 必须全局唯一：前端聊天记录会进 localStorage，自增 m1/m2 在重启后会
+        // 与旧气泡撞 Vue key，表现为新回复却渲染成上一轮别的角色面板
+        id: `m-${Date.now().toString(36)}-${i}-${Math.random().toString(36).slice(2, 8)}`,
         via: item.via,
         time: item.time,
         segments: await this.#normalizeMsg(item.msg),
@@ -364,7 +365,7 @@ export default class SandboxService extends Service {
     const self = this
     const platform = PLATFORMS[sc.platform] ?? PLATFORMS.default
     const raw = message.map((i) => (i.type === 'text' ? i.text : `[${i.type}]`)).join('')
-    const messageId = `sandbox-${Date.now().toString(36)}-${++this.#msgSeq}`
+    const messageId = `sandbox-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 
     // 群聊里勾了 at 就在最前面插一段 at，dealEvent 据此置 e.atBot
     if (sc.isGroup && sc.atBot) {

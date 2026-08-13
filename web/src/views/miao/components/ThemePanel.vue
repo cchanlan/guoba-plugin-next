@@ -201,13 +201,13 @@ onMounted(() => load(false))
           <GIcon icon="ant-design:plus-outlined" :size="12" />
           <span class="g-btn-text">新增皮肤</span>
         </Button>
-        <Button size="small" :disabled="loading" @click="load()">
+        <Button size="small" :loading="loading" @click="load()">
           <GIcon icon="ant-design:reload-outlined" :size="13" />
         </Button>
       </Space>
     </template>
 
-    <Skeleton v-if="loading" active :paragraph="{ rows: 5 }" />
+    <Skeleton v-if="loading && !themes.length" active :paragraph="{ rows: 5 }" />
 
     <Empty v-else-if="!themes.length" description="没有找到任何皮肤" />
 

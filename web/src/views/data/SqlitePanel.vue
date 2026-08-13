@@ -13,7 +13,6 @@ import {
   Modal,
   Select,
   SelectOption,
-  Spin,
   Table,
   Tag,
   Textarea,
@@ -245,7 +244,6 @@ onMounted(async () => {
       <Select
         v-model:value="currentDb"
         style="width: 340px"
-        :loading="loadingDbs"
         placeholder="选择数据库"
         show-search
       >
@@ -276,28 +274,26 @@ onMounted(async () => {
     <div class="g-body">
       <!-- 左：表列表 -->
       <div class="g-tables">
-        <Spin :spinning="loadingTables">
-          <div class="g-tables-title">数据表（{{ tables.length }}）</div>
-          <div v-if="tables.length" class="g-table-list">
-            <div
-              v-for="t in tables"
-              :key="t.name"
-              class="g-table-item"
-              :class="{ 'g-table-item-active': currentTable === t.name }"
-              @click="selectTable(t.name)"
-            >
-              <GIcon
-                :icon="t.type === 'view'
-                  ? 'ant-design:eye-outlined'
-                  : 'ant-design:table-outlined'"
-                :size="13"
-              />
-              <span class="g-table-name">{{ t.name }}</span>
-              <span class="g-table-count">{{ t.count }}</span>
-            </div>
+        <div class="g-tables-title">数据表（{{ tables.length }}）</div>
+        <div v-if="tables.length" class="g-table-list">
+          <div
+            v-for="t in tables"
+            :key="t.name"
+            class="g-table-item"
+            :class="{ 'g-table-item-active': currentTable === t.name }"
+            @click="selectTable(t.name)"
+          >
+            <GIcon
+              :icon="t.type === 'view'
+                ? 'ant-design:eye-outlined'
+                : 'ant-design:table-outlined'"
+              :size="13"
+            />
+            <span class="g-table-name">{{ t.name }}</span>
+            <span class="g-table-count">{{ t.count }}</span>
           </div>
-          <Empty v-else-if="!loadingTables" description="没有数据表" />
-        </Spin>
+        </div>
+        <Empty v-else-if="!loadingTables" description="没有数据表" />
       </div>
 
       <!-- 右：表数据 -->
@@ -321,7 +317,6 @@ onMounted(async () => {
           <Table
             :columns="tableColumns"
             :data-source="rows"
-            :loading="loadingRows"
             row-key="__rowid"
             size="small"
             :scroll="{ x: 'max-content', y: 'calc(100vh - 400px)' }"

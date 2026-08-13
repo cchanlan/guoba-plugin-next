@@ -141,31 +141,29 @@ const permText: Record<string, string> = {
         共 {{ plugins.length }} 个插件 · {{ ruleCount }} 条规则，顺序即匹配优先级
       </div>
 
-      <a-spin :spinning="loading">
-        <div class="g-rules-list">
-          <div
-            v-for="p in filtered"
-            :key="p.key"
-            class="g-rules-item"
-            :class="{ 'is-hit': hitKeys.has(p.key) }"
-          >
-            <div class="g-rules-head">
-              <span class="g-rules-name">{{ p.name || p.key }}</span>
-              <a-tag v-if="hitKeys.has(p.key)" color="green">命中</a-tag>
-              <span class="g-rules-priority">优先级 {{ p.priority }}</span>
-            </div>
-            <div v-if="p.dsc && p.dsc !== p.name" class="g-rules-dsc">{{ p.dsc }}</div>
-            <div v-for="(r, i) in p.rules" :key="i" class="g-rules-rule">
-              <code>{{ r.reg || '(空)' }}</code>
-              <span class="g-rules-fnc">{{ r.fnc }}</span>
-              <a-tag v-if="permText[r.permission]" color="orange">
-                {{ permText[r.permission] }}
-              </a-tag>
-            </div>
+      <div class="g-rules-list">
+        <div
+          v-for="p in filtered"
+          :key="p.key"
+          class="g-rules-item"
+          :class="{ 'is-hit': hitKeys.has(p.key) }"
+        >
+          <div class="g-rules-head">
+            <span class="g-rules-name">{{ p.name || p.key }}</span>
+            <a-tag v-if="hitKeys.has(p.key)" color="green">命中</a-tag>
+            <span class="g-rules-priority">优先级 {{ p.priority }}</span>
           </div>
-          <a-empty v-if="!loading && !filtered.length" description="没有匹配的规则" />
+          <div v-if="p.dsc && p.dsc !== p.name" class="g-rules-dsc">{{ p.dsc }}</div>
+          <div v-for="(r, i) in p.rules" :key="i" class="g-rules-rule">
+            <code>{{ r.reg || '(空)' }}</code>
+            <span class="g-rules-fnc">{{ r.fnc }}</span>
+            <a-tag v-if="permText[r.permission]" color="orange">
+              {{ permText[r.permission] }}
+            </a-tag>
+          </div>
         </div>
-      </a-spin>
+        <a-empty v-if="!loading && !filtered.length" description="没有匹配的规则" />
+      </div>
     </div>
   </a-drawer>
 </template>

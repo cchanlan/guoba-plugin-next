@@ -103,7 +103,8 @@ export class ChatController extends ApiController {
   async getAsset(req, res) {
     const asset = this.chatService.getAsset(req.params.id)
     res.type(asset.mime)
-    res.set('Cache-Control', 'private, max-age=1800')
+    // 资源 id 是内容哈希，同一 URL 内容不变，可以放心缓存
+    res.set('Cache-Control', 'private, max-age=1800, immutable')
     res.send(asset.buffer)
     return Result.VOID
   }

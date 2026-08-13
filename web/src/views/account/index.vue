@@ -531,7 +531,6 @@ onMounted(() => {
           <Table
             :columns="friendColumns"
             :data-source="friend.records"
-            :loading="friend.loading"
             :row-key="(r: any) => r.user_id"
             :row-selection="{
               selectedRowKeys: friend.selected,
@@ -619,7 +618,6 @@ onMounted(() => {
           <Table
             :columns="groupColumns"
             :data-source="group.records"
-            :loading="group.loading"
             :row-key="(r: any) => r.group_id"
             :row-selection="{
               selectedRowKeys: group.selected,

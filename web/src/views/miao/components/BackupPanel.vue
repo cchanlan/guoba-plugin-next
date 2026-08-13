@@ -98,13 +98,13 @@ onMounted(load)
           <GIcon icon="ant-design:save-outlined" :size="12" />
           <span class="g-btn-text">新建备份</span>
         </Button>
-        <Button size="small" :disabled="loading" @click="load">
+        <Button size="small" :loading="loading" @click="load">
           <GIcon icon="ant-design:reload-outlined" :size="13" />
         </Button>
       </Space>
     </template>
 
-    <Skeleton v-if="loading" active :paragraph="{ rows: 4 }" />
+    <Skeleton v-if="loading && !list.length" active :paragraph="{ rows: 4 }" />
 
     <Empty v-else-if="!list.length" description="还没有备份，保存过一次配置后即可备份" />
 

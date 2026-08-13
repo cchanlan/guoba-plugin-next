@@ -11,6 +11,7 @@ const props = defineProps<{ card: ConfigCard }>()
 
 const formRef = ref<InstanceType<typeof SchemaForm> | null>(null)
 const loading = ref(true)
+const hydrated = ref(false)
 const saving = ref(false)
 const data = ref<Record<string, any>>({})
 
@@ -23,6 +24,7 @@ async function load() {
     data.value = {}
   } finally {
     loading.value = false
+    hydrated.value = true
   }
 }
 
@@ -43,11 +45,14 @@ async function save() {
   }
 }
 
-watch(() => props.card.key, load, { immediate: true })
+watch(() => props.card.key, () => {
+  hydrated.value = false
+  load()
+}, { immediate: true })
 </script>
 
 <template>
-  <Card :bordered="false" :loading="loading" class="g-cfg-card">
+  <Card :bordered="false" :loading="loading && !hydrated" class="g-cfg-card">
     <template #title>
       <div class="g-cfg-head">
         <span class="g-cfg-title">{{ card.title }}</span>
@@ -57,16 +62,16 @@ watch(() => props.card.key, load, { immediate: true })
 
     <template #extra>
       <Space>
-        <Button size="small" :disabled="loading || saving" @click="load">
+        <Button size="small" :loading="loading" :disabled="saving" @click="load">
           <GIcon icon="ant-design:reload-outlined" :size="13" />
         </Button>
         <Button type="primary" size="small" :loading="saving" @click="save">保存</Button>
       </Space>
     </template>
 
-    <Empty v-if="!loading && !card.schemas?.length" description="该配置项暂无可视化表单" />
+    <Empty v-if="hydrated && !card.schemas?.length" description="该配置项暂无可视化表单" />
     <SchemaForm
-      v-else-if="!loading"
+      v-else-if="hydrated"
       ref="formRef"
       :schemas="card.schemas"
       :data="data"

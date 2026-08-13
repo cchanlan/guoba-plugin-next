@@ -109,7 +109,16 @@ function restore() {
     const rawScene = localStorage.getItem(SCENE_KEY)
     if (rawScene) scene.value = { ...defaultScene, ...JSON.parse(rawScene) }
     const rawChat = localStorage.getItem(CHAT_KEY)
-    if (rawChat) chat.value = JSON.parse(rawChat)
+    if (rawChat) {
+      const list = JSON.parse(rawChat) as ChatItem[]
+      // 旧版资源 id 是自增 a1/a2，重启后会与浏览器缓存串图；丢掉含这类 id 的历史
+      const legacy = (segs: SandboxSegment[] = []) =>
+        segs.some((s) => typeof s.assetId === 'string' && /^a\d+$/.test(s.assetId))
+      chat.value = Array.isArray(list) ? list.filter((item) => !legacy(item.segments)) : []
+      if (chat.value.length !== list.length) {
+        localStorage.setItem(CHAT_KEY, JSON.stringify(chat.value))
+      }
+    }
   } catch {
     // 存的东西坏了就当没存过
   }
@@ -170,7 +179,9 @@ async function send(override?: string) {
     if (res.replies.length) {
       res.replies.forEach((reply: SandboxReply, i: number) => {
         chat.value.push({
-          id: reply.id,
+          // 客户端自己生成 id。服务端 reply.id 重启后可能与 localStorage 里旧气泡撞车，
+          // Vue 会复用错误的 DOM，看起来就像发火神面板却渲染出别的角色
+          id: nextId(),
           role: 'bot',
           time: reply.time,
           segments: reply.segments,

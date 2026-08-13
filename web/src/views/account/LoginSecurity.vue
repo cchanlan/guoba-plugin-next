@@ -8,17 +8,22 @@ import type { LoginSecurity, TrustedIp } from '@/types'
 const auth = useAuthStore()
 
 const loading = ref(true)
+/** 是否已完成过至少一次加载；用于区分首屏与刷新，避免刷新时拆掉布局 */
+const hydrated = ref(false)
 const saving = ref(false)
 const security = ref<LoginSecurity>({ configured: false, username: '', trustedIps: [] })
 const form = reactive({ username: '', currentPassword: '', password: '', confirmPassword: '' })
 
 async function load() {
+  if (loading.value && hydrated.value) return
   loading.value = true
   try {
-    security.value = await apiGetLoginSecurity()
-    form.username = security.value.username
+    const next = await apiGetLoginSecurity()
+    security.value = next
+    form.username = next.username
   } finally {
     loading.value = false
+    hydrated.value = true
   }
 }
 
@@ -104,12 +109,15 @@ onMounted(load)
       <p class="g-page-desc">设置面板登录账号密码，并管理已通过验证码认证的可信 IP。</p>
     </div>
 
-    <Card :bordered="false" :loading="loading" class="g-sec-cred">
+    <Card :bordered="false" class="g-sec-cred">
       <template #title>登录凭证</template>
-      <template #extra><Button size="small" @click="load">刷新</Button></template>
+      <template #extra>
+        <Button size="small" :loading="loading" @click="load">刷新</Button>
+      </template>
 
-      <Form layout="vertical">
-        <div class="g-sec-grid">
+      <!-- 刷新只转按钮，不盖 Spin，避免四个圆点闪烁 -->
+      <Form layout="vertical" class="g-sec-form">
+        <div class="g-sec-grid" :class="{ 'is-configured': security.configured }">
           <FormItem label="用户名" required>
             <Input v-model:value="form.username" autocomplete="username" />
           </FormItem>
@@ -135,7 +143,7 @@ onMounted(load)
       <template #title>可信 IP</template>
       <template #extra>
         <Popconfirm title="确定清空全部可信 IP？" @confirm="clearAll">
-          <Button danger size="small" :disabled="!security.trustedIps.length">全部清空</Button>
+          <Button danger size="small" :disabled="!security.trustedIps.length || loading">全部清空</Button>
         </Popconfirm>
       </template>
       <p class="g-sec-tip">IP 通过验证码认证后自动加入，撤销后该 IP 下次登录将重新要求验证码。</p>
@@ -198,10 +206,36 @@ onMounted(load)
   margin-bottom: 16px;
 }
 
+.g-sec-form {
+  /* 固定最小高度，刷新时 Spin 不塌陷导致页面横向回弹 */
+  min-height: 168px;
+}
+
 .g-sec-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 18px;
+}
+
+/* 已配置时固定字段落位，避免「当前密码」显隐引起左右跳 */
+.g-sec-grid.is-configured > :nth-child(1) {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.g-sec-grid.is-configured > :nth-child(2) {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.g-sec-grid.is-configured > :nth-child(3) {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.g-sec-grid.is-configured > :nth-child(4) {
+  grid-column: 2;
+  grid-row: 2;
 }
 
 .g-sec-tip {
@@ -259,6 +293,11 @@ onMounted(load)
 @media (max-width: 700px) {
   .g-sec-grid {
     grid-template-columns: 1fr;
+  }
+
+  .g-sec-grid.is-configured > :nth-child(n) {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .g-sec-table {

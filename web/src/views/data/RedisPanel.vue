@@ -315,7 +315,6 @@ onMounted(() => {
         <Table
           :columns="columns"
           :data-source="items"
-          :loading="loading"
           row-key="key"
           size="small"
           :pagination="false"
@@ -371,11 +370,14 @@ onMounted(() => {
 
       <!-- 右：详情 -->
       <div class="g-detail">
-        <Spin :spinning="detailLoading">
+        <Spin :spinning="detailLoading && !detail">
           <template v-if="detail">
             <div class="g-detail-head">
               <div class="g-detail-key">{{ detail.key }}</div>
               <div class="g-detail-actions">
+                <Button size="small" :loading="detailLoading" @click="openDetail(detail.key)">
+                  <GIcon icon="ant-design:reload-outlined" :size="13" />
+                </Button>
                 <Button size="small" @click="openEdit(detail)">
                   <GIcon icon="ant-design:edit-outlined" :size="13" />
                   <span class="g-btn-text">编辑</span>

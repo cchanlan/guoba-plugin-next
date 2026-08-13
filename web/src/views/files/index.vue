@@ -116,6 +116,7 @@ function joinPath(name: string) {
 }
 
 async function load() {
+  if (loading.value) return
   loading.value = true
   try {
     list.value = await apiFileList(currentPath.value)
@@ -321,7 +322,7 @@ onMounted(load)
       </div>
 
       <div class="g-files-acts">
-        <a-button size="small" @click="load">
+        <a-button size="small" :loading="loading" @click="load">
           <GIcon icon="ant-design:reload-outlined" :size="13" />
           刷新
         </a-button>
@@ -345,7 +346,6 @@ onMounted(load)
       class="g-files-table"
       :data-source="list"
       :columns="columns"
-      :loading="loading"
       :pagination="false"
       row-key="name"
       size="small"

@@ -42,6 +42,7 @@ interface Entry {
 }
 
 const loading = ref(true)
+const hydrated = ref(false)
 const saving = ref(false)
 const entries = ref<Entry[]>([])
 const activeKeys = ref<string[]>([])
@@ -117,6 +118,7 @@ async function load() {
     activeKeys.value = []
   } finally {
     loading.value = false
+    hydrated.value = true
   }
 }
 
@@ -204,11 +206,14 @@ async function removeEntry(entry: Entry) {
   activeKeys.value = activeKeys.value.filter((k) => k !== entry.key)
 }
 
-watch(() => props.card.key, load, { immediate: true })
+watch(() => props.card.key, () => {
+  hydrated.value = false
+  load()
+}, { immediate: true })
 </script>
 
 <template>
-  <Card :bordered="false" :loading="loading" class="g-cfg-card">
+  <Card :bordered="false" :loading="loading && !hydrated" class="g-cfg-card">
     <template #title>
       <div class="g-cfg-head">
         <span class="g-cfg-title">{{ cardTitle }}</span>
@@ -222,16 +227,16 @@ watch(() => props.card.key, load, { immediate: true })
           <GIcon icon="ant-design:plus-outlined" :size="12" />
           <span class="g-btn-text">{{ card.addBtnText || '新增' }}</span>
         </Button>
-        <Button size="small" :disabled="loading || saving" @click="load">
+        <Button size="small" :loading="loading" :disabled="saving" @click="load">
           <GIcon icon="ant-design:reload-outlined" :size="13" />
         </Button>
         <Button type="primary" size="small" :loading="saving" @click="save">保存</Button>
       </Space>
     </template>
 
-    <Empty v-if="!loading && !entries.length" description="暂无配置项" />
+    <Empty v-if="hydrated && !entries.length" description="暂无配置项" />
 
-    <Collapse v-else-if="!loading" v-model:activeKey="activeKeys" class="g-kf-collapse">
+    <Collapse v-else-if="hydrated" v-model:activeKey="activeKeys" class="g-kf-collapse">
       <CollapsePanel v-for="entry in entries" :key="entry.key" :forceRender="false">
         <template #header>
           <span class="g-kf-title">{{ entryTitle(entry) }}</span>

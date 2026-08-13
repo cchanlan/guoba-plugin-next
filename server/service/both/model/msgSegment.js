@@ -1,9 +1,10 @@
 import path from 'path'
+import crypto from 'crypto'
 
 /**
  * 消息段规范化。
  *
- * 沙盒与消息记录都要把「Yunzai 那边的消息」变成前端能渲染的段数组，两边共用这一份，
+ * 沙盒与消息记录都要把「Yunzai 那边的消息」变成前端能渲染的段数组，两边共用一份，
  * 输出结构才严格一致，前端 `components/msg/MsgSegment.vue` 一个组件就能同时伺候两页。
  *
  * 两边的差异只有两个开关：
@@ -64,16 +65,30 @@ export function flattenOneBot(msg) {
 /**
  * 内存资源表：图片、语音、文件的字节留在这儿，段里只给 id，
  * 前端再按需拉取 —— 避免把几百 KB 的 base64 塞进 JSON。
+ *
+ * id 用内容哈希，而不是自增序号。沙盒聊天会进 localStorage，资源 URL 又有
+ * `Cache-Control: max-age=1800`：若重启后仍发 a1、a2，浏览器会把上一轮别的
+ * 角色面板图当成当前这条（典型表现：发火神面板却看到木偶 / 芙宁娜）。
+ * 同内容同 id 还能让重复截图命中缓存，这是正确的。
  */
 export class AssetStore {
   /** assetId -> {buffer, mime, name, time} */
   #assets = new Map()
-  #seq = 0
 
   /** 存一份资源，返回 id */
   put(buffer, mime, name) {
     this.#gc()
-    const id = `a${++this.#seq}`
+    const id = crypto.createHash('sha1').update(buffer).digest('hex').slice(0, 20)
+    const existing = this.#assets.get(id)
+    if (existing) {
+      // 刷新访问时间，并挪到 Map 末尾，避免被 LRU 过早丢掉
+      this.#assets.delete(id)
+      existing.time = Date.now()
+      existing.mime = mime || existing.mime
+      existing.name = name || existing.name
+      this.#assets.set(id, existing)
+      return id
+    }
     this.#assets.set(id, {
       buffer,
       mime: mime || 'application/octet-stream',
