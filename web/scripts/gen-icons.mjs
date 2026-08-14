@@ -28,6 +28,7 @@ const ANTD_ICONS = {
   'down-outlined': 'DownOutlined',
   'file-text-outlined': 'FileTextOutlined',
   'github-outlined': 'GithubOutlined',
+  'left-outlined': 'LeftOutlined',
   'minus-circle-outlined': 'MinusCircleOutlined',
   'picture-outlined': 'PictureOutlined',
   'plus-outlined': 'PlusOutlined',

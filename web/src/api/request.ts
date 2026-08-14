@@ -1,6 +1,7 @@
 import axios, { type AxiosRequestConfig, type AxiosResponse } from 'axios'
 import { message } from 'ant-design-vue'
 import { API_BASE, TOKEN_KEY } from '@/utils/env'
+import { deviceHeaders } from '@/utils/device'
 
 /** 后端统一返回结构，见 framework/src/components/Result.js 的 toJSON() */
 export interface ApiResult<T = any> {
@@ -41,6 +42,10 @@ http.interceptors.request.use((config) => {
   const token = tokenGetter()
   if (token) {
     config.headers.set(TOKEN_KEY, token)
+  }
+  // 设备凭证与指纹：登录相关接口靠它免掉验证码，其余接口只是顺带带上，后端不看
+  for (const [key, value] of Object.entries(deviceHeaders())) {
+    if (value) config.headers.set(key, value)
   }
   return config
 })

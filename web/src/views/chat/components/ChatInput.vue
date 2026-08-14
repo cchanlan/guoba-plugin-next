@@ -11,6 +11,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
+import { filesFromHtml } from '@/utils/clipboard'
 
 /** 预览用的图片，objectURL 由组件负责回收 */
 interface PickedImage {
@@ -134,15 +135,32 @@ function onFileChange(e: Event) {
   input.value = ''
 }
 
-function onPaste(e: ClipboardEvent) {
-  const files = Array.from(e.clipboardData?.items ?? [])
+async function onPaste(e: ClipboardEvent) {
+  const data = e.clipboardData
+  if (!data) return
+  const files = Array.from(data.items)
     .filter((i) => i.kind === 'file' && i.type.startsWith('image/'))
     .map((i) => i.getAsFile())
     .filter((f): f is File => !!f)
   if (files.length) {
     e.preventDefault()
     addFiles(files)
+    return
   }
+
+  /**
+   * 剪贴板里没有文件项，但 HTML 里有图 —— 面板在 http 下复制消息就是这种形状
+   * （见 utils/clipboard 的 copyHtml）。自己把图抠出来，文字接着往输入框里补。
+   */
+  const html = data.getData('text/html')
+  if (!html.includes('<img')) return
+  e.preventDefault()
+  const picked = await filesFromHtml(html, props.maxImages)
+  if (picked.length) addFiles(picked)
+  else message.warning('剪贴板里的图片读不出来，只粘了文字')
+  // 接管了粘贴就得自己插文字。光标位置拿不到就追加到末尾，日常够用
+  const plain = data.getData('text/plain')
+  if (plain) text.value += plain
 }
 
 function addFiles(files: File[]) {

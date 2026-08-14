@@ -8,10 +8,10 @@ import {
   apiGetMenuList,
   apiGetPermCode,
   apiLogout,
-  apiQuickLogin,
 } from '@/api'
 import { setTokenGetter, setUnauthorizedHandler } from '@/api/request'
 import { TOKEN_STORAGE_KEY } from '@/utils/env'
+import { saveDeviceCredential } from '@/utils/device'
 import type { LoginUser, MenuItem } from '@/types'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -36,7 +36,12 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  /** 清空所有登录态（不发请求） */
+  /**
+   * 清空所有登录态（不发请求）。
+   *
+   * 设备凭证故意留着：那是「这台机器是我的」，跟「这次会话」是两回事，
+   * 退出后重新登录不该再问一次验证码。要作废就去登录安全里撤销设备。
+   */
   function reset() {
     setToken('')
     liteToken.value = ''
@@ -48,27 +53,16 @@ export const useAuthStore = defineStore('auth', () => {
   async function loginByPassword(username: string, password: string, captcha?: string) {
     const data = await apiLogin({ username, password, captcha })
     setToken(data.token)
+    // 后端每次登录都会换一份新的设备凭证，存下来，下次换了IP也不用验证码
+    saveDeviceCredential(data.device)
     return data.token
   }
 
-  /** 主人快速登录：#锅巴登录 给出的链接里带的 code */
-  async function loginByCode(code: string) {
-    const data = await apiQuickLogin(code)
-    setToken(data.token)
-    return data.token
-  }
-
-  /** 控制台验证码登录 */
+  /** 控制台验证码登录（仅未设置账号密码时可用） */
   async function loginByConsoleCode(code: string) {
     const data = await apiCheckLoginCode(code)
     setToken(data.token)
     return data.token
-  }
-
-  /** 聊天确认登录：主人发「#锅巴确认登录」后拿到的 token */
-  function loginByConfirmToken(value: string) {
-    setToken(value)
-    return value
   }
 
   async function logout() {
@@ -110,9 +104,7 @@ export const useAuthStore = defineStore('auth', () => {
     setToken,
     reset,
     loginByPassword,
-    loginByCode,
     loginByConsoleCode,
-    loginByConfirmToken,
     logout,
     loadUserInfo,
   }

@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Alert, Button, Input, message } from 'ant-design-vue'
+import { Alert, Button, Input, Tooltip, message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
 import { apiGetLoginStatus, apiRequestLoginCaptcha, apiRequestLoginCode } from '@/api'
+import { useAppStore } from '@/stores/app'
 import { useAuthStore } from '@/stores/auth'
 import { GUOBA_VERSION, ICP_NO } from '@/utils/env'
 
 const auth = useAuthStore()
+const appStore = useAppStore()
 const router = useRouter()
 const route = useRoute()
 
@@ -50,7 +52,7 @@ async function submit() {
     return
   }
   if (captchaRequired.value && !captcha.value.trim()) {
-    message.warning('新 IP 首次登录需要验证码')
+    message.warning('这台设备首次登录需要验证码')
     return
   }
   loading.value = true
@@ -88,12 +90,7 @@ async function submitToken() {
   }
   tokenLoading.value = true
   try {
-    // 令牌有两种来源：页面按钮请求的初始化验证码，以及 #锅巴登录 下发的快捷令牌
-    try {
-      await auth.loginByConsoleCode(code)
-    } catch {
-      await auth.loginByCode(code)
-    }
+    await auth.loginByConsoleCode(code)
     await auth.loadUserInfo()
     message.success('登录成功，请先设置账号密码')
     // 初始化登录后直接进登录安全页，引导先把账号密码设置好
@@ -112,8 +109,19 @@ onMounted(loadStatus)
   <main class="g-login">
     <div class="g-login-bg" />
     <section class="g-login-card">
+      <!-- 主题跟随全局（跟面板里那颗按钮共用一份状态），登录页也能就地切 -->
+      <Tooltip :title="appStore.isDark ? '切换到浅色' : '切换到深色'" placement="left">
+        <Button type="text" class="g-login-theme" @click="appStore.toggleTheme()">
+          <GIcon
+            :icon="appStore.isDark ? 'ant-design:sun-outlined' : 'ant-design:moon-outlined'"
+            :size="17"
+          />
+        </Button>
+      </Tooltip>
       <header class="g-login-head">
-        <img src="/logo.png" alt="Guoba" class="g-login-logo" />
+        <span class="g-login-badge">
+          <img src="/logo.png" alt="Guoba" class="g-login-logo" />
+        </span>
         <h1>锅巴 Web 控制台</h1>
         <p>安全登录认证 · v{{ GUOBA_VERSION }}</p>
       </header>
@@ -177,7 +185,10 @@ onMounted(loadStatus)
             </Input>
             <Button size="large" :loading="requesting" @click="requestCaptcha">获取验证码</Button>
           </div>
-          <p class="g-login-tip">每个新 IP 首次登录需验证，验证码会由机器人单独一行私聊给主人。</p>
+          <p class="g-login-tip">
+            验证码由机器人单独一行私聊给主人。这台设备验证一次后会被记住 90 天，之后即使 IP
+            变了（手机流量的 IPv6 常变）也不用再验。
+          </p>
         </template>
 
         <Button type="primary" size="large" html-type="submit" block :loading="loading" :disabled="!configured">
@@ -195,63 +206,116 @@ onMounted(loadStatus)
 </template>
 
 <style scoped>
+/* 登录页跟随全局主题：颜色全部取 styles/index.css 里 html[data-theme] 那套变量，
+   antd 组件那边由 App.vue 的 ConfigProvider 统一负责，
+   这样 message / Modal 这些浮层不会再出现「深色页面配浅色弹窗」 */
 .g-login {
+  /* 登录卡片是页面唯一主体，投影比普通卡片重一些，单独一个变量 */
+  --g-login-shadow: 0 16px 42px rgba(15, 23, 42, 0.1);
+
   position: relative;
   display: grid;
   place-items: center;
   min-height: 100vh;
   padding: 24px;
   overflow: auto;
-  background: #f1f4f9;
+  color: var(--g-text);
+  background: var(--g-bg);
 }
 
+html[data-theme='dark'] .g-login {
+  --g-login-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+}
+
+/* 两团品牌色暖光，给纯色底铺一点层次 */
 .g-login-bg {
   position: fixed;
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(circle at 18% 20%, rgba(79, 119, 216, 0.13), transparent 35%),
-    radial-gradient(circle at 82% 78%, rgba(83, 153, 218, 0.12), transparent 38%);
+    radial-gradient(circle at 16% 18%, rgba(209, 159, 86, 0.16), transparent 42%),
+    radial-gradient(circle at 84% 82%, rgba(209, 159, 86, 0.1), transparent 45%);
 }
 
 .g-login-card {
   position: relative;
-  width: min(100%, 420px);
-  padding: 34px 30px 24px;
-  color: #283244;
-  background: rgba(255, 255, 255, 0.97);
-  border: 1px solid rgba(211, 219, 232, 0.8);
-  border-radius: 18px;
-  box-shadow: 0 20px 55px rgba(36, 54, 85, 0.16);
+  width: min(100%, 400px);
+  padding: 36px 32px 24px;
+  background: var(--g-bg-card);
+  border: 1px solid var(--g-border);
+  border-radius: 16px;
+  box-shadow: var(--g-login-shadow);
 }
 
-.g-login-head { text-align: center; margin-bottom: 24px; }
-.g-login-logo { width: 46px; height: 46px; margin-bottom: 10px; }
-.g-login-head h1 { margin: 0; font-size: 22px; font-weight: 650; color: #202938; }
-.g-login-head p { margin: 6px 0 0; font-size: 12px; color: #98a1b2; }
-.g-login-alert { margin-bottom: 18px; }
-.g-login-form { display: flex; flex-direction: column; gap: 10px; }
-.g-login-form label { margin-top: 2px; font-size: 13px; color: #566176; }
-.g-captcha-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
-.g-login-tip { margin: -2px 0 4px; font-size: 12px; line-height: 1.6; color: #8993a5; }
-footer { display: flex; justify-content: center; gap: 12px; margin-top: 22px; font-size: 11px; color: #a4acb9; }
+/* 主题按钮浮在卡片右上角，不占表单的位置 */
+.g-login-theme {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--g-text-sub);
+}
 
-:deep(.ant-input-affix-wrapper), :deep(.ant-btn) { border-radius: 9px; }
-:deep(.ant-btn-primary) { margin-top: 6px; background: #4f77d8; box-shadow: 0 7px 15px rgba(79, 119, 216, 0.25); }
+.g-login-theme:hover {
+  color: var(--g-brand);
+  background: var(--g-brand-soft);
+}
+
+.g-login-head { margin-bottom: 26px; text-align: center; }
+
+.g-login-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 58px;
+  margin-bottom: 14px;
+  background: var(--g-brand-soft);
+  border: 1px solid rgba(209, 159, 86, 0.28);
+  border-radius: 16px;
+}
+
+.g-login-logo { width: 36px; height: 36px; }
+.g-login-head h1 { margin: 0; font-size: 21px; font-weight: 600; color: var(--g-text); }
+.g-login-head p { margin: 7px 0 0; font-size: 12px; color: var(--g-text-dim); }
+.g-login-alert { margin-bottom: 20px; }
+.g-login-form { display: flex; flex-direction: column; gap: 8px; }
+.g-login-form label { margin-top: 4px; font-size: 13px; font-weight: 500; color: var(--g-text-sub); }
+.g-captcha-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+.g-login-tip { margin: 4px 0 0; font-size: 12px; line-height: 1.6; color: var(--g-text-dim); }
+
+footer {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 16px;
+  font-size: 11px;
+  color: var(--g-text-dim);
+  border-top: 1px solid var(--g-border);
+}
+
+:deep(.ant-input-affix-wrapper), :deep(.ant-btn) { border-radius: 10px; }
+:deep(.ant-alert) { border-radius: 12px; }
+/* 聚焦时用品牌色描边替代默认的蓝调外发光 */
+:deep(.ant-input-affix-wrapper-focused) { box-shadow: 0 0 0 3px var(--g-brand-soft); }
+
+/* 主按钮颜色交给 ConfigProvider 的 colorPrimary，这里只补一层同色投影 */
+:deep(.ant-btn-primary) {
+  margin-top: 14px;
+  font-weight: 500;
+  box-shadow: 0 6px 16px rgba(209, 159, 86, 0.26);
+}
+:deep(.ant-btn-primary:hover) { box-shadow: 0 8px 20px rgba(209, 159, 86, 0.32); }
 
 @media (max-width: 480px) {
   .g-login { padding: 14px; }
-  .g-login-card { padding: 28px 20px 20px; }
+  .g-login-card { padding: 30px 22px 20px; }
   .g-captcha-row { grid-template-columns: 1fr; }
 }
-
-:global([data-theme='dark']) .g-login { background: #0d1017; }
-:global([data-theme='dark']) .g-login-card {
-  color: var(--g-text);
-  background: var(--g-bg-card);
-  border-color: var(--g-border);
-  box-shadow: var(--g-shadow);
-}
-:global([data-theme='dark']) .g-login-head h1 { color: var(--g-text); }
-:global([data-theme='dark']) .g-login-form label { color: var(--g-text-sub); }
 </style>

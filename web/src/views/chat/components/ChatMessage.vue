@@ -6,11 +6,15 @@
  * 操作收敛到右键菜单（复制 / 引用 / 撤回），跟参考图一致；悬浮时出现一个「更多」入口，
  * 点开是同一个菜单，方便触屏和习惯左键的人。
  */
-import { computed, ref } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
 import MsgSegment from '@/components/msg/MsgSegment.vue'
+import { toDataUrl, writeRich, writeText } from '@/utils/clipboard'
 import type { ChatMsg, MsgSeg } from '@/api'
+
+/** 一条消息最多复制几张图，多了粘贴目标也接不住 */
+const MAX_COPY_IMAGES = 9
 
 const props = defineProps<{ msg: ChatMsg; showDate: boolean }>()
 
@@ -58,13 +62,19 @@ const timeText = computed(() => {
   return `${d.getMonth() + 1}-${pad(d.getDate())} ${hm}`
 })
 
-/** 整条消息的纯文本，右键「复制」用 */
-const plainText = computed(() => {
+/**
+ * 整条压成纯文本。
+ *
+ * `withImage` 决定图片段要不要留 `[图片]` 占位：整条复制时图片本身也进剪贴板了
+ * （面板输入框、QQ 都能从 HTML 里取出来），再写一行占位反而会多出一串没用的文字；
+ * 只有图片读不到、降级成只复制文字时才需要占位说明这儿有张图。
+ */
+function toText(withImage: boolean) {
   let out = ''
   for (const seg of props.msg.segments) {
     if (seg.type === 'text') out += seg.text ?? ''
     else if (seg.type === 'at') out += `@${seg.name || seg.qq} `
-    else if (seg.type === 'image') out += '[图片] '
+    else if (seg.type === 'image') out += withImage ? '[图片] ' : ''
     else if (seg.type === 'record') out += '[语音] '
     else if (seg.type === 'video') out += '[视频] '
     else if (seg.type === 'file') out += '[文件] '
@@ -72,7 +82,10 @@ const plainText = computed(() => {
     else if (seg.type === 'forward') out += '[合并转发] '
   }
   return out.trim()
-})
+}
+
+/** 跟图片一起复制时用的文本 */
+const copyText = computed(() => toText(false))
 
 /** 右键「撤回」只有 bot 自己发的才显示 */
 const canRecall = computed(() => props.msg.self && !!props.msg.messageId)
@@ -82,41 +95,70 @@ function getPopupContainer(node: HTMLElement) {
   return node?.parentNode ?? document.body
 }
 
+/** 页面注入的资源地址拼法，跟 MsgSegment 用的是同一份 */
+const proxyUrl = inject<((url: string) => string) | null>('msgProxyUrl', null)
+const assetUrl = inject<((assetId: string) => string) | null>('msgAssetUrl', null)
+
+/**
+ * 复制一张图能试的地址，按优先级排。
+ *
+ * QQ 直链不给跨域头，`fetch` 拿不到字节，得先走服务端代理（同源）；代理挂了再退直链，
+ * 万一图源恰好允许跨域还能救回来。
+ */
+function imgSrcs(seg: MsgSeg): string[] {
+  const out: string[] = []
+  if (seg.url) {
+    if (proxyUrl) out.push(proxyUrl(seg.url))
+    out.push(seg.url)
+  } else if (seg.assetId && assetUrl) {
+    out.push(assetUrl(seg.assetId))
+  }
+  return out
+}
+
 /** a-menu 的点击回调，key 见模板菜单项 */
 function onMenuClick({ key }: { key: string }) {
   if (key === 'reply') emit('reply', props.msg)
   else if (key === 'recall') emit('recall', props.msg)
-  else if (key === 'copy') void copyText()
+  else if (key === 'copy') void copyMessage()
   else if (key === 'at') emit('at', props.msg)
   else if (key === 'raw') emit('raw', props.msg)
   else if (key === 'poke') emit('poke', props.msg)
   else if (key === 'resend') emit('resend', props.msg)
 }
 
-async function copyText() {
-  const text = plainText.value
-  if (!text) {
-    message.info('这条消息没有可复制的文本')
+/** 整条复制：文本和图片一起进剪贴板，跟沙盒一致 */
+async function copyMessage() {
+  const text = copyText.value
+  const segs = props.msg.segments.filter((seg) => seg.type === 'image').slice(0, MAX_COPY_IMAGES)
+  if (!text && !segs.length) {
+    message.info('这条消息没有可复制的内容')
     return
   }
-  // 面板多是 http 局域网，navigator.clipboard 经常被权限挡下，退回 execCommand
-  try {
-    await navigator.clipboard.writeText(text)
-  } catch {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    if (!ok) {
-      message.error('复制失败，请手动选中文本')
-      return
-    }
+
+  const datas = (
+    await Promise.all(
+      segs.map(async (seg) => {
+        for (const src of imgSrcs(seg)) {
+          const data = await toDataUrl(src)
+          if (data) return data
+        }
+        return null
+      }),
+    )
+  ).filter((v): v is string => !!v)
+
+  if (segs.length && !datas.length) {
+    // 图一张都没读到（rkey 过期 / 代理失败），至少把文字带走，这时才写 [图片] 占位
+    if (await writeText(toText(true))) message.warning('图片读不到，只复制了文字')
+    else message.error('复制失败，请手动选中文本')
+    return
   }
-  message.success('已复制')
+  if (await writeRich(text, datas)) {
+    message.success(datas.length ? `已复制（含 ${datas.length} 张图）` : '已复制')
+  } else {
+    message.error(datas.length ? '浏览器不允许复制图片（http 下常见）' : '复制失败，请手动选中文本')
+  }
 }
 </script>
 
@@ -173,7 +215,7 @@ async function copyText() {
           </a-menu-item>
           <a-menu-item key="copy">
             <GIcon icon="ant-design:copy-outlined" :size="13" />
-            复制文本
+            复制
           </a-menu-item>
           <a-menu-item key="raw">
             <GIcon icon="ant-design:code-outlined" :size="13" />

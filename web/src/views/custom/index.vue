@@ -156,7 +156,8 @@ async function rescan() {
       <h2 class="g-page-title">
         {{ page?.title || '扩展页面' }}
       </h2>
-      <p class="g-page-desc">
+      <!-- 这行说明里带刷新 / 编辑 / 重新扫描，窄屏不能跟其他页的说明一起藏掉 -->
+      <p class="g-page-desc is-keep">
         <template v-if="page?.source === 'store'">在面板里创建的页面</template>
         <template v-else-if="page">由插件「{{ page.pluginName }}」提供</template>
         <Button type="link" size="small" class="g-custom-act" @click="reloadFrame">刷新</Button>

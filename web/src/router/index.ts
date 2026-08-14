@@ -7,8 +7,7 @@ import { useAuthStore } from '@/stores/auth'
  * 后端 /getMenuList 返回的 component 字段是固定的几个路径（见 server/service/both/system/model/menus/），
  * 所以这里把页面静态声明好，菜单接口只用于生成侧边栏与插件入口，避免运行时拼装组件带来的不确定性。
  *
- * 使用 hash 模式，因为 #锅巴登录 下发的地址形如 http://host:port/#/ml/{code}，
- * 且后端未对前端路由做 history fallback。
+ * 使用 hash 模式：后端未对前端路由做 history fallback。
  */
 const routes: RouteRecordRaw[] = [
   {
@@ -16,13 +15,6 @@ const routes: RouteRecordRaw[] = [
     name: 'Login',
     component: () => import('@/views/login/index.vue'),
     meta: { title: '登录', public: true },
-  },
-  {
-    // #锅巴登录 下发的免密登录地址
-    path: '/ml/:code',
-    name: 'MagicLogin',
-    component: () => import('@/views/login/MagicLogin.vue'),
-    meta: { title: '正在登录', public: true },
   },
   {
     path: '/',

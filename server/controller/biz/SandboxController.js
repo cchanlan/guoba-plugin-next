@@ -41,8 +41,8 @@ export class SandboxController extends ApiController {
 
   /** 发一条沙盒消息，返回捕获到的回复 */
   async send(req) {
-    const {scene, text, images} = req.body ?? {}
-    return Result.ok(await this.sandboxService.runMessage({scene, text, images}))
+    const {scene, text, images, reply} = req.body ?? {}
+    return Result.ok(await this.sandboxService.runMessage({scene, text, images, reply}))
   }
 
   /** 回传回复里的图片 / 语音 / 文件 */

@@ -19,6 +19,7 @@ export class ChatController extends ApiController {
     this.get('/sessions', this.sessions)
     this.get('/history', this.history)
     this.get('/tail', this.tail)
+    this.get('/raw', this.raw)
     this.post('/send', this.send)
     this.post('/send-raw', this.sendRaw)
     this.post('/recall', this.recall)
@@ -52,6 +53,12 @@ export class ChatController extends ApiController {
   async tail(req) {
     const {key, cursor, rev} = req.query ?? {}
     return Result.ok(this.chatService.tail({key, cursor, rev}))
+  }
+
+  /** 一条消息的原始数据，四档：段数组 / 上报原文 / pb 元素 / pb 原文 */
+  async raw(req) {
+    const {botId, type, id, messageId} = req.query ?? {}
+    return Result.ok(await this.chatService.getRaw({botId, type, id, messageId}))
   }
 
   /** 发消息，会真的发到 QQ 上。图片走 multipart（锅巴全局挂的 multer 已把文件放进 req.files） */

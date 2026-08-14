@@ -100,6 +100,8 @@ export interface LoginStatus {
   configured: boolean
   captchaRequired: boolean
   ip?: string
+  /** 本机的设备凭证是否还有效（有效就不用验证码） */
+  deviceTrusted?: boolean
 }
 
 export interface TrustedIp {
@@ -107,10 +109,22 @@ export interface TrustedIp {
   device?: string
 }
 
+/** 可信设备：浏览器里存了长期凭证的那些机器，指纹字段只用于展示 */
+export interface TrustedDevice {
+  id: string
+  name: string
+  fp?: string
+  ua?: string
+  ip?: string
+  createdAt?: number
+  lastAt?: number
+}
+
 export interface LoginSecurity {
   configured: boolean
   username: string
   trustedIps: TrustedIp[]
+  trustedDevices?: TrustedDevice[]
 }
 
 export interface HomeData {

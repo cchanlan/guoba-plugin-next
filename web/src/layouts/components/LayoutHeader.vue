@@ -90,7 +90,7 @@ function confirmRestartGuoba() {
 function confirmLogout() {
   Modal.confirm({
     title: '退出登录',
-    content: '退出后需要重新通过「#锅巴登录」或控制台验证码登录。',
+    content: '退出后需要重新输入用户名和密码登录，本机的可信设备记录会保留。',
     okText: '退出',
     okType: 'danger',
     cancelText: '取消',

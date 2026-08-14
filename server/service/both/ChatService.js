@@ -26,6 +26,34 @@ const MAX_SEND_IMAGE_SIZE = 20 * 1024 * 1024
 const MAX_SEND_ATS = 10
 /** Raw JSON 的长度上限 */
 const MAX_RAW_LEN = 20000
+/**
+ * 「查看原始消息」留的那份数据。
+ *
+ * 四档各自的字符上限 + 最多留几条消息。上报原文一般一两 KB，pb 那两档多半是空的，
+ * 实际占用远小于上限；上限只是防某条超长消息把内存吃掉。
+ */
+const MAX_RAW_DUMP = 20000
+const MAX_RAW_KEEP = 200
+/** dump 里单个字符串的上限，base64 之类的长值截一下 */
+const MAX_RAW_STR = 4096
+/** dump 的最大深度，protobuf 嵌得深，够看结构就行 */
+const MAX_RAW_DEPTH = 14
+/** 事件对象上不必 dump 的字段：运行时对象或方法，跟消息内容无关 */
+const RAW_SKIP = new Set(['bot', 'friend', 'group', 'member', 'adapter', 'raw'])
+/** protobuf 元素 / 原文在各家实现里的字段名，逐个试 */
+const PB_ELEM_KEYS = ['elems', 'elements', 'pb_elem', 'pbElem', 'msg_elems', 'msgElems']
+const PB_RAW_KEYS = ['pb', 'pb_raw', 'pbRaw', 'protobuf', 'raw_pb', 'msg_pb']
+/**
+ * pb elem 从 pb raw 的这条路径下取：`3.6.3.1.2`。
+ *
+ * 同 Packet-plugin 的 `#取`（apps/getMsg.js），路径与要滤掉的那几个 key 都照它来，
+ * 好让面板这边看到的跟群里 `#取` 出来的一致。37 / 9 / 16 分别是附加信息、
+ * 匿名之类的杂项，不是消息内容。
+ */
+const PB_ELEM_PATH = ['3', '6', '3', '1', '2']
+const PB_ELEM_DROP = ['37', '9', '16']
+/** Packet-plugin 的 helper，protobuf 编解码和 send_packet 都靠它 */
+const PACKET_HELPER = '../../../../Packet-plugin/model/PacketHelper.js'
 /** 代理白名单最多记多少条 url */
 const MAX_PROXY_URLS = 3000
 /** 昵称兜底缓存上限，超了挤掉最老的一半 */
@@ -140,6 +168,16 @@ export default class ChatService extends Service {
    * 任意 URL 的出网口子，所以只放行「确实在消息里出现过」的那些。
    */
   #proxyUrls = new Set()
+  /**
+   * 「查看原始消息」的数据：messageId -> {array, raw, pbElem, pbRaw}。
+   *
+   * 都是已经序列化好的字符串 —— 事件对象上挂着 bot / friend 这些运行时对象，直接留引用
+   * 会把整个 Bot 拖在内存里，收到时就 dump 成文本最省事。不随消息一起下发，
+   * 前端点开弹窗才单独取一次。
+   */
+  #raws = new Map()
+  /** Packet-plugin 的 helper：undefined 是还没试过，null 是没装 */
+  #packet = undefined
   #handler = null
   #attached = false
 
@@ -208,18 +246,261 @@ export default class ChatService extends Service {
     if (!botId || !id) return
 
     const segments = await normalizeMsg(e.message, {download: false})
+    const messageId = e.message_id != null ? String(e.message_id) : ''
     this.#push({
       key: `${botId}:${type}:${id}`,
       botId,
       type,
       id,
-      messageId: e.message_id != null ? String(e.message_id) : '',
+      messageId,
       messageSeq: this.#seqOf(e),
       time: Number(e.time) || Math.floor(Date.now() / 1000),
       self,
       sender: this.#sender(e.sender, e.user_id),
       segments,
     }, {unread: !self})
+    // 事件里的原始数据比历史接口给的全（有上报原文），后来的以它为准
+    if (messageId) {
+      const upload = this.#parseUpload(e)
+      this.#storeRaw(messageId, {
+        array: this.#dump(e.message),
+        raw: this.#rawText(e, upload),
+        pbElem: this.#pickPb(PB_ELEM_KEYS, upload, e),
+        pbRaw: this.#pickPb(PB_RAW_KEYS, upload, e),
+      })
+    }
+  }
+
+  /* ---------------- 原始数据 ---------------- */
+
+  /**
+   * 存一条的原始数据。
+   *
+   * @param overwrite 已经有了要不要盖掉。实时事件覆盖历史接口的，反过来不行
+   */
+  #storeRaw(messageId, item, {overwrite = true} = {}) {
+    const id = String(messageId ?? '')
+    if (!id) return
+    if (!overwrite && this.#raws.has(id)) return
+    this.#raws.delete(id)
+    this.#raws.set(id, item)
+    // Map 保持插入序，超量从最早的开始丢
+    while (this.#raws.size > MAX_RAW_KEEP) {
+      const first = this.#raws.keys().next().value
+      if (first === undefined) break
+      this.#raws.delete(first)
+    }
+  }
+
+  /** OneBot 适配器把收到的上报原文留在 `e.raw` 上，能解析出来就用它当「msg raw」 */
+  #parseUpload(e) {
+    if (typeof e?.raw !== 'string' || !e.raw.trim()) return null
+    try {
+      const parsed = JSON.parse(e.raw)
+      return parsed && typeof parsed === 'object' ? parsed : null
+    } catch {
+      return null
+    }
+  }
+
+  /** 上报原文：能解析就美化，解析不了给原文，没有原文就 dump 事件对象自己 */
+  #rawText(e, upload) {
+    if (upload) return this.#dump(upload)
+    if (typeof e?.raw === 'string' && e.raw.trim()) return this.#clip(e.raw)
+    return this.#dump(e)
+  }
+
+  /**
+   * 取 protobuf 那两档。
+   *
+   * 只有走协议的适配器（icqq / 开了 packet 的实现）才会带上，OneBot 上报里通常没有，
+   * 取不到就返回空串，前端如实说明「当前适配器没提供」。
+   */
+  #pickPb(keys, ...sources) {
+    for (const source of sources) {
+      if (!source || typeof source !== 'object') continue
+      for (const key of keys) {
+        const val = source[key]
+        if (val == null || val === '' || (Array.isArray(val) && !val.length)) continue
+        return this.#dump(val)
+      }
+    }
+    return ''
+  }
+
+  /** 超长就截断，末尾标一下原长度 */
+  #clip(text, max = MAX_RAW_DUMP) {
+    const str = String(text ?? '')
+    if (str.length <= max) return str
+    return `${str.slice(0, max)}\n…（已截断，共 ${str.length} 字符）`
+  }
+
+  /**
+   * 序列化成可读 JSON。
+   *
+   * `JSON.stringify` 直接上会栽在三处：事件对象里 bot / group 互相引用、protobuf 里的
+   * uin 是 bigint、图片段可能带 Buffer。所以自己走一遍，顺手把长值和深层结构压掉。
+   */
+  #dump(value) {
+    if (value == null) return ''
+    const seen = new WeakSet()
+    const walk = (val, depth, top = false) => {
+      if (val === null) return null
+      const type = typeof val
+      if (type === 'string') return val.length > MAX_RAW_STR
+        ? `${val.slice(0, MAX_RAW_STR)}…（共 ${val.length} 字符）`
+        : val
+      if (type === 'number' || type === 'boolean') return val
+      if (type === 'bigint') return String(val)
+      if (type === 'function' || type === 'symbol' || type === 'undefined') return undefined
+      if (Buffer.isBuffer(val) || val instanceof Uint8Array) {
+        // 池化的 Buffer 里 byteOffset 不一定是 0，取字节要走 subarray 而不是 .buffer
+        const head = Buffer.from(val.subarray(0, 32)).toString('hex')
+        return `[二进制 ${val.length} 字节] ${head}${val.length > 32 ? '…' : ''}`
+      }
+      if (depth > MAX_RAW_DEPTH) return '[层级过深]'
+      if (seen.has(val)) return '[循环引用]'
+      seen.add(val)
+      try {
+        if (Array.isArray(val)) return val.map((item) => walk(item, depth + 1))
+        if (val instanceof Set) return [...val].map((item) => walk(item, depth + 1))
+        // Map 转对象后再走下面的通用分支，注意别覆盖 val，否则 finally 里销不掉 seen
+        const target = val instanceof Map ? Object.fromEntries(val) : val
+        const out = {}
+        for (const key of Object.keys(target)) {
+          // 顶层是事件对象时跳过运行时字段，深层的照常（段里也可能有叫 group 的键）
+          if (top && RAW_SKIP.has(key)) continue
+          let item
+          try {
+            item = walk(target[key], depth + 1)
+          } catch (err) {
+            // getter 抛异常的字段不该拖垮整份 dump
+            item = `[取值失败：${err?.message ?? err}]`
+          }
+          if (item !== undefined) out[key] = item
+        }
+        return out
+      } finally {
+        seen.delete(val)
+      }
+    }
+    try {
+      return this.#clip(JSON.stringify(walk(value, 0, true), null, 2) ?? '')
+    } catch (err) {
+      return `[序列化失败：${err?.message ?? err}]`
+    }
+  }
+
+  /**
+   * 四档原始数据，给「查看原始消息」用。
+   *
+   * 前两档优先现取 —— `get_msg` 拿到的比缓冲里存的全（缓冲只是重启后 / 适配器没这
+   * 接口时的兜底）。后两档得走协议：借 Packet-plugin 的 helper 用 NapCat 的
+   * `send_packet` 发 SsoGetGroupMsg，跟群里 `#取` 是同一条路。
+   */
+  async getRaw({botId, type, id, messageId} = {}) {
+    const mid = String(messageId ?? '').trim()
+    if (!mid) throw new GuobaError('缺少消息 id')
+    const cached = this.#raws.get(mid)
+    const out = {
+      found: !!cached,
+      array: cached?.array ?? '',
+      raw: cached?.raw ?? '',
+      pbElem: cached?.pbElem ?? '',
+      pbRaw: cached?.pbRaw ?? '',
+      /** pb 那两档取不到时的原因，前端原样显示 */
+      pbNote: '',
+    }
+
+    const bot = this.#bot(botId)
+    let realSeq = null
+    if (typeof bot?.sendApi === 'function') {
+      try {
+        const res = await bot.sendApi('get_msg', {message_id: mid})
+        // sendApi 回来的是个 Proxy，data 里的字段直接取得到
+        const data = res?.data ?? res
+        if (data && typeof data === 'object') {
+          out.raw = this.#dump(data)
+          if (data.message != null) out.array = this.#dump(data.message)
+          out.found = true
+          realSeq = data.real_seq ?? null
+        }
+      } catch (err) {
+        // 消息太旧、实现没这接口都会失败，缓冲里那份还在，继续
+        logger.debug(`[Guoba][消息记录] get_msg 失败：${err?.message ?? err}`)
+      }
+    }
+
+    const pb = await this.#getPb({bot, type, id, messageId: mid, realSeq})
+    out.pbNote = pb.pbNote ?? ''
+    // 上报里自带 pb 字段的适配器（icqq 那类）留在缓冲里，协议现取到的优先
+    out.pbElem = pb.pbElem || out.pbElem
+    out.pbRaw = pb.pbRaw || out.pbRaw
+    return out
+  }
+
+  /** 按 bot_id 取账号，不传就用默认的那个 */
+  #bot(botId) {
+    const uin = Number(botId) || botId
+    return (uin && Bot.bots?.[uin]) || null
+  }
+
+  /**
+   * 取 protobuf 那两档。
+   *
+   * 依赖两样东西，缺哪样都如实说明而不是留白：Packet-plugin（提供 pb 编解码）、
+   * 协议端支持 `send_packet`（NapCat 要开 packet 模式）。
+   */
+  async #getPb({bot, type, id, messageId, realSeq}) {
+    if (typeof bot?.sendApi !== 'function') {
+      return {pbNote: '当前适配器没有 sendApi，取不了 protobuf。'}
+    }
+    if (type !== 'group') {
+      return {pbNote: 'protobuf 只能取群消息 —— 走的是 SsoGetGroupMsg，私聊没有对应的包。'}
+    }
+    const helper = await this.#packetHelper()
+    if (!helper) {
+      return {pbNote: '没找到 Packet-plugin。protobuf 的编解码由它提供，装上并让协议端开启 packet 模式（NapCat）后这两档才有内容。'}
+    }
+
+    try {
+      // helper 只用到 e.bot 与 e.group_id，给个最小的假 e 就行
+      const fakeEvent = {bot, group_id: Number(id) || id}
+      const data = await helper.getMsg(fakeEvent, realSeq ?? messageId, realSeq != null)
+      if (!data) return {pbNote: '协议端没有返回 protobuf 数据，检查 NapCat 的 packet 模式是否开着。'}
+      let elems = PB_ELEM_PATH.reduce((cur, key) => cur?.[key], data)
+      elems = Array.isArray(elems)
+        ? elems.filter((item) => !PB_ELEM_DROP.includes(Object.keys(item ?? {})[0]))
+        : []
+      return {
+        // 用 Packet-plugin 的 replacer，bigint 出来是 `123L`、Buffer 是 `hex->…`，跟 `#取` 一致
+        pbRaw: this.#stringify(data, helper.replacer),
+        pbElem: elems.length ? this.#stringify(elems, helper.replacer) : '',
+        pbNote: elems.length ? '' : '这条消息在 pb 里没有 elem 元素（滤掉杂项后是空的），pb raw 档还是完整的。',
+      }
+    } catch (err) {
+      return {pbNote: `取 protobuf 失败：${err?.message ?? err}`}
+    }
+  }
+
+  /** Packet-plugin 是可选依赖，动态 import 一次，成功与失败都记下来不重复试 */
+  async #packetHelper() {
+    if (this.#packet !== undefined) return this.#packet
+    try {
+      this.#packet = await import(PACKET_HELPER)
+    } catch (err) {
+      logger.debug(`[Guoba][消息记录] 没加载到 Packet-plugin：${err?.message ?? err}`)
+      this.#packet = null
+    }
+    return this.#packet
+  }
+
+  #stringify(value, replacer) {
+    try {
+      return this.#clip(JSON.stringify(value, replacer, 2) ?? '')
+    } catch (err) {
+      return `[序列化失败：${err?.message ?? err}]`
+    }
   }
 
   /** 翻页游标。NapCat 给 message_seq，缺了就退回 message_id（部分实现里两者同值） */
@@ -461,18 +742,28 @@ export default class ChatService extends Service {
     const messages = []
     for (const item of list) {
       const userId = String(item.user_id ?? item.sender?.user_id ?? '')
+      const messageId = item.message_id != null ? String(item.message_id) : ''
       messages.push({
         key,
         botId: String(botId ?? ''),
         type: type === 'group' ? 'group' : 'friend',
         id: String(id ?? ''),
-        messageId: item.message_id != null ? String(item.message_id) : '',
+        messageId,
         messageSeq: this.#seqOf(item),
         time: Number(item.time) || 0,
         self: userId === String(botId ?? ''),
         sender: this.#sender(item.sender, userId),
         segments: await normalizeMsg(item.message ?? item.content, {download: false}),
       })
+      // 历史接口没有上报原文，只能拿返回的条目本身；已经有实时那份的不覆盖
+      if (messageId) {
+        this.#storeRaw(messageId, {
+          array: this.#dump(item.message ?? item.content),
+          raw: this.#dump(item),
+          pbElem: this.#pickPb(PB_ELEM_KEYS, item),
+          pbRaw: this.#pickPb(PB_RAW_KEYS, item),
+        }, {overwrite: false})
+      }
     }
     // 各实现返回的顺序不一致，自己排一遍（旧 → 新）
     messages.sort((a, b) => (a.time - b.time) || String(a.messageSeq).localeCompare(String(b.messageSeq)))

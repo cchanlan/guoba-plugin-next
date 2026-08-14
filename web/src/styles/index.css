@@ -18,6 +18,8 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* index.html 里为了防白屏内联了深色底，样式加载后交还给主题变量 */
+  background: var(--g-bg);
 }
 
 /* 主题变量：供自定义样式使用，antd 组件自身由 ConfigProvider 控制 */
@@ -91,6 +93,14 @@ html[data-theme='light'] {
 
   .g-page-title {
     font-size: 17px;
+    /* 说明文案原本兼作标题与正文之间的间距，藏掉之后由标题自己补上 */
+    margin-bottom: 12px;
+  }
+
+  /* 手机屏幕就那么点，顶部这几行说明能占掉小半屏、把正文顶到看不见的地方，
+     窄屏只留加粗的大标题。说明里带操作按钮的（扩展页面那种）加 is-keep 保留 */
+  .g-page-desc:not(.is-keep) {
+    display: none;
   }
 
   /* 表单在窄屏改为上下排布，label 不再占一列挤压控件 */

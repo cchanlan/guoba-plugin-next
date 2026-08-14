@@ -1,7 +1,7 @@
 import {GuobaError, Service} from '#guoba.framework'
 import PluginsLoader from '../../../../../lib/plugins/loader.js'
 import cfg from '../../../../../lib/config/config.js'
-import {AssetStore, normalizeMsg, toBase64File} from './model/msgSegment.js'
+import {AssetStore, isHttp, normalizeMsg, toBase64File} from './model/msgSegment.js'
 import {listBots} from './model/bots.js'
 
 /** 沙盒会话里假装的适配器标识，日志里能一眼认出是面板发的 */
@@ -36,6 +36,8 @@ const RUN_TIMEOUT = 60_000
 
 /** 入站消息最多允许几张图 */
 const MAX_INBOUND_IMAGES = 5
+/** 被引用消息最多带回几段，够插件读文本和图就行，防止前端塞一大坨回来 */
+const MAX_QUOTE_SEGMENTS = 8
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -209,8 +211,9 @@ export default class SandboxService extends Service {
    * @param scene  会话场景，见 #normalizeScene
    * @param text   文本内容
    * @param images 图片，元素为 dataURL 或 base64 字符串
+   * @param reply  引用的消息，见 #normalizeReply，无引用时传空
    */
-  async runMessage({scene, text = '', images = []} = {}) {
+  async runMessage({scene, text = '', images = [], reply = null} = {}) {
     if (this.#running) {
       throw new GuobaError('上一条还在处理中，请稍候')
     }
@@ -221,7 +224,7 @@ export default class SandboxService extends Service {
     }
 
     const sc = this.#normalizeScene(scene)
-    const e = this.#buildEvent(sc, message)
+    const e = this.#buildEvent(sc, message, this.#normalizeReply(reply))
     this.#rich = (PLATFORMS[sc.platform] ?? PLATFORMS.default).rich
 
     // 黑白名单在 deal() 里是静默 return 的，先自己判一次好给出原因
@@ -355,21 +358,112 @@ export default class SandboxService extends Service {
   }
 
   /**
+   * 引用信息兜底。
+   *
+   * 前端把被引用那条气泡的段一起传回来 —— 沙盒的历史只存在浏览器 localStorage 里，
+   * 服务端并不留会话，想让插件的 `e.getReply()` 读到内容就只能由前端带上。
+   * 只认文本和图片：其余段（按钮、markdown、转发）插件读引用时基本都用不上。
+   */
+  #normalizeReply(reply) {
+    if (!reply || typeof reply !== 'object') return null
+    const id = String(reply.id ?? '').trim()
+    if (!id) return null
+
+    const segments = []
+    const list = Array.isArray(reply.segments) ? reply.segments.slice(0, MAX_QUOTE_SEGMENTS) : []
+    for (const seg of list) {
+      if (!seg || typeof seg !== 'object') continue
+      if (seg.type === 'text') {
+        if (seg.text) segments.push({type: 'text', text: String(seg.text)})
+      } else if (seg.type === 'image') {
+        const file = this.#quoteImage(seg)
+        if (file) segments.push({type: 'image', file, url: file})
+      }
+    }
+
+    const text = String(reply.text ?? '')
+    return {
+      id,
+      userId: String(reply.userId ?? '').trim(),
+      nickname: String(reply.nickname ?? '').trim() || '沙盒用户',
+      time: Number(reply.time) || Date.now(),
+      text,
+      // 一条纯图片的引用也得给插件留点东西，否则 message 是空数组
+      segments: segments.length ? segments : (text ? [{type: 'text', text}] : []),
+    }
+  }
+
+  /**
+   * 被引用图片的字节来源。
+   *
+   * 机器人回复里的图在服务端资源表里（段上只有 assetId），用户自己发的图前端存的是
+   * dataURL，http 直链则原样透传 —— 三种都转成 Yunzai 认的形式交给插件。
+   */
+  #quoteImage(seg) {
+    if (isHttp(seg.url)) return seg.url
+    if (seg.assetId) {
+      const asset = this.#assets.get(seg.assetId)
+      // 资源可能已被 LRU 挤掉或过期，那就当这张图没了，不影响引用的文本部分
+      if (asset) return `base64://${asset.buffer.toString('base64')}`
+      return null
+    }
+    return toBase64File(seg.url)
+  }
+
+  /**
+   * 造一个「被引用的消息」对象，供假会话的 `getMsg()` 返回。
+   *
+   * 字段照 icqq 的 `getMsg()` 结果对齐（插件常读 `message` / `sender.nickname` / `raw_message`），
+   * `e.getReply()` 拿到的就是这个 —— 见 lib/plugins/loader.js 处理 reply 段的那几行。
+   */
+  #buildQuoted(sc, rp) {
+    const userId = rp.userId ? (Number(rp.userId) || rp.userId) : sc.userId
+    const quoted = {
+      message_id: rp.id,
+      message_type: sc.isGroup ? 'group' : 'private',
+      post_type: 'message',
+      self_id: sc.selfId,
+      user_id: userId,
+      time: Math.floor(rp.time / 1000),
+      seq: Math.floor(rp.time / 1000),
+      rand: 0,
+      sender: {
+        user_id: userId,
+        nickname: rp.nickname,
+        card: sc.isGroup ? rp.nickname : undefined,
+      },
+      message: rp.segments,
+      raw_message: rp.text,
+    }
+    if (sc.isGroup) {
+      quoted.group_id = sc.groupId
+      quoted.group_name = sc.groupName
+    }
+    return quoted
+  }
+
+  /**
    * 造一个事件对象。
    *
    * 字段与 `Bot.prepareEvent()` 处理完的成品对齐（见 lib/bot.js），因为我们不走 Bot.em，
    * 那一步补的 bot / friend / group / member / reply 都得自己给全，插件才不会因为少个
    * 字段就抛异常。
    */
-  #buildEvent(sc, message) {
+  #buildEvent(sc, message, rp = null) {
     const self = this
     const platform = PLATFORMS[sc.platform] ?? PLATFORMS.default
     const raw = message.map((i) => (i.type === 'text' ? i.text : `[${i.type}]`)).join('')
     const messageId = `sandbox-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    // 被引用消息由假会话的 getMsg() 交给插件，三个会话对象共用同一份
+    const quoted = rp ? this.#buildQuoted(sc, rp) : null
 
     // 群聊里勾了 at 就在最前面插一段 at，dealEvent 据此置 e.atBot
     if (sc.isGroup && sc.atBot) {
       message = [{type: 'at', qq: sc.selfId, text: `@${sc.selfId}`}, ...message]
+    }
+    // reply 段在最前，跟真实消息一致；dealEvent 见到它才会置 e.reply_id / e.getReply
+    if (rp) {
+      message = [{type: 'reply', id: rp.id}, ...message]
     }
 
     const push = (via) => (msg) => self.#collect(via, msg)
@@ -377,6 +471,7 @@ export default class SandboxService extends Service {
     const friend = this.#makeContact({
       via: 'friend',
       info: {user_id: sc.userId, nickname: sc.nickname, remark: sc.nickname},
+      quoted,
     })
     const member = this.#makeContact({
       via: 'member',
@@ -389,6 +484,7 @@ export default class SandboxService extends Service {
         is_admin: sc.isAdmin,
         role: sc.isOwner ? 'owner' : sc.isAdmin ? 'admin' : 'member',
       },
+      quoted,
     })
     const group = this.#makeContact({
       via: 'group',
@@ -401,6 +497,7 @@ export default class SandboxService extends Service {
         is_owner: false,
         is_admin: false,
       },
+      quoted,
       extra: {
         pickMember: () => member,
         getMemberMap: async () => new Map([[sc.userId, member.info]]),
@@ -446,11 +543,25 @@ export default class SandboxService extends Service {
       e.member = member
     }
 
+    if (quoted) {
+      /**
+       * icqq 的引用消息除了 `e.getReply()` 还会给一份简要信息挂在 `e.source` 上，
+       * 有些插件（尤其是取图、转发那类）直接读它而不调 getReply，一并补上。
+       */
+      e.source = {
+        user_id: quoted.user_id,
+        time: quoted.time,
+        seq: quoted.seq,
+        rand: quoted.rand,
+        message: quoted.raw_message,
+      }
+    }
+
     return e
   }
 
   /** 造一个假的会话对象（好友 / 群 / 群成员），sendMsg 只收不发 */
-  #makeContact({via, info, extra = {}}) {
+  #makeContact({via, info, quoted = null, extra = {}}) {
     const self = this
     const contact = {
       ...info,
@@ -462,9 +573,13 @@ export default class SandboxService extends Service {
       sendForwardMsg: (msg) => self.#collect(via, {type: 'node', data: msg}),
       getInfo: () => info,
       getAvatarUrl: () => '',
-      /** 插件用 e.getReply() 取引用消息，沙盒里没有历史，给个空 */
-      getMsg: () => null,
-      getChatHistory: () => [],
+      /**
+       * 插件用 `e.getReply()` 取引用消息，实际落到这里。沙盒不存历史，只认「本条消息
+       * 引用的那一条」—— 前端右键引用时把那条气泡的内容一起传回来了，见 #normalizeReply。
+       * 问别的 id 一律给 null（真去翻历史沙盒也翻不到）。
+       */
+      getMsg: (id) => (quoted && (id == null || String(id) === String(quoted.message_id)) ? quoted : null),
+      getChatHistory: () => (quoted ? [quoted] : []),
       ...extra,
     }
     return contact

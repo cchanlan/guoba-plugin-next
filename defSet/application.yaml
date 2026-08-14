@@ -44,6 +44,8 @@ auth:
   username: ''
   passwordHash: ''
   trustedIps: []
+  # 可信设备：浏览器里存一份长期凭证，换了IP也不用重新验证码
+  trustedDevices: []
 
 # jwt配置
 jwt:

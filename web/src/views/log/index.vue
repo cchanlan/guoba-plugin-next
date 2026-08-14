@@ -9,6 +9,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Button, Empty, Input, Select, Switch, Tag, Tooltip, message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
+import GBackTop from '@/components/GBackTop.vue'
+import { scrollPageToBottom } from '@/utils/scroll'
 import {
   apiClearLog,
   apiLogSendImage,
@@ -274,6 +276,10 @@ async function sendImageToMaster() {
 
 onMounted(async () => {
   await Promise.all([pull(true), loadStatus()])
+  // 手机上日志框只占页面的一部分，光贴容器底还是看不到最新几行 ——
+  // 首屏连页面一起拖到底。之后来新日志只滚容器，页面不再动。
+  await nextTick()
+  scrollPageToBottom()
   start()
 })
 
@@ -349,6 +355,8 @@ onBeforeUnmount(() => {
         <template v-if="status.logFile"> · 历史日志 {{ status.logFile }}</template>
       </span>
     </div>
+
+    <GBackTop />
   </div>
 </template>
 
@@ -383,6 +391,8 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 420px;
   max-height: calc(100vh - 260px);
+  /* 手机浏览器的地址栏会吃掉高度，有 dvh 就按真正的可视高度算 */
+  max-height: calc(100dvh - 260px);
   overflow: auto;
   padding: 10px 12px;
   border: 1px solid var(--g-border);
@@ -395,6 +405,26 @@ onBeforeUnmount(() => {
 
 .g-log-empty {
   margin: 80px auto;
+}
+
+/* 手机上整页不滚：页面撑满可视高度，日志只在框里滚，框底正好贴到屏幕底部。
+   原来靠 min-height / max-height 猜高度，猜多了页面被撑长、猜少了下面空一截 */
+@media (max-width: 768px) {
+  /* 顶栏已经写着「运行日志」了，页面里这个大标题在手机上纯占高度 */
+  .g-page-head {
+    display: none;
+  }
+
+  .g-log {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .g-log-box {
+    /* 工具栏折成两三行时也别把日志框挤没 */
+    min-height: 160px;
+    max-height: none;
+  }
 }
 
 .g-log-line {

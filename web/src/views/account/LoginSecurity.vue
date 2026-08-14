@@ -1,9 +1,23 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { Button, Card, Empty, Form, FormItem, Input, Popconfirm, Table, Tooltip, message } from 'ant-design-vue'
-import { apiClearTrustedIps, apiGetLoginSecurity, apiRevokeTrustedIp, apiSetLoginCredentials } from '@/api'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { Button, Card, Empty, Form, FormItem, Input, Popconfirm, Table, Tag, Tooltip, message } from 'ant-design-vue'
+import {
+  apiClearTrustedDevices,
+  apiClearTrustedIps,
+  apiGetLoginSecurity,
+  apiRevokeTrustedDevice,
+  apiRevokeTrustedIp,
+  apiSetLoginCredentials,
+} from '@/api'
 import { useAuthStore } from '@/stores/auth'
-import type { LoginSecurity, TrustedIp } from '@/types'
+import {
+  clearDeviceSecret,
+  getDeviceId,
+  getDeviceInfo,
+  getFingerprint,
+  saveDeviceCredential,
+} from '@/utils/device'
+import type { LoginSecurity, TrustedDevice } from '@/types'
 
 const auth = useAuthStore()
 
@@ -11,8 +25,14 @@ const loading = ref(true)
 /** 是否已完成过至少一次加载；用于区分首屏与刷新，避免刷新时拆掉布局 */
 const hydrated = ref(false)
 const saving = ref(false)
-const security = ref<LoginSecurity>({ configured: false, username: '', trustedIps: [] })
+const security = ref<LoginSecurity>({ configured: false, username: '', trustedIps: [], trustedDevices: [] })
 const form = reactive({ username: '', currentPassword: '', password: '', confirmPassword: '' })
+
+const devices = computed<TrustedDevice[]>(() => security.value.trustedDevices ?? [])
+/** 本机的设备 id，用来在列表里标出「本机」 */
+const myDeviceId = getDeviceId()
+/** 本机指纹摘要，只是给人看的，不参与任何校验 */
+const myFingerprint = `${getDeviceInfo()} · ${getFingerprint()}`
 
 async function load() {
   if (loading.value && hydrated.value) return
@@ -56,6 +76,8 @@ async function save() {
       currentPassword: form.currentPassword || undefined,
     })
     security.value = { ...security.value, ...res }
+    // 保存凭证的就是本人：后端顺手把这台机器记成可信设备，凭证存下来
+    saveDeviceCredential(res.device)
     // 同步全局状态并刷新可信IP列表（保存后当前IP会被自动信任）
     auth.configured = true
     form.username = security.value.username
@@ -81,6 +103,31 @@ async function clearAll() {
   message.success('已清空可信 IP')
 }
 
+async function revokeDevice(id: string) {
+  security.value = await apiRevokeTrustedDevice(id)
+  // 撤销的是本机，本地那份 secret 也没用了，清掉免得下次白发一遍
+  if (id === myDeviceId) clearDeviceSecret()
+  message.success('已撤销该设备')
+}
+
+async function clearDevices() {
+  security.value = await apiClearTrustedDevices()
+  clearDeviceSecret()
+  message.success('已清空可信设备')
+}
+
+/** 时间戳转「几天前」这种好读的说法，没有就返回 — */
+function timeAgo(ts?: number): string {
+  if (!ts) return '—'
+  const diff = Date.now() - ts
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前`
+  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)} 小时前`
+  if (diff < 30 * 86400_000) return `${Math.floor(diff / 86400_000)} 天前`
+  const d = new Date(ts)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 /** 将 ::ffff:x.x.x.x 格式的 IPv4-mapped IPv6 展示为 IPv4 */
 function displayIp(ip: string): string {
   const m = ip.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i)
@@ -99,6 +146,14 @@ const columns = [
   { title: '操作', key: 'action', width: 80, align: 'center' as const },
 ]
 
+const deviceColumns = [
+  { title: '设备', key: 'name' },
+  { title: '指纹', key: 'fp', width: 110 },
+  { title: '最近使用', key: 'lastAt', width: 120 },
+  { title: '最近 IP', key: 'ip', width: 180 },
+  { title: '操作', key: 'action', width: 80, align: 'center' as const },
+]
+
 onMounted(load)
 </script>
 
@@ -106,7 +161,7 @@ onMounted(load)
   <div class="g-page">
     <div class="g-page-head">
       <h2 class="g-page-title">登录安全</h2>
-      <p class="g-page-desc">设置面板登录账号密码，并管理已通过验证码认证的可信 IP。</p>
+      <p class="g-page-desc">设置面板登录账号密码，并管理已认证的可信设备与可信 IP。</p>
     </div>
 
     <Card :bordered="false" class="g-sec-cred">
@@ -139,6 +194,77 @@ onMounted(load)
       </Form>
     </Card>
 
+    <Card :bordered="false" class="g-sec-devs">
+      <template #title>可信设备</template>
+      <template #extra>
+        <Popconfirm title="确定清空全部可信设备？" @confirm="clearDevices">
+          <Button danger size="small" :disabled="!devices.length || loading">全部清空</Button>
+        </Popconfirm>
+      </template>
+      <p class="g-sec-tip">
+        登录成功后浏览器里会存一份长期凭证（90 天有效，每次登录自动换新），认的是设备而不是 IP
+        —— 手机流量的 IPv6 隔一会儿就换，有了它就不用反复输验证码。撤销后那台设备下次登录要重新验证。
+      </p>
+      <p class="g-sec-tip">
+        本机：{{ myFingerprint }}
+        <span class="g-sec-dim">（指纹只用来辨认是哪台，不参与登录校验，浏览器升级后会变）</span>
+      </p>
+
+      <Table
+        v-if="devices.length"
+        :columns="deviceColumns"
+        :data-source="devices"
+        :pagination="false"
+        row-key="id"
+        size="small"
+        class="g-sec-table"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">
+            <span class="g-sec-device">{{ record.name || '未知设备' }}</span>
+            <Tag v-if="record.id === myDeviceId" color="green" class="g-sec-tag">本机</Tag>
+          </template>
+          <template v-else-if="column.key === 'fp'">
+            <Tooltip v-if="record.ua" :title="record.ua">
+              <span class="g-sec-device g-sec-dim">{{ record.fp || '—' }}</span>
+            </Tooltip>
+            <span v-else class="g-sec-device g-sec-dim">{{ record.fp || '—' }}</span>
+          </template>
+          <template v-else-if="column.key === 'lastAt'">
+            <span class="g-sec-device g-sec-dim">{{ timeAgo(record.lastAt) }}</span>
+          </template>
+          <template v-else-if="column.key === 'ip'">
+            <span class="g-sec-ip">{{ record.ip ? displayIp(record.ip) : '—' }}</span>
+          </template>
+          <template v-else-if="column.key === 'action'">
+            <Popconfirm title="确定撤销这台设备？" @confirm="revokeDevice(record.id)">
+              <Button type="link" danger size="small">撤销</Button>
+            </Popconfirm>
+          </template>
+        </template>
+      </Table>
+
+      <!-- 窄屏改为堆叠卡片 -->
+      <ul v-if="devices.length" class="g-sec-cards">
+        <li v-for="item in devices" :key="item.id" class="g-sec-card">
+          <div class="g-sec-card-main">
+            <span class="g-sec-ip">
+              {{ item.name || '未知设备' }}
+              <Tag v-if="item.id === myDeviceId" color="green" class="g-sec-tag">本机</Tag>
+            </span>
+            <span class="g-sec-device g-sec-dim">
+              {{ timeAgo(item.lastAt) }} · {{ item.ip ? displayIp(item.ip) : '未记录 IP' }}
+            </span>
+          </div>
+          <Popconfirm title="确定撤销这台设备？" @confirm="revokeDevice(item.id)">
+            <Button type="link" danger size="small">撤销</Button>
+          </Popconfirm>
+        </li>
+      </ul>
+
+      <Empty v-if="!devices.length" description="暂无可信设备" />
+    </Card>
+
     <Card :bordered="false" class="g-sec-ips">
       <template #title>可信 IP</template>
       <template #extra>
@@ -146,7 +272,7 @@ onMounted(load)
           <Button danger size="small" :disabled="!security.trustedIps.length || loading">全部清空</Button>
         </Popconfirm>
       </template>
-      <p class="g-sec-tip">IP 通过验证码认证后自动加入，撤销后该 IP 下次登录将重新要求验证码。</p>
+      <p class="g-sec-tip">IP 通过验证码认证后自动加入，撤销后该 IP 下次登录将重新要求验证码（设备凭证有效时优先按设备放行）。</p>
 
       <Table
         v-if="security.trustedIps.length"
@@ -157,7 +283,7 @@ onMounted(load)
         size="small"
         class="g-sec-table"
       >
-        <template #bodyCell="{ column, record }: { column: any; record: TrustedIp }">
+        <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'ip'">
             <span class="g-sec-ip">{{ displayIp(record.ip) }}</span>
           </template>
@@ -202,8 +328,17 @@ onMounted(load)
   margin-bottom: 16px;
 }
 
+.g-sec-devs {
+  margin-bottom: 16px;
+}
+
 .g-sec-ips {
   margin-bottom: 16px;
+}
+
+.g-sec-tag {
+  margin-left: 6px;
+  transform: scale(0.9);
 }
 
 .g-sec-form {

@@ -1,7 +1,6 @@
 import chalk from 'chalk';
 import {autowired, Result} from '#guoba.framework';
 import {ApiController} from '#guoba.platform'
-import { getClientIp } from '../../utils/clientIp.js'
 
 export class LoginController extends ApiController {
 
@@ -17,17 +16,15 @@ export class LoginController extends ApiController {
     this.post('/login', this.login)
     this.post('/logout', this.logout)
     this.post('/login/captcha/request', this.captchaRequest)
-    // 兼容旧版：仅在尚未配置账号时作为初始化入口
-    this.post('/login/quick', this.quickLogin)
+    // 尚未配置账号时的初始化入口（配置完成后自动停用）
     this.post('/login/code/request', this.codeLoginRequest)
     this.post('/login/code/check', this.codeLoginCheck)
-    // 聊天确认登录：旧版兼容入口
-    this.post('/login/confirm/request', this.confirmRequest)
-    this.post('/login/confirm/poll', this.confirmPoll)
     this.get('/login/security', this.security)
     this.put('/login/security/credentials', this.setCredentials)
     this.delete('/login/security/trusted-ips/:ip', this.revokeIp)
     this.delete('/login/security/trusted-ips', this.clearIps)
+    this.delete('/login/security/trusted-devices/:id', this.revokeDevice)
+    this.delete('/login/security/trusted-devices', this.clearDevices)
   }
 
   async status(req) {
@@ -64,28 +61,18 @@ export class LoginController extends ApiController {
     return Result.ok(this.loginSecurityService.clearIps(), '已清空可信IP')
   }
 
-  async confirmRequest(req) {
-    const ip = getClientIp(req)
-    const data = await this.loginService.createConfirmRequest(ip)
-    logger.mark(`[Guoba] 收到登录确认请求(${data.code})，来自 ${ip || '未知IP'}，发送“#锅巴确认登录”即可登录`)
-    return Result.ok(data)
+  async revokeDevice(req) {
+    return Result.ok(this.loginSecurityService.revokeDevice(req.params.id), '已撤销该设备')
   }
 
-  async confirmPoll(req) {
-    const {id} = req.body
-    return Result.ok(await this.loginService.pollConfirmRequest(id))
+  async clearDevices() {
+    return Result.ok(this.loginSecurityService.clearDevices(), '已清空可信设备')
   }
 
   async logout(req) {
     let {token} = req.body
     this.loginService.logout(token)
     return Result.ok('注销成功')
-  }
-
-  async quickLogin(req) {
-    if (this.loginSecurityService.configured) return Result.error('快捷登录已停用，请使用用户名和密码')
-    let {code} = req.body
-    return Result.ok(await this.loginService.getQuickLogin(code))
   }
 
   async codeLoginRequest() {

@@ -1,5 +1,6 @@
 import { del, get, post, put, type RequestOptions } from './request'
 import { API_BASE } from '@/utils/env'
+import type { DeviceCredential } from '@/utils/device'
 import type {
   ConfigTab,
   FsTreeNode,
@@ -18,7 +19,7 @@ import type {
 export const apiGetLoginStatus = () => get<LoginStatus>('/login/status', undefined, { showError: false })
 
 export const apiLogin = (body: { username: string; password: string; captcha?: string }) =>
-  post<{ token: string }>('/login', body, { showError: false })
+  post<{ token: string; device?: DeviceCredential }>('/login', body, { showError: false })
 
 export const apiRequestLoginCaptcha = () =>
   post<{ pushed?: number; expire?: number }>('/login/captcha/request', {}, { showError: false })
@@ -26,15 +27,17 @@ export const apiRequestLoginCaptcha = () =>
 export const apiGetLoginSecurity = () => get<LoginSecurity>('/login/security')
 
 export const apiSetLoginCredentials = (body: { username: string; password: string; currentPassword?: string }) =>
-  put<LoginSecurity>('/login/security/credentials', body, { showSuccess: true })
+  put<LoginSecurity & { device?: DeviceCredential }>('/login/security/credentials', body, { showSuccess: true })
 
 export const apiRevokeTrustedIp = (ip: string) => del<LoginSecurity>(`/login/security/trusted-ips/${encodeURIComponent(ip)}`)
 
 export const apiClearTrustedIps = () => del<LoginSecurity>('/login/security/trusted-ips')
 
-/** 主人快速登录：用 #锅巴登录 生成的 code 换 token */
-export const apiQuickLogin = (code: string) =>
-  post<{ token: string }>('/login/quick', { code }, { showError: false })
+/** 撤销一台可信设备，那台下次登录就得重新走验证码 */
+export const apiRevokeTrustedDevice = (id: string) =>
+  del<LoginSecurity>(`/login/security/trusted-devices/${encodeURIComponent(id)}`)
+
+export const apiClearTrustedDevices = () => del<LoginSecurity>('/login/security/trusted-devices')
 
 /**
  * 请求登录验证码：后端打印到控制台，同时私聊发给主人。
@@ -43,24 +46,12 @@ export const apiQuickLogin = (code: string) =>
 export const apiRequestLoginCode = () =>
   post<{ pushed?: number }>('/login/code/request', {})
 
-/** 用控制台验证码换 token */
+/** 用控制台验证码换 token（仅未设置账号密码时可用） */
 export const apiCheckLoginCode = (code: string) =>
   post<{ token: string }>('/login/code/check', { code }, { showError: false })
 
 export const apiLogout = (token: string) =>
   post('/logout', { token }, { showError: false })
-
-/** 聊天确认登录：发起一个待主人确认的登录请求 */
-export const apiCreateConfirmRequest = () =>
-  post<{ id: string; code: string; expire: number }>('/login/confirm/request', {})
-
-/** 轮询确认结果，approved 时带回 token */
-export const apiPollConfirmRequest = (id: string) =>
-  post<{ status: 'pending' | 'approved'; token: string }>(
-    '/login/confirm/poll',
-    { id },
-    { showError: false },
-  )
 
 export const apiGetLoginUser = () => get<LoginUser>('/user/getLoginUser')
 
@@ -630,11 +621,30 @@ export const apiSandboxMatch = (text: string, isGroup: boolean) =>
     { showError: false },
   )
 
+/**
+ * 引用的那条消息。
+ *
+ * 沙盒的聊天记录只存在浏览器里，服务端不留会话，所以想让插件的 `e.getReply()`
+ * 读到内容，就得把被引用气泡的段一起传回去。
+ */
+export interface SandboxQuote {
+  /** 被引用消息的 id，会作为 reply 段的 id 发给插件 */
+  id: string
+  userId: string
+  nickname: string
+  time: number
+  /** 纯文本摘要，作为被引用消息的 raw_message */
+  text: string
+  /** 只有 text / image 段会被后端采用 */
+  segments: SandboxSegment[]
+}
+
 /** 发一条沙盒消息，images 为 dataURL */
 export const apiSandboxSend = (body: {
   scene: SandboxScene
   text: string
   images?: string[]
+  reply?: SandboxQuote | null
 }) => post<SandboxResult>('/sandbox/send', body)
 
 /** 回复里图片/文件的取用地址，token 走 query 以便 <img> 直接引用 */
@@ -751,6 +761,29 @@ export const apiChatHistory = (params: {
 /** 实时增量，轮询调用，失败不弹提示 */
 export const apiChatTail = (params: { key: string; cursor: number; rev?: number }) =>
   get<ChatTail>('/chat/tail', params, { showError: false })
+
+/** 一条消息的原始数据，四档都是现成的 JSON 文本，拿不到的档位是空串 */
+export interface ChatRaw {
+  /** 取到了任何一档（前两档现取自 get_msg，失败时退回面板内存里那份） */
+  found: boolean
+  /** 适配器交给插件的消息段数组 */
+  array: string
+  /** 协议端上报的原文 */
+  raw: string
+  /** protobuf 元素，走 Packet-plugin + NapCat 的 send_packet 取 */
+  pbElem: string
+  /** protobuf 原文，同上 */
+  pbRaw: string
+  /** pb 两档取不到时的原因，原样显示 */
+  pbNote: string
+}
+
+export const apiChatRaw = (params: {
+  botId: string
+  type: ChatType
+  id: string
+  messageId: string
+}) => get<ChatRaw>('/chat/raw', params)
 
 /**
  * 发消息，**会真的发到 QQ 上**。
