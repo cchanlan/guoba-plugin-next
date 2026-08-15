@@ -26,9 +26,24 @@ export class GuobaLogin extends plugin {
     }, e)
   }
 
+  // autowired 是懒代理，锅巴服务端没启动成功时读它的任何属性都会抛 xxxService is not found
+  replyServerFailed (err) {
+    logger.error('[Guoba] 锅巴服务未就绪', err)
+    return this.reply(
+      '锅巴服务启动失败，可能是端口号占用，或者依赖没有安装完整，'
+      + '请查看控制台里锅巴启动相关的报错日志，或者发送“#锅巴帮助”获取相关帮助信息。'
+    )
+  }
+
   async resetLogin () {
     if (!this.e.isMaster) return false
-    if (!this.loginSecurityService.configured) {
+    let configured
+    try {
+      configured = this.loginSecurityService.configured
+    } catch (err) {
+      return this.replyServerFailed(err)
+    }
+    if (!configured) {
       return this.reply('当前尚未设置账号密码，无需重置。')
     }
     this.loginSecurityService.resetCredentials()
@@ -40,17 +55,14 @@ export class GuobaLogin extends plugin {
 
   async login () {
     if (!this.e.isMaster) return false
-    const configured = this.loginSecurityService.configured
 
-    let webAddress
+    let configured, webAddress
     try {
+      configured = this.loginSecurityService.configured
       // 无论是否已配置账号，都只发面板地址，不签发任何免密令牌
       webAddress = await this.loginService.getWebAddress()
-    } catch (e) {
-      console.error(e)
-      return this.reply(
-        '锅巴服务启动失败，可能是端口号占用，或者依赖没有安装完整，请发送“#锅巴帮助”获取相关帮助信息。'
-      )
+    } catch (err) {
+      return this.replyServerFailed(err)
     }
 
     const onlyCustomAddress = cfg.get('base.onlyCustomAddress')
