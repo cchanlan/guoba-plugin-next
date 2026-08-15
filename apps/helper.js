@@ -1,6 +1,26 @@
-import path from 'path'
-import {cfg, _paths} from "#guoba.platform";
-import {sendToMaster} from '#guoba.utils'
+import {cfg} from "#guoba.platform";
+import {sendToBotMaster} from '#guoba.utils'
+
+// 控制台之类的非真实账号，不作为触发引导的依据，也不给它发引导
+const FAKE_BOT_IDS = ['stdin']
+// 账号刚连上时好友列表等信息可能还没同步完，等一会儿再发
+const GUIDE_DELAY = 10000
+
+const GUIDE_MESSAGE = [
+  '欢迎使用锅巴插件~',
+  '',
+  '【#锅巴登录】获取管理面板地址',
+  '首次登录还没有账号密码，打开登录页点“获取登录令牌”，令牌会私聊发给主人（五分钟内有效）；',
+  '登录后请尽快在“账号管理 - 登录安全”里设置用户名和密码。',
+  '',
+  '【#锅巴帮助】查看帮助文档',
+  '【#锅巴版本】查看当前版本',
+  '【#锅巴更新】手动更新锅巴，有新版本时也会私聊提醒',
+  '【#锅巴重启】重新加载锅巴服务',
+  '【#锅巴重置密码】忘记密码时清空凭证，重新走初始化登录',
+  '',
+  '注：该消息只有第一次安装锅巴时才会发送',
+].join('\n')
 
 export class GuobaHelp extends plugin {
 
@@ -59,15 +79,50 @@ export class GuobaHelp extends plugin {
     }
   }
 
-  // 首次安装锅巴时的引导
+  /**
+   * 首次安装锅巴时的引导
+   *
+   * init() 在插件加载阶段执行，早于 Bot 上线，那会儿账号还没连上，直接发必然失败；
+   * 而 guide 一旦置 false 就再也不会发，所以要等真实账号连上、并确认发送成功后再关标记。
+   */
   async firstGuide() {
     if (!cfg.get('base.guide')) {
       return
     }
-    cfg.set('base.guide', false)
-    sendToMaster([
-      segment.image(path.join(_paths.pluginResources, 'images/help.jpg'))
-    ])
+    // 插件被 #锅巴重启 重载时账号早就连上了，不会再有 connect 事件
+    const online = this.getRealBotId()
+    if (online != null) {
+      return this.sendGuide(online)
+    }
+    const onConnect = e => {
+      const botId = e?.self_id
+      if (botId == null || FAKE_BOT_IDS.includes(String(botId))) {
+        return
+      }
+      Bot.off('connect', onConnect)
+      setTimeout(() => this.sendGuide(botId), GUIDE_DELAY)
+    }
+    Bot.on('connect', onConnect)
+  }
+
+  // 取一个已连上的真实账号
+  getRealBotId() {
+    const uins = Array.isArray(Bot.uin) ? Bot.uin : [Bot.uin]
+    return uins.find(i => i != null && !FAKE_BOT_IDS.includes(String(i)))
+  }
+
+  async sendGuide(botId) {
+    // 等待期间可能已经在面板里关掉了引导
+    if (!cfg.get('base.guide')) {
+      return
+    }
+    const success = await sendToBotMaster(botId, GUIDE_MESSAGE)
+    if (success > 0) {
+      cfg.set('base.guide', false)
+    } else {
+      // 没发出去就留着标记，下次启动重试，免得引导直接丢失
+      logger.warn('[Guoba] 首次安装引导发送失败，将在下次启动时重试')
+    }
   }
 
 }

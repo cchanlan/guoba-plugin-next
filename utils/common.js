@@ -85,6 +85,38 @@ export async function sendToMaster(msg, all = true, idx = 0) {
 }
 
 /**
+ * 给指定 Bot 账号的主人发送消息
+ *
+ * 与 sendToMaster 的区别：只发给这个账号名下的主人，不会顺带发给 stdin
+ * 这类非真实账号，适合“某个账号刚连上”时的场景。
+ *
+ * @param botId 目标 Bot 账号
+ * @param msg 消息内容
+ * @return {Promise<number>} 发送成功的主人数量
+ */
+export async function sendToBotMaster(botId, msg) {
+  const masters = await getMasterList()
+  // connect 事件里的 self_id 是数字，cfg.master 的键是字符串，统一转字符串再比
+  const target = String(botId)
+  // TRSS 能按账号精确匹配；其余情况 botId 为空，就用传入的账号发给所有主人
+  let sendTo = masters.filter(i => i.botId != null && String(i.botId) === target)
+  if (sendTo.length === 0) {
+    sendTo = masters.filter(i => i.botId == null).map(i => ({...i, botId}))
+  }
+  if (sendTo.length === 0) {
+    logger.warn(`[Guoba] Bot(${botId}) 名下没有主人账号，跳过发送`)
+    return 0
+  }
+  let success = 0
+  for (const master of sendTo) {
+    if (await replyPrivate(master, msg)) {
+      success++
+    }
+  }
+  return success
+}
+
+/**
  * 发送私聊消息
  * @param master {{botId: ?string, userId: string|number}} 目标主人
  * @param msg 消息
