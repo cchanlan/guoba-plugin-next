@@ -27,8 +27,17 @@ const MAX_IMAGE_SIZE = 10 * 1024 * 1024
  */
 const ORIGIN_KEY = Symbol.for('guoba.logService.originWrite')
 
-/** ANSI 转义序列，日志里的颜色剥掉，前端按级别重新上色 */
+/**
+ * ANSI 转义序列。
+ *
+ * 纯文本（筛选、复制、截图用）要把它们剥干净，同时另存一份带色的正文交给前端还原
+ * 终端里的配色 —— 云崽的日志颜色信息全在这些序列里，剥掉就再也拼不回来了。
+ */
 const ANSI_RE = /\x1B\[[0-9;?]*[A-Za-z]|\x1B][^\x07\x1B]*(?:\x07|\x1B\\)/g
+/** 同一个模式加捕获组，切片时用它把转义序列和可见字符分开 */
+const ANSI_SPLIT_RE = new RegExp(`(${ANSI_RE.source})`)
+/** 只有 SGR（`ESC[...m`）是颜色 / 字重，光标移动、清屏之类留着没用还会干扰前端 */
+const SGR_RE = /^\x1B\[[0-9;]*m$/
 /** log4js 的 pattern 是 `[%d{hh:mm:ss.SSS}][%4.4p]%m`，据此抠出时间和级别 */
 const HEAD_RE = /^\[(\d{2}:\d{2}:\d{2}(?:\.\d{3})?)]\[([A-Za-z]+)\s*]/
 /** `%4.4p` 把级别截成 4 个字符，这里还原回完整名字 */
@@ -49,6 +58,46 @@ function today() {
 }
 
 /**
+ * 按「可见字符」切一段，保留颜色。
+ *
+ * 跳过前 `skip` 个可见字符、最多保留 `max` 个，转义序列不计长度。被跳过那段里的
+ * SGR 要搬到结果开头 —— 时间戳和级别常常被整段染色（`ESC[33m[…][WARN]…ESC[39m`），
+ * 直接扔掉的话剩下的正文就丢了颜色。
+ */
+function sliceAnsi(raw, skip, max) {
+  /** 落在 skip 区间里的 SGR，攒着前置到正文 */
+  let prefix = ''
+  let out = ''
+  /** 走过的可见字符数，含被跳过的 */
+  let vis = 0
+  for (const part of raw.split(ANSI_SPLIT_RE)) {
+    if (!part) continue
+    if (part.charCodeAt(0) === 0x1b) {
+      if (!SGR_RE.test(part)) continue
+      if (vis < skip) prefix += part
+      else out += part
+      continue
+    }
+    let chunk = part
+    if (vis < skip) {
+      const drop = Math.min(skip - vis, chunk.length)
+      vis += drop
+      chunk = chunk.slice(drop)
+      if (!chunk) continue
+    }
+    const room = max - (vis - skip)
+    if (room <= 0) break
+    if (chunk.length > room) {
+      out += chunk.slice(0, room)
+      break
+    }
+    out += chunk
+    vis += chunk.length
+  }
+  return prefix + out
+}
+
+/**
  * 运行日志。
  *
  * 云崽的日志走 log4js 的 stdout appender（见 `lib/config/log.js`），info 及以下
@@ -61,7 +110,7 @@ function today() {
  */
 export default class LogService extends Service {
 
-  /** @type {{seq: number, time: string, level: string, text: string, cont: boolean}[]} */
+  /** @type {{seq: number, time: string, level: string, text: string, ansi: string, cont: boolean}[]} */
   #lines = []
   /** 下一行的序号，只增不减 */
   #seq = 1
@@ -146,27 +195,39 @@ export default class LogService extends Service {
 
   /** 解析一行并入缓冲 */
   #push(key, raw) {
-    let text = String(raw).replace(ANSI_RE, '').replace(/\r/g, '')
+    const line = String(raw).replace(/\r/g, '')
+    let text = line.replace(ANSI_RE, '')
     // 全是空白的行没有信息量，刷屏时还挺占地方
     if (!text.trim()) return
+    let cut = false
     if (text.length > MAX_LINE_LEN) {
       text = text.slice(0, MAX_LINE_LEN) + ' …(已截断)'
+      cut = true
     }
     const head = HEAD_RE.exec(text)
     let time = ''
     let level
     let cont = false
+    let skip = 0
     if (head) {
       time = head[1]
       level = LEVELS[head[2].toUpperCase().slice(0, 4)] || 'info'
-      text = text.slice(head[0].length)
+      skip = head[0].length
+      text = text.slice(skip)
       this.#lastLevel = level
     } else {
       // 没前缀，大概是堆栈或者裸 console.log，跟着上一行走
       cont = true
       level = key === 'stderr' ? 'error' : this.#lastLevel
     }
-    this.#lines.push({seq: this.#seq++, time, level, text, cont})
+    // 带色正文只在真有颜色时才留，纯文本的行没必要多传一份
+    let ansi = ''
+    if (line.includes('\x1B')) {
+      ansi = sliceAnsi(line, skip, MAX_LINE_LEN - skip)
+      if (cut) ansi += ' …(已截断)'
+      if (!ansi.includes('\x1B')) ansi = ''
+    }
+    this.#lines.push({seq: this.#seq++, time, level, text, ansi, cont})
     if (this.#lines.length > MAX_LINES * 1.2) {
       // 攒够一批再裁，省得每行都挪一次数组
       this.#lines.splice(0, this.#lines.length - MAX_LINES)

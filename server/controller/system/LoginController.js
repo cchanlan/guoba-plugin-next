@@ -72,7 +72,7 @@ export class LoginController extends ApiController {
   async logout(req) {
     let {token} = req.body
     this.loginService.logout(token)
-    return Result.ok('注销成功')
+    return Result.ok(null, '注销成功')
   }
 
   async codeLoginRequest() {

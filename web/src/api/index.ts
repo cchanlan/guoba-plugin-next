@@ -104,7 +104,7 @@ export const apiSetConfigData = (key: string, data: any) =>
   post('/config/data', { key, data }, { showSuccess: true })
 
 export const apiRemoveCardForm = (formKey: string, cardKey: string) =>
-  del('/config/card-Form', { formKey, cardKey })
+  del('/config/card-Form', { formKey, cardKey }, { showSuccess: true })
 
 /* ---------------- 插件 ---------------- */
 
@@ -315,6 +315,8 @@ export interface LogLine {
   time: string
   level: LogLevel
   text: string
+  /** 带 ANSI 颜色码的正文，只有原始日志真带颜色时才有；纯文本一律用 text */
+  ansi?: string
   /** 续行（堆栈之类），级别继承自上一行 */
   cont: boolean
 }

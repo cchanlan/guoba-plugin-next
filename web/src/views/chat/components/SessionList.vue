@@ -5,8 +5,9 @@
  * 名单是 Bot 的好友 / 群列表（后端 /chat/sessions 已叠上最后一条摘要与未读），
  * 但页面开着的时候会话状态还在变，所以显示时再用父层轮询来的活跃表覆盖一遍。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, inject, ref, watch } from 'vue'
 import GIcon from '@/components/GIcon.vue'
+import { groupAvatar, userAvatar } from '@/utils/avatar'
 import { apiChatSessions, type ChatActiveItem, type ChatSession, type ChatType } from '@/api'
 
 const props = defineProps<{
@@ -80,12 +81,22 @@ watch(
 
 watch([() => props.type, () => props.botId], () => load(true))
 
-/** 群头像取群号那张，好友头像取 QQ 那张，都是腾讯的公开地址 */
+/** 会话所属账号的适配器名，由 chat 页注入 */
+const botAdapter = inject<((uin?: string) => string) | null>('chatBotAdapter', null)
+
+/**
+ * 群头像取群号那张，好友头像取 QQ 那张，都是腾讯的公开地址。
+ * QQBot 给的是 openid，拼不出地址就返回空串，模板退回图标 / 首字。
+ */
 function avatar(item: ChatSession) {
+  const adapter = botAdapter?.(item.botId) ?? ''
   return item.type === 'group'
-    ? `https://p.qlogo.cn/gh/${item.id}/${item.id}/100`
-    : `https://q.qlogo.cn/g?b=qq&nk=${item.id}&s=100`
+    ? groupAvatar(item.id, { adapter })
+    : userAvatar(item.id, { appId: item.botId, adapter })
 }
+
+/** 头像 404（QQ 号不存在、图源被墙）也要退回兜底，按会话 key 记一下 */
+const failed = ref<Record<string, boolean>>({})
 
 function timeText(t: number) {
   if (!t) return ''
@@ -120,7 +131,17 @@ load(true)
       @click="emit('select', item)"
     >
       <span class="g-sess-avatar">
-        <img :src="avatar(item)" :alt="item.name" loading="lazy" />
+        <img
+          v-if="avatar(item) && !failed[item.key]"
+          :src="avatar(item)"
+          :alt="item.name"
+          loading="lazy"
+          @error="failed[item.key] = true"
+        />
+        <span v-else class="g-sess-avatar-alt">
+          <GIcon v-if="item.type === 'group'" icon="ant-design:team-outlined" :size="17" />
+          <template v-else>{{ (item.name || item.id).slice(0, 1) }}</template>
+        </span>
         <span v-if="item.unread" class="g-sess-dot">{{ item.unread > 99 ? '99+' : item.unread }}</span>
       </span>
       <span class="g-sess-main">
@@ -204,6 +225,20 @@ load(true)
   border-radius: 50%;
   background: var(--g-bg-soft);
   object-fit: cover;
+}
+
+/* 取不到头像时的占位：群给个图标，私聊给名字首字 */
+.g-sess-avatar-alt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--g-bg-soft);
+  border: 1px solid var(--g-border);
+  color: var(--g-text-sub);
+  font-size: 14px;
 }
 
 /* 未读红点压在头像右上角 */

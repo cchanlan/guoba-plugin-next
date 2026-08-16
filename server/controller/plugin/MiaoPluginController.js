@@ -66,7 +66,7 @@ export default class MiaoPluginController extends ApiController {
 
   async saveMiaoHelpCfg(req) {
     this.miaoService.saveHelpSetting(req.body, req.files)
-    return Result.ok()
+    return Result.ok(null, '保存成功~')
   }
 
   getHelpThemeBg(req, res) {
@@ -91,22 +91,22 @@ export default class MiaoPluginController extends ApiController {
 
   async saveHelpThemeConfig(req) {
     await this.miaoService.saveHelpThemeConfig(req.body)
-    return Result.ok('保存成功~')
+    return Result.ok(null, '保存成功~')
   }
 
   async deleteHelpTheme(req) {
     await this.miaoService.deleteHelpTheme(req.body)
-    return Result.ok('删除成功~')
+    return Result.ok(null, '删除成功~')
   }
 
   async addHelpTheme(req) {
     await this.miaoService.addHelpTheme(req.body, req.files)
-    return Result.ok('新增成功~')
+    return Result.ok(null, '新增成功~')
   }
 
   async putHelpTheme(req) {
     await this.miaoService.editHelpTheme(req.body, req.files)
-    return Result.ok('修改成功~')
+    return Result.ok(null, '修改成功~')
   }
 
   getHelpIcon(req, res) {
@@ -122,19 +122,19 @@ export default class MiaoPluginController extends ApiController {
   addBackup(req) {
     let {remark} = req.body
     this.miaoService.addBackup(remark)
-    return Result.ok()
+    return Result.ok(null, '备份成功~')
   }
 
   async restoreBackup(req) {
     let {id} = req.body
     await this.miaoService.restoreBackup(id)
-    return Result.ok()
+    return Result.ok(null, '已恢复该备份')
   }
 
   deleteBackup(req) {
     let {id} = req.body
     this.miaoService.deleteBackup(id)
-    return Result.ok()
+    return Result.ok(null, '删除成功~')
   }
 
 }

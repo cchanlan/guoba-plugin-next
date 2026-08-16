@@ -26,14 +26,14 @@ export class SystemController extends ApiController {
       await Promise.any([Guoba.reload(), sleep(500)])
       return Result.ok({}, '锅巴重启成功~')
     } else {
-      return Result.error({}, '锅巴服务异常，请手动重启！')
+      return Result.error('锅巴服务异常，请手动重启！')
     }
   }
 
   async putCreateDir(req) {
     let {path, name} = req.body
     let result = await this.systemService.createDir(path, name)
-    return Result.ok(result)
+    return Result.ok(result, '目录已创建')
   }
 
   async getFsTreeRoot() {

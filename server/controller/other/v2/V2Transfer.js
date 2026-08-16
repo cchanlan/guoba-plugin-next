@@ -65,7 +65,7 @@ export default class V2Transfer extends ApiController {
       return Result.error('请重启重置迁移状态')
     }
     await this.forkChildTransfer(req.body.config)
-    return Result.ok('迁移已开始')
+    return Result.ok(null, '迁移已开始')
   }
 
   childProcess = null

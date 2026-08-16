@@ -11,6 +11,7 @@ import { Button, Empty, Input, Select, Switch, Tag, Tooltip, message } from 'ant
 import GIcon from '@/components/GIcon.vue'
 import GBackTop from '@/components/GBackTop.vue'
 import { scrollPageToBottom } from '@/utils/scroll'
+import { ansiStyle, parseAnsi, type AnsiSpan } from '@/utils/ansi'
 import {
   apiClearLog,
   apiLogSendImage,
@@ -52,6 +53,30 @@ let inflight = false
 
 const empty = computed(() => !loading.value && !lines.value.length)
 
+/**
+ * ANSI 解析结果按 seq 缓存。
+ *
+ * 日志每秒都在追加，追加会让整屏重新渲染 —— 已经解析过的行不能每帧再解析一遍。
+ */
+const spanCache = new Map<number, AnsiSpan[]>()
+
+function spansOf(line: LogLine) {
+  let spans = spanCache.get(line.seq)
+  if (!spans) {
+    spans = parseAnsi(line.ansi ?? '')
+    spanCache.set(line.seq, spans)
+  }
+  return spans
+}
+
+/** 行被挤出显示范围后把缓存一起丢掉，别让 Map 无限长 */
+function pruneCache() {
+  const oldest = lines.value[0]?.seq ?? 0
+  for (const seq of spanCache.keys()) {
+    if (seq < oldest) spanCache.delete(seq)
+  }
+}
+
 async function pull(reset = false) {
   if (inflight) return
   inflight = true
@@ -65,6 +90,7 @@ async function pull(reset = false) {
     cursor = data.cursor
     if (reset) {
       lines.value = data.lines
+      spanCache.clear()
     } else if (data.lines.length) {
       if (data.missed) {
         // 缓冲被挤掉了一段，插一条提示，免得看的人以为日志是连续的
@@ -79,6 +105,7 @@ async function pull(reset = false) {
       lines.value.push(...data.lines)
       if (lines.value.length > MAX_KEEP) {
         lines.value.splice(0, lines.value.length - MAX_KEEP)
+        pruneCache()
       }
     }
     errMsg.value = ''
@@ -136,6 +163,7 @@ watch(keyword, () => {
 async function clear() {
   await apiClearLog()
   lines.value = []
+  spanCache.clear()
   await refresh()
   await loadStatus()
 }
@@ -341,7 +369,13 @@ onBeforeUnmount(() => {
         <div v-for="line in lines" :key="line.seq" class="g-log-line" :class="`is-${line.level}`">
           <span class="g-log-time">{{ line.time }}</span>
           <span class="g-log-level">{{ line.cont ? '' : line.level }}</span>
-          <span class="g-log-text">{{ line.text }}</span>
+          <!-- 原始日志带颜色时按 ANSI 还原终端配色，否则按级别染色 -->
+          <span class="g-log-text">
+            <template v-if="line.ansi">
+              <span v-for="(s, i) in spansOf(line)" :key="i" :style="ansiStyle(s)">{{ s.text }}</span>
+            </template>
+            <template v-else>{{ line.text }}</template>
+          </span>
         </div>
       </template>
     </div>
@@ -439,27 +473,36 @@ onBeforeUnmount(() => {
   background: var(--g-bg-card);
 }
 
+/* 时间是 hh:mm:ss.SSS 整 12 个字符，宽度按字符数给（等宽字体下正好），
+   固定 px 稍微差一点就会把毫秒的末位折到下一行。字体 fallback 更宽时列跟着撑开 */
 .g-log-time {
   flex: none;
-  width: 76px;
+  min-width: 12ch;
   color: var(--g-text-dim);
+  white-space: nowrap;
 }
 
 .g-log-level {
   flex: none;
-  width: 42px;
+  /* trace / debug / error / fatal 都是 5 个字符 */
+  min-width: 5ch;
   text-transform: uppercase;
+  white-space: nowrap;
   opacity: 0.85;
 }
 
 .g-log-text {
   flex: 1;
+  min-width: 0;
 }
 
-/* 级别配色，只染级别列与关键级别的正文，整屏不至于太花 */
-.is-trace .g-log-level,
-.is-debug .g-log-level {
+/* 级别配色跟 ANSI 色板同源（终端里 INFO 也是绿的），带 ANSI 的正文由行内样式覆盖 */
+.is-trace .g-log-level {
   color: var(--g-text-dim);
+}
+
+.is-debug .g-log-level {
+  color: var(--g-ansi-blue);
 }
 
 .is-trace .g-log-text,
@@ -468,23 +511,23 @@ onBeforeUnmount(() => {
 }
 
 .is-info .g-log-level {
-  color: var(--g-brand);
+  color: var(--g-ansi-green);
 }
 
 .is-mark .g-log-level {
-  color: #52c41a;
+  color: var(--g-ansi-magenta);
 }
 
 .is-warn .g-log-level,
 .is-warn .g-log-text {
-  color: #d48806;
+  color: var(--g-ansi-yellow);
 }
 
 .is-error .g-log-level,
 .is-error .g-log-text,
 .is-fatal .g-log-level,
 .is-fatal .g-log-text {
-  color: var(--g-danger);
+  color: var(--g-ansi-red);
 }
 
 .g-log-foot {

@@ -30,13 +30,14 @@ export default class ConfigController extends ApiController {
   async setData(req) {
     let {key, data} = req.body
     await this.configService.setConfigData(key, data)
-    return Result.ok('保存成功~')
+    // 文案要放第二个参数，Result.ok 的第一个参数是返回数据，前端只认 message
+    return Result.ok(null, '保存成功~')
   }
 
   async removeCardForm(req) {
     let {formKey, cardKey} = req.body
     await this.configService.removeCardForm(formKey, cardKey)
-    return Result.ok('删除成功~')
+    return Result.ok(null, '删除成功~')
   }
 
 }

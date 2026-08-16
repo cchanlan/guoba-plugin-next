@@ -204,6 +204,18 @@ provide('msgButtonClick', (btn: MsgBtn) => {
   inputRef.value?.setText(text)
 })
 
+/**
+ * 某个账号的适配器名。头像地址要按适配器分开拼（QQBot 用 appid + openid），
+ * 所以按 uin 查在线账号表；多账号混适配器时也能对上，查不到就退回当前选中的那个。
+ */
+function adapterOf(uin?: string) {
+  const hit = bots.value.find((b) => b.uin === String(uin ?? ''))
+  if (hit) return hit.adapter ?? ''
+  return bots.value.find((b) => b.uin === botId.value)?.adapter ?? ''
+}
+
+provide('chatBotAdapter', adapterOf)
+
 /* ---------------- 会话 ---------------- */
 
 async function openSession(session: ChatSession) {

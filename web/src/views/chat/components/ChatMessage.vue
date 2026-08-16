@@ -11,6 +11,7 @@ import { message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
 import MsgSegment from '@/components/msg/MsgSegment.vue'
 import { toDataUrl, writeRich, writeText } from '@/utils/clipboard'
+import { userAvatar } from '@/utils/avatar'
 import type { ChatMsg, MsgSeg } from '@/api'
 
 /** 一条消息最多复制几张图，多了粘贴目标也接不住 */
@@ -34,13 +35,20 @@ const emit = defineEmits<{
 
 const avatarFailed = ref(false)
 
+/** 消息所属账号的适配器名，由 chat 页注入 —— QQBot 的头像地址跟 QQ 号那套不一样 */
+const botAdapter = inject<((uin?: string) => string) | null>('chatBotAdapter', null)
+
 const name = computed(() => {
   const s = props.msg.sender
   return s.card || s.nickname || s.userId || '未知'
 })
 
-const avatar = computed(
-  () => `https://q.qlogo.cn/g?b=qq&nk=${encodeURIComponent(props.msg.sender.userId)}&s=100`,
+const avatar = computed(() =>
+  userAvatar(props.msg.sender.userId, {
+    // QQBot 的 appid 就是 botId
+    appId: props.msg.botId,
+    adapter: botAdapter?.(props.msg.botId) ?? '',
+  }),
 )
 
 /** 群身份标签：群主 / 管理 / 群头衔，有就显示在昵称后 */
@@ -173,13 +181,13 @@ async function copyMessage() {
       <div class="g-cmsg-row">
         <span class="g-cmsg-avatar">
           <img
-            v-if="!avatarFailed"
+            v-if="avatar && !avatarFailed"
             :src="avatar"
             :alt="name"
             loading="lazy"
             @error="avatarFailed = true"
           />
-          <!-- 头像取自腾讯，离线或被墙时退回首字 -->
+          <!-- 头像取自腾讯，离线、被墙、或 QQBot 下拿不到地址时退回首字 -->
           <span v-else class="g-cmsg-avatar-text">{{ name.slice(0, 1) }}</span>
         </span>
 

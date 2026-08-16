@@ -40,6 +40,24 @@ html[data-theme='dark'] {
   --g-text-dim: rgba(255, 255, 255, 0.4);
   --g-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
   color-scheme: dark;
+
+  /* 日志的 ANSI 配色，取常见终端（VS Code dark+）那套，深色底下跟终端里看到的一致 */
+  --g-ansi-black: #5c6370;
+  --g-ansi-red: #f14c4c;
+  --g-ansi-green: #23d18b;
+  --g-ansi-yellow: #e5c07b;
+  --g-ansi-blue: #4aa3f0;
+  --g-ansi-magenta: #d670d6;
+  --g-ansi-cyan: #29b8db;
+  --g-ansi-white: rgba(255, 255, 255, 0.85);
+  --g-ansi-bright-black: #7f8896;
+  --g-ansi-bright-red: #ff6b6b;
+  --g-ansi-bright-green: #3ae09a;
+  --g-ansi-bright-yellow: #f0d08a;
+  --g-ansi-bright-blue: #6cb6ff;
+  --g-ansi-bright-magenta: #e58ae5;
+  --g-ansi-bright-cyan: #4dd0e8;
+  --g-ansi-bright-white: #ffffff;
 }
 
 html[data-theme='light'] {
@@ -54,6 +72,24 @@ html[data-theme='light'] {
   --g-text-dim: rgba(0, 0, 0, 0.4);
   --g-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
   color-scheme: light;
+
+  /* 同一套色相压暗，终端原色在白底上（尤其黄、绿、青）根本看不清 */
+  --g-ansi-black: #3f3f46;
+  --g-ansi-red: #c0341d;
+  --g-ansi-green: #187f4a;
+  --g-ansi-yellow: #8a6100;
+  --g-ansi-blue: #175bbd;
+  --g-ansi-magenta: #a428a4;
+  --g-ansi-cyan: #0e7490;
+  --g-ansi-white: rgba(0, 0, 0, 0.7);
+  --g-ansi-bright-black: #6b7280;
+  --g-ansi-bright-red: #d8442a;
+  --g-ansi-bright-green: #1d9459;
+  --g-ansi-bright-yellow: #9c6f05;
+  --g-ansi-bright-blue: #1c6ad4;
+  --g-ansi-bright-magenta: #b435b4;
+  --g-ansi-bright-cyan: #1088a8;
+  --g-ansi-bright-white: rgba(0, 0, 0, 0.88);
 }
 
 /* ---------------- 滚动条 ---------------- */

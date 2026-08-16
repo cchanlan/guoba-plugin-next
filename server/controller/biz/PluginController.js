@@ -113,7 +113,11 @@ export default class PluginController extends ApiController {
       return Result.error(`不允许从 ${hostname} 安装插件，请在锅巴设置中添加白名单`)
     }
     let text = await this.pluginService.installPlugin(link, autoRestart, autoNpmInstall)
-    return Result.ok(text)
+    // 服务层返回 {status, message}，status 为 error 时要转成失败，否则前端会当成安装成功
+    if (text?.status === 'error') {
+      return Result.error(text.message || '插件安装失败')
+    }
+    return Result.ok(text, text?.message || '插件安装成功')
   }
 
   async uninstallPlugin(req) {
@@ -130,7 +134,10 @@ export default class PluginController extends ApiController {
       return Result.error('抱歉，由于miao-plugin是重要插件，不能卸载！')
     }
     let text = await this.pluginService.uninstallPluginBatch(nameArr)
-    return Result.ok(text)
+    if (text?.status === 'error') {
+      return Result.error(text.message || '插件卸载失败')
+    }
+    return Result.ok(text, text?.message || '插件卸载成功')
   }
 
   getSupport(pluginName) {
@@ -180,7 +187,7 @@ export default class PluginController extends ApiController {
     if (flag instanceof Result) {
       return flag
     }
-    return Result.ok(flag)
+    return Result.ok(flag, '保存成功~')
   }
 
   // 执行插件的 action
