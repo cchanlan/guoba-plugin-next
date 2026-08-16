@@ -1,5 +1,6 @@
 import {autowired, Pager, Result} from '#guoba.framework'
 import {ApiController} from '#guoba.platform'
+import {groupAvatarUrl, userAvatarUrl} from '../../service/both/model/avatar.js'
 
 /** QQ相关操作 */
 export class OicqController extends ApiController {
@@ -23,7 +24,7 @@ export class OicqController extends ApiController {
     this.delete('/friend', this.deleteFriend)
     this.delete('/group', this.quitGroup)
 
-    // avatarUrl: `https://q1.qlogo.cn/g?b=qq&s=${0}&nk=${qq}`,
+    // 列表里每项都带算好的 avatar（QQBot 的 openid 前端拼不出来）
     this.get('/friend/list', this.queryFriendList)
     this.get('/friend/count', () => Result.ok(this.oicqService.getFriendCount()))
 
@@ -128,8 +129,13 @@ export class OicqController extends ApiController {
       }
     }
 
-    let page = new Pager(list, pageNo, pageSize)
-    return Result.ok(page.toJSON())
+    let page = new Pager(list, pageNo, pageSize).toJSON()
+    // 头像地址在后端算：QQBot 是 openid，得配上账号的 appid 才拼得出来（见 model/avatar.js）
+    page.records = page.records.map((item) => ({
+      ...item,
+      avatar: groupAvatarUrl(item.group_id, item.avatar),
+    }))
+    return Result.ok(page)
   }
 
   async queryFriendList(req) {
@@ -168,8 +174,13 @@ export class OicqController extends ApiController {
       }
     }
 
-    let page = new Pager(list, pageNo, pageSize)
-    return Result.ok(page.toJSON())
+    let page = new Pager(list, pageNo, pageSize).toJSON()
+    // 同上：好友表里 QQBot 存的是 openid，头像得靠 appid 拼
+    page.records = page.records.map((item) => ({
+      ...item,
+      avatar: userAvatarUrl(item.user_id, item.bot_id, item.avatar),
+    }))
+    return Result.ok(page)
   }
 
 }

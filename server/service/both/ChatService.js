@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import {lookup as dnsLookup} from 'node:dns/promises'
 import {GuobaError, Service} from '#guoba.framework'
 import {AssetStore, flattenOneBot, normalizeMsg, toBase64File} from './model/msgSegment.js'
+import {groupAvatarUrl, userAvatarUrl} from './model/avatar.js'
 import {listBots} from './model/bots.js'
 
 /**
@@ -256,7 +257,7 @@ export default class ChatService extends Service {
       messageSeq: this.#seqOf(e),
       time: Number(e.time) || Math.floor(Date.now() / 1000),
       self,
-      sender: this.#sender(e.sender, e.user_id),
+      sender: this.#sender(e.sender, e.user_id, botId),
       segments,
     }, {unread: !self})
     // 事件里的原始数据比历史接口给的全（有上报原文），后来的以它为准
@@ -509,7 +510,7 @@ export default class ChatService extends Service {
     return seq != null && seq !== '' ? String(seq) : ''
   }
 
-  #sender(sender, userId) {
+  #sender(sender, userId, botId) {
     const uin = String(sender?.user_id ?? userId ?? '')
     const card = String(sender?.card ?? '')
     const nickname = String(sender?.nickname ?? '')
@@ -532,6 +533,8 @@ export default class ChatService extends Service {
       role: String(sender?.role ?? ''),
       /** 群头衔，页面上跟在昵称后面显示一个小标签 */
       title: String(sender?.title ?? ''),
+      /** QQBot 这类适配器事件里直接带头像地址，没带的按 id 算（见 model/avatar.js） */
+      avatar: userAvatarUrl(uin, botId, sender?.avatar),
     }
   }
 
@@ -691,6 +694,10 @@ export default class ChatService extends Service {
         type: isGroup ? 'group' : 'friend',
         id: sid,
         name,
+        // 头像地址按适配器算，QQBot 的 openid 前端拼不出来（见 model/avatar.js）
+        avatar: isGroup
+          ? groupAvatarUrl(sid, info?.avatar)
+          : userAvatarUrl(sid, owner, info?.avatar),
         lastTime: active?.lastTime ?? 0,
         lastText: active?.lastText ?? '',
         unread: active?.unread ?? 0,
@@ -752,7 +759,7 @@ export default class ChatService extends Service {
         messageSeq: this.#seqOf(item),
         time: Number(item.time) || 0,
         self: userId === String(botId ?? ''),
-        sender: this.#sender(item.sender, userId),
+        sender: this.#sender(item.sender, userId, botId),
         segments: await normalizeMsg(item.message ?? item.content, {download: false}),
       })
       // 历史接口没有上报原文，只能拿返回的条目本身；已经有实时那份的不覆盖

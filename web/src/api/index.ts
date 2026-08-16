@@ -508,6 +508,8 @@ export interface SandboxBot {
   uin: string
   nickname: string
   adapter: string
+  /** QQBot 的 appid，拼 openid 头像要用；其他适配器是空串 */
+  appId?: string
 }
 
 /** 回复里的一个按钮 */
@@ -679,6 +681,8 @@ export interface ChatSession extends ChatActiveItem {
   type: ChatType
   id: string
   name: string
+  /** 后端按适配器算好的头像地址，拼不出来时是空串 */
+  avatar?: string
 }
 
 export interface ChatMsg {
@@ -696,7 +700,15 @@ export interface ChatMsg {
   /** bot 自己发的 */
   self: boolean
   /** title 是群头衔，role 是群主 / 管理，二者都可能没有 */
-  sender: { userId: string; nickname: string; card: string; role: string; title: string }
+  sender: {
+    userId: string
+    nickname: string
+    card: string
+    role: string
+    title: string
+    /** 后端按适配器算好的头像地址，拼不出来时是空串 */
+    avatar?: string
+  }
   segments: MsgSeg[]
   /** 在面板里撤回过 */
   recalled?: boolean

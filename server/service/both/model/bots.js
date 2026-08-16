@@ -4,6 +4,8 @@
  * 沙盒与消息记录都要让用户选「用哪个号」，判据得一致，所以放在一处。
  */
 
+import {botAppId} from './avatar.js'
+
 /**
  * 可用账号列表。
  *
@@ -30,6 +32,11 @@ export function listBots() {
       uin,
       nickname: typeof bot?.nickname === 'string' ? bot.nickname : '',
       adapter: typeof bot?.adapter?.name === 'string' ? bot.adapter.name : '',
+      /**
+       * QQBot 的 appid，前端拼 openid 头像要用。
+       * 不等于 uin —— 有的 fork 用机器人 QQ 号当 self_id，appid 只在 Bot 实例上。
+       */
+      appId: botAppId(uin),
     }
   })
 }

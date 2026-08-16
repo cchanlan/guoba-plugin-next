@@ -81,18 +81,23 @@ watch(
 
 watch([() => props.type, () => props.botId], () => load(true))
 
-/** 会话所属账号的适配器名，由 chat 页注入 */
+/** 会话所属账号的适配器名与 QQBot appid，由 chat 页注入 */
 const botAdapter = inject<((uin?: string) => string) | null>('chatBotAdapter', null)
+const botAppId = inject<((uin?: string) => string) | null>('chatBotAppId', null)
 
 /**
- * 群头像取群号那张，好友头像取 QQ 那张，都是腾讯的公开地址。
- * QQBot 给的是 openid，拼不出地址就返回空串，模板退回图标 / 首字。
+ * 地址后端按适配器算好放在 avatar 上（QQBot 是 openid，得配 appid 才拼得出来），
+ * 没给就本地按 id 兜一下，兜不出来是空串，模板退回图标 / 首字。
  */
 function avatar(item: ChatSession) {
   const adapter = botAdapter?.(item.botId) ?? ''
   return item.type === 'group'
-    ? groupAvatar(item.id, { adapter })
-    : userAvatar(item.id, { appId: item.botId, adapter })
+    ? groupAvatar(item.id, { avatar: item.avatar, adapter })
+    : userAvatar(item.id, {
+        avatar: item.avatar,
+        appId: botAppId?.(item.botId) ?? '',
+        adapter,
+      })
 }
 
 /** 头像 404（QQ 号不存在、图源被墙）也要退回兜底，按会话 key 记一下 */

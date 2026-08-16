@@ -35,8 +35,9 @@ const emit = defineEmits<{
 
 const avatarFailed = ref(false)
 
-/** 消息所属账号的适配器名，由 chat 页注入 —— QQBot 的头像地址跟 QQ 号那套不一样 */
+/** 消息所属账号的适配器名与 QQBot appid，由 chat 页注入 —— QQBot 的头像地址跟 QQ 号那套不一样 */
 const botAdapter = inject<((uin?: string) => string) | null>('chatBotAdapter', null)
+const botAppId = inject<((uin?: string) => string) | null>('chatBotAppId', null)
 
 const name = computed(() => {
   const s = props.msg.sender
@@ -45,8 +46,9 @@ const name = computed(() => {
 
 const avatar = computed(() =>
   userAvatar(props.msg.sender.userId, {
-    // QQBot 的 appid 就是 botId
-    appId: props.msg.botId,
+    // 后端已按适配器算好，缺了才本地拼；appid 不等于 botId，得按 uin 查
+    avatar: props.msg.sender.avatar,
+    appId: botAppId?.(props.msg.botId) ?? '',
     adapter: botAdapter?.(props.msg.botId) ?? '',
   }),
 )

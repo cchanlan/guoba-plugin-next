@@ -21,6 +21,7 @@ import {
   message,
 } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
+import { groupAvatar, userAvatar } from '@/utils/avatar'
 import {
   apiCancelBroadcast,
   apiDeleteFriend,
@@ -34,13 +35,16 @@ import {
   type BroadcastTask,
 } from '@/api'
 
-/** QQ 头像地址，s=100 是够用的尺寸 */
-function userAvatar(qq: string | number) {
-  return `https://q1.qlogo.cn/g?b=qq&s=100&nk=${qq}`
+/**
+ * 行头像。地址后端按适配器算好放在 avatar 上（QQBot 是 openid，得配 appid 才拼得出来），
+ * 老数据没这字段就本地按 id 兜一下，兜不出来给空串，模板退回首字。
+ */
+function friendAvatar(record: any) {
+  return userAvatar(record?.user_id, { avatar: record?.avatar })
 }
 
-function groupAvatar(groupId: string | number) {
-  return `https://p.qlogo.cn/gh/${groupId}/${groupId}/100`
+function groupRowAvatar(record: any) {
+  return groupAvatar(record?.group_id, { avatar: record?.avatar })
 }
 
 interface PageState {
@@ -174,14 +178,14 @@ function openSend(type: 'friend' | 'group', record: any) {
           type,
           id: record.group_id,
           name: record.group_name || '未知群名',
-          avatar: groupAvatar(record.group_id),
+          avatar: groupRowAvatar(record),
           botId: record.bot_id,
         }
       : {
           type,
           id: record.user_id,
           name: record.remark || record.nickname || '未知昵称',
-          avatar: userAvatar(record.user_id),
+          avatar: friendAvatar(record),
           botId: record.bot_id,
         }
   sendMsgText.value = ''
@@ -424,7 +428,7 @@ function openDanger(type: 'friend' | 'group', record: any) {
           type,
           id: record.group_id,
           name: record.group_name || '未知群名',
-          avatar: groupAvatar(record.group_id),
+          avatar: groupRowAvatar(record),
           botId: record.bot_id,
           canDismiss: record.role === 'owner',
         }
@@ -432,7 +436,7 @@ function openDanger(type: 'friend' | 'group', record: any) {
           type,
           id: record.user_id,
           name: record.remark || record.nickname || '未知昵称',
-          avatar: userAvatar(record.user_id),
+          avatar: friendAvatar(record),
           botId: record.bot_id,
           canDismiss: false,
         }
@@ -551,7 +555,7 @@ onMounted(() => {
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'user'">
                 <div class="g-acc-cell">
-                  <Avatar :src="userAvatar(record.user_id)" :size="34">
+                  <Avatar :src="friendAvatar(record)" :size="34">
                     {{ String(record.nickname ?? '?').slice(0, 1) }}
                   </Avatar>
                   <span class="g-acc-name">{{ record.nickname || '未知昵称' }}</span>
@@ -638,7 +642,7 @@ onMounted(() => {
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'group'">
                 <div class="g-acc-cell">
-                  <Avatar :src="groupAvatar(record.group_id)" :size="34" shape="square">
+                  <Avatar :src="groupRowAvatar(record)" :size="34" shape="square">
                     {{ String(record.group_name ?? '?').slice(0, 1) }}
                   </Avatar>
                   <span class="g-acc-name">{{ record.group_name || '未知群名' }}</span>

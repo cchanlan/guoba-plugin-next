@@ -216,6 +216,16 @@ function adapterOf(uin?: string) {
 
 provide('chatBotAdapter', adapterOf)
 
+/**
+ * 某个账号的 QQBot appid。openid 头像得配上它才拼得出来，而 appid 不等于 uin ——
+ * 有的 fork 用机器人 QQ 号当 self_id，所以只能按 uin 查在线账号表。
+ */
+function appIdOf(uin?: string) {
+  return bots.value.find((b) => b.uin === String(uin ?? ''))?.appId ?? ''
+}
+
+provide('chatBotAppId', appIdOf)
+
 /* ---------------- 会话 ---------------- */
 
 async function openSession(session: ChatSession) {
