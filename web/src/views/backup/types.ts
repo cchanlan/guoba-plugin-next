@@ -58,6 +58,7 @@ export const KIND_TEXT: Record<string, string> = {
   modified: '已改动',
   mixed: '混合',
   plain: '整目录',
+  tracked: '仓库自带',
 }
 
 /** 来源标记 → 标签颜色 */
@@ -67,6 +68,7 @@ export const KIND_COLOR: Record<string, string> = {
   modified: 'orange',
   mixed: 'purple',
   plain: 'default',
+  tracked: 'default',
 }
 
 /** 任务阶段 → 中文 */

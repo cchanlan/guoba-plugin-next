@@ -198,8 +198,13 @@ onMounted(async () => {
         <code>data/guoba/backups/.restore-bak-&lt;时间戳&gt;/</code>，出问题能捞回来。
       </p>
       <p>
-        本地没装的插件按包里的清单 <code>git clone</code>（地址要在 Git 安装白名单内）；
-        装不上的，它的配置会暂存到 <code>.pending-restore/</code>，等插件装好后再还原一次即可。
+        本地没装的插件按包里的清单 <code>git clone</code>（地址要在 Git 安装白名单内）。
+        如果备份时是<b>整个插件</b>一起打包的，包里已经有完整文件了，clone 失败也会直接
+        按文件还原 —— Windows 上 clone GitHub 老是 SSL 报错时，这条路更稳。
+      </p>
+      <p>
+        既没装上、包里也只有配置数据的插件，它的文件会暂存到 <code>.pending-restore/</code>，
+        等插件装好后再还原一次即可，不会丢。
       </p>
     </div>
 

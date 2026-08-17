@@ -32,19 +32,24 @@ const keyword = ref('')
 const activeKeys = ref<string[]>(props.groups.length ? [props.groups[0].key] : ['root'])
 /** 树内的展开状态，目录 key 带组前缀所以所有组共用一个数组也不会串 */
 const expanded = ref<string[]>([])
+/** 仓库自带的内容（clone 就有的代码和素材）要不要显示。默认显示 —— 想整个插件带走就得能勾到 */
+const showTracked = ref(true)
 
 const picked = computed(() => new Set(props.modelValue))
 
 const allEntries = computed(() => props.groups.flatMap((g) => g.entries))
 
-/** 关键字过滤：组名或条目路径命中都算 */
+/** 关键字过滤 + 「仓库自带」开关。组名命中关键字时整组都留下 */
 const shownGroups = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
-  if (!kw) return props.groups
-  return props.groups
+  const base = showTracked.value
+    ? props.groups
+    : props.groups.map((g) => ({...g, entries: g.entries.filter((e) => e.kind !== 'tracked')}))
+  if (!kw) return base
+  return base
     .map((g) => {
       if (g.title.toLowerCase().includes(kw)) return g
-      return { ...g, entries: g.entries.filter((e) => e.rel.toLowerCase().includes(kw)) }
+      return {...g, entries: g.entries.filter((e) => e.rel.toLowerCase().includes(kw))}
     })
     .filter((g) => g.entries.length > 0)
 })
@@ -246,6 +251,22 @@ function groupIndeterminate(group: PickerGroup) {
   const n = groupStat(group).count
   return n > 0 && n < group.entries.length
 }
+
+/**
+ * 插件组当前是哪种备份方式。
+ *
+ * 这就是「.git 克隆 还是 直接带走整个插件」的区别，而且不用额外开关 —— 勾满了就是整个
+ * 插件都在包里（还原时不需要 clone，网络不行也能搬家），只勾一部分就是老路子：
+ * 记下仓库地址，还原时 clone 回来再把配置盖上去。
+ */
+function groupMode(group: PickerGroup) {
+  if (!group.key.startsWith('plugin:')) return null
+  const {count} = groupStat(group)
+  const all = group.entries.length
+  if (all && count === all) return {text: '整个插件带走', color: 'green'}
+  if (count > 0) return {text: '还原时 clone + 盖配置', color: 'blue'}
+  return {text: '不备份文件，还原时 clone', color: 'default'}
+}
 </script>
 
 <template>
@@ -270,6 +291,9 @@ function groupIndeterminate(group: PickerGroup) {
           {{ keyword.trim() ? '全选结果' : '全选' }}
         </a-button>
         <a-button size="small" :disabled="disabled" @click="clearAll">清空</a-button>
+        <a-checkbox v-model:checked="showTracked" class="g-bk-showall">
+          显示仓库自带内容
+        </a-checkbox>
       </div>
       <div class="g-bk-picker-sum">
         已选 <b>{{ stat.count }}</b> 项 ·
@@ -290,11 +314,6 @@ function groupIndeterminate(group: PickerGroup) {
       <a-collapse-panel v-for="v in views" :key="v.group.key">
         <template #header>
           <div class="g-bk-ghead" @click.stop>
-            <!--
-              一个条目都没有的插件（配置数据都不在插件目录里）勾选框没有意义，
-              摆一个勾不动的方框只会让人以为「这插件不能备份」—— 换成标签说明白：
-              它照样进包里的插件清单，还原时 clone 就能完全恢复。
-            -->
             <a-checkbox
               v-if="v.group.entries.length"
               :checked="groupChecked(v.group)"
@@ -302,10 +321,14 @@ function groupIndeterminate(group: PickerGroup) {
               :disabled="disabled"
               @change="toggleGroup(v.group, ($event.target as HTMLInputElement).checked)"
             />
-            <a-tag v-else color="green" class="g-bk-gonly" title="没有需要备份的文件，还原时 clone 就能完全恢复">
-              仅清单
+            <a-tag v-else color="green" class="g-bk-gonly" title="这个目录里没有可备份的内容">
+              空目录
             </a-tag>
             <span class="g-bk-gtitle">{{ v.group.title }}</span>
+            <!-- 勾满 = 整个插件都在包里，还原不用 clone；只勾一部分 = 老路子 -->
+            <a-tag v-if="groupMode(v.group)" :color="groupMode(v.group)!.color" class="g-bk-gmode">
+              {{ groupMode(v.group)!.text }}
+            </a-tag>
             <a-tag v-if="v.group.warn" color="orange">{{ v.group.warn }}</a-tag>
             <span v-if="v.group.subtitle" class="g-bk-gsub">{{ v.group.subtitle }}</span>
             <span v-if="v.group.entries.length" class="g-bk-gstat">
@@ -407,6 +430,16 @@ function groupIndeterminate(group: PickerGroup) {
 .g-bk-gonly {
   margin: 0;
   font-size: 11px;
+}
+
+.g-bk-gmode {
+  margin: 0;
+  font-size: 11px;
+}
+
+.g-bk-showall {
+  margin-left: 4px;
+  font-size: 12px;
 }
 
 .g-bk-gsub,

@@ -71,6 +71,13 @@ export default class BackupService extends Service {
     /** 扫描和打包都要跳过备份目录自己，否则备份会把上一次的包卷进来 */
     this.excludes = new Set([this.backupDir])
 
+    // 装上锅巴就把备份目录建出来：文件管理里能直接看见，也方便把别处拿来的包丢进去
+    try {
+      fs.mkdirSync(this.backupDir, {recursive: true})
+    } catch (err) {
+      logger.warn(`[Guoba] 创建备份目录失败：${err.message}`)
+    }
+
     /** 热重载后旧实例的 job 还挂在 node-schedule 上，applySchedule 第一步就会撤掉 */
     this.applySchedule().catch((err) => logger.error('[Guoba] 备份定时任务启动失败：', err))
   }
@@ -81,6 +88,8 @@ export default class BackupService extends Service {
   #logs = []
   #seq = 0
   #canceled = false
+  /** @type {Set<import('node:child_process').ChildProcess>} 正在跑的子进程，取消时要杀掉 */
+  #running = new Set()
 
   // ------------------------------------------------------------------ 扫描
 
@@ -321,12 +330,16 @@ export default class BackupService extends Service {
 
     this.#log(`共 ${plan.items.length} 个条目，开始收集文件`)
     const files = []
+    /** 条目之间可能有嵌套（`resources` 和 `resources/profile`），同一个文件只收一次 */
+    const seenNames = new Set()
     let totalBytes = 0
     for (const item of plan.items) {
       for (const rel of item.paths) {
         const abs = path.join(this.root, item.base, rel)
         const entryBase = item.base ? `${item.base}/${rel}` : rel
         for (const f of this.#walk(abs, entryBase)) {
+          if (seenNames.has(f.entryName)) continue
+          seenNames.add(f.entryName)
           files.push(f)
           totalBytes += f.size
         }
@@ -403,9 +416,22 @@ export default class BackupService extends Service {
     const items = []
     const seen = new Set()
 
+    /**
+     * 勾了 `resources` 又勾了 `resources/profile`：父目录已经把子目录整个收进去了，
+     * 子条目再打一遍就是重复文件、重复体积。条目全量列出后这种嵌套是常态，必须挡。
+     */
+    const coveredByParent = (target, rel) => {
+      const parts = rel.split('/')
+      for (let i = 1; i < parts.length; i++) {
+        if (wanted.has(`${target}|${parts.slice(0, i).join('/')}`)) return true
+      }
+      return false
+    }
+
     const take = (entry, target, base) => {
       if (!wanted.has(entry.key) || seen.has(entry.key)) return
       seen.add(entry.key)
+      if (coveredByParent(target, entry.rel)) return
       items.push({
         key: entry.key, target, base, rel: entry.rel, paths: entry.paths,
         size: entry.size, files: entry.files,
@@ -558,6 +584,19 @@ export default class BackupService extends Service {
     this.#task.phase = 'extracting'
     const prefixes = this.#restorePrefixes(manifest, keys)
     const {entries} = readEntries(abs)
+
+    // 装不上的插件，如果备份时是「整个插件」一起打包的（包里有 index.js / package.json），
+    // 那根本不需要 clone —— 直接解出来就是完整插件。Windows 上 clone GitHub 动不动
+    // SSL_ERROR，这条路是「网络不行也能搬家」的保底。
+    for (const name of [...unavailable]) {
+      if (!this.#packHasWholePlugin(entries, name)) continue
+      unavailable.delete(name)
+      const i = result.failed.findIndex((f) => f.name === name)
+      if (i !== -1) result.failed.splice(i, 1)
+      result.cloned.push(name)
+      this.#log(`${name}：备份包里是整个插件，直接按文件还原，不用 clone`)
+    }
+
     const targets = entries.filter((e) =>
       e.name !== MANIFEST_NAME && matchAnyPrefix(e.name, prefixes))
     this.#task.current = 0
@@ -615,6 +654,17 @@ export default class BackupService extends Service {
       const {doRestart} = await import('../../../utils/botActions.js')
       setTimeout(() => doRestart(), 1000)
     }
+  }
+
+  /**
+   * 包里是不是整个插件（而不是只有配置数据）。
+   *
+   * 判据就是插件的入口：`index.js` / `package.json` 是每个 Yunzai 插件都有、且一定被 git
+   * 跟踪的文件 —— 它们出现在包里，只可能是用户备份时把整个插件目录都勾上了。
+   */
+  #packHasWholePlugin(entries, name) {
+    const base = `${FILES_PREFIX}plugins/${name}/`
+    return entries.some((e) => e.name === `${base}index.js` || e.name === `${base}package.json`)
   }
 
   /**
@@ -748,10 +798,19 @@ export default class BackupService extends Service {
 
   /**
    * 起个子进程，输出实时进日志。
+   *
+   * 进程会登记到 {@link #running}，取消时能被 {@link #killRunning} 杀掉 —— 不然一个大仓库
+   * 的 clone 会把取消请求晾在那儿好几分钟。
+   *
    * @return {Promise<{code: number, tail: string}>}
    */
   #spawnLogged(cmd, args, opts = {}) {
     return new Promise((resolve) => {
+      // 已经取消了就别再起新进程，否则「取消」之后还会冒出下一个 clone
+      if (this.#canceled) {
+        resolve({code: -1, tail: '已取消'})
+        return
+      }
       let proc
       try {
         proc = spawn(cmd, args, {
@@ -762,6 +821,11 @@ export default class BackupService extends Service {
       } catch (err) {
         resolve({code: -1, tail: err.message})
         return
+      }
+      this.#running.add(proc)
+      const done = (res) => {
+        this.#running.delete(proc)
+        resolve(res)
       }
       const tail = []
       const feed = (buf) => {
@@ -775,8 +839,8 @@ export default class BackupService extends Service {
       }
       proc.stdout?.on('data', feed)
       proc.stderr?.on('data', feed)
-      proc.on('error', (err) => resolve({code: -1, tail: err.message}))
-      proc.on('close', (code) => resolve({code: code ?? -1, tail: tail.join('; ')}))
+      proc.on('error', (err) => done({code: -1, tail: err.message}))
+      proc.on('close', (code) => done({code: code ?? -1, tail: tail.join('; ')}))
     })
   }
 
@@ -844,12 +908,53 @@ export default class BackupService extends Service {
     }
   }
 
-  /** 取消：只置标志位，任务在下一个文件的间隙自己收尾 */
+  /**
+   * 取消。
+   *
+   * 只置标志位是不够的 —— 还原时最耗时的是 `git clone`，一个 745 M 的仓库能跑好几分钟，
+   * 期间标志位没人看，用户点十次取消也「没反应」（日志里刷十行「正在收尾」）。所以这里
+   * 直接把正在跑的子进程杀掉，让 `#spawnLogged` 立刻返回。
+   */
   cancel() {
     if (!this.#task || this.#task.done) return false
+    // 幂等：已经在取消了就别再刷日志，用户多点几下不该多出几行
+    if (this.#canceled) {
+      this.#killRunning()
+      return true
+    }
     this.#canceled = true
     this.#log('收到取消请求，正在收尾', 'warn')
+    this.#killRunning()
     return true
+  }
+
+  /** 杀掉当前所有子进程（git clone / pnpm install） */
+  #killRunning() {
+    for (const proc of this.#running) {
+      if (!proc.pid || proc.killed) continue
+      try {
+        if (process.platform === 'win32') {
+          // Windows 下 kill() 只结束 git.exe 本身，它拉起的 git-remote-https 会变孤儿，
+          // 继续往目录里写；taskkill /T 才能带走整棵进程树
+          spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], {windowsHide: true})
+        } else {
+          proc.kill('SIGTERM')
+          // 5 秒还没退就来硬的
+          const pid = proc.pid
+          setTimeout(() => {
+            try {
+              process.kill(pid, 'SIGKILL')
+            } catch {
+              // 已经退了
+            }
+          }, 5000)
+        }
+        this.#log('已终止正在执行的命令', 'warn')
+      } catch (err) {
+        logger.warn(`[Guoba] 终止备份子进程失败：${err.message}`)
+      }
+    }
+    this.#running.clear()
   }
 
   // ------------------------------------------------------------------ 设置 / 定时

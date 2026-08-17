@@ -23,6 +23,18 @@ const emit = defineEmits<{ cancel: [] }>()
 
 const auth = useAuthStore()
 const logBox = ref<HTMLElement | null>(null)
+/** 点过取消就把按钮锁住：clone 一个大仓库要几十秒才收得住，不锁的话用户会连点十几次 */
+const canceling = ref(false)
+
+function onCancel() {
+  canceling.value = true
+  emit('cancel')
+}
+
+// 换了一个任务就解锁
+watch(() => props.task?.id, () => {
+  canceling.value = false
+})
 
 const typeText = computed(() => (props.task?.type === 'restore' ? '还原' : '备份'))
 
@@ -80,7 +92,9 @@ watch(
       </span>
       <span class="g-bk-task-phase">{{ PHASE_TEXT[task.phase] ?? task.phase }}</span>
       <span v-if="task.file" class="g-bk-task-file">{{ task.file }}</span>
-      <a-button v-if="running" size="small" danger @click="emit('cancel')">取消</a-button>
+      <a-button v-if="running" size="small" danger :loading="canceling" @click="onCancel">
+        {{ canceling ? '正在停止' : '取消' }}
+      </a-button>
     </div>
 
     <a-progress

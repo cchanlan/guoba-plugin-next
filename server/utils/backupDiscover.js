@@ -5,17 +5,24 @@ import {execFile} from 'node:child_process'
 /**
  * 备份条目发现。
  *
- * 核心思路：**「用户资产」和「仓库自带」的边界，git 自己就知道**。Yunzai 根和几乎所有插件
- * 都是 git 仓库，用户的配置、数据、自备素材一律落在 `.gitignore` 里（实测 miao-plugin 的
- * `/config/cfg/`、xhh-TL 的 `config/config.yaml`、Yunzai 根的 `/config/*` `/resources`
- * 全都是），所以跑一遍 `git status --porcelain --ignored` 就能把它们全捞出来 —— 不需要
- * 针对每个插件写死目录名，没装过的插件也照样适配。
+ * 两层职责分开，别搞混：
  *
- * 四类状态都算用户资产：
+ * 1. **能勾什么 = 目录里有什么**。每个目标（Yunzai 根 / 每个插件）下的所有顶层目录和文件
+ *    都会列出来，仓库自带的也列（标 `tracked`）—— 想整个带走就整个勾，这是用户的决定，
+ *    不是 git 的。只有三类东西不列：`node_modules`（重装即得）、`logs`/`temp` 之类的
+ *    缓存垃圾、`.git`（1.9 G 且清单里已记了 remote+commit，还原时 clone 回来）。
+ * 2. **默认勾什么 = git 说了算**。用户的配置、数据、自备素材一律落在 `.gitignore` 里
+ *    （实测 miao-plugin 的 `/config/cfg/`、xhh-TL 的 `config/config.yaml`、Yunzai 根的
+ *    `/config/*` `/resources` 全都是），跑一遍 `git status --porcelain --ignored` 就能
+ *    把它们全捞出来 —— 不用针对每个插件写死目录名，没装过的插件照样适配。
+ *
+ * git 的四类状态都算用户资产：
  * - `!!` 被 ignore：主要来源
  * - `??` 未跟踪：用户手放的文件（Yunzai 根的 `data/` 就是这类，TRSS 的 .gitignore 没写它）
  * - `M`  跟踪文件被改过：**必须二次过滤**，见 {@link filterRealModified}
  * - `D`  跟踪文件被删：只记账，不占备份体积
+ *
+ * 剩下的（clone 就有、也没动过的）标 `tracked`，列出来但不默认勾。
  */
 
 /** 名字命中就整个跳过：缓存、依赖、编辑器杂物、core dump */
@@ -335,26 +342,73 @@ export async function discoverTarget(dir, {prefix, excludes = new Set(), splitPl
       depth: rel.split('/').length,
     }))
   }
+  addTracked({dir, prefix, entries, excludes, splitPlugins, pluginDirs})
   entries.sort((a, b) => a.rel.localeCompare(b.rel))
   return {isRepo: true, entries, pluginDirs, deleted}
 }
 
 /**
- * 非 git 的目录（手动解压安装的插件，实测本机 `douyin-sticker-plugin` 就是）：
- * 拿不到 status，只能整目录当一个条目，靠黑名单去掉 node_modules 之类。
+ * 把 git 没提到的顶层项也补进条目里（仓库自带的 `apps/`、`model/`、`resources/`…）。
+ *
+ * 为什么必须有这一步：光靠 git 的话，配置数据不在插件目录里的插件（quote-plugin 的数据在
+ * Yunzai 根 `data/quote`、ffmpeg-plugin 压根没配置）一个条目都没有，页面上勾都勾不上 ——
+ * 用户想连仓库代码一起带走都做不到。**能勾什么该由目录里有什么决定，不由 git 决定。**
+ *
+ * 顶层项和更细的 git 条目会同时存在（`resources` 整个 + `resources/profile/background`），
+ * 树上就是父子关系：勾父 = 整个都要。重复的部分由 BackupService 的父吸收逻辑消掉。
  */
-export function discoverPlain(dir, {prefix, rel = '', excludes = new Set()} = {}) {
-  const {size, files, truncated} = measure(dir, excludes)
-  return [{
-    key: `${prefix}|.`,
-    rel: rel || '.',
-    paths: ['.'],
-    kind: 'plain',
-    size,
-    files,
-    truncated,
-    recommended: !truncated && size <= RECOMMEND_MAX_SIZE && files <= RECOMMEND_MAX_FILES,
-  }]
+function addTracked({dir, prefix, entries, excludes, splitPlugins, pluginDirs}) {
+  const covered = new Set(entries.map((e) => e.rel))
+  const plugins = new Set(pluginDirs)
+  const add = (rel, depth) => {
+    if (covered.has(rel)) return
+    // 大目录会被 buildEntries 下钻成子条目，而 git 侧多半已经列过其中一部分了
+    // （`data` 下钻出的 `data/PlayerData` 就是），同 rel 收两遍会让树上冒出重复节点
+    for (const entry of buildEntries({
+      dir, prefix, rel, paths: [rel], kinds: new Set(['tracked']), excludes, depth,
+    })) {
+      if (covered.has(entry.rel)) continue
+      covered.add(entry.rel)
+      entries.push(entry)
+    }
+  }
+
+  for (const name of listChildren(dir, excludes)) {
+    // plugins/ 下的子目录各自是独立的插件（单独成组），这里只补 Yunzai 自带的那几个
+    // （adapter / system / other / example）—— 它们属于 Bot 本体
+    if (splitPlugins && name === 'plugins' && isDirectory(path.join(dir, 'plugins'))) {
+      for (const sub of listChildren(path.join(dir, 'plugins'), excludes)) {
+        if (plugins.has(sub)) continue
+        add(`plugins/${sub}`, 2)
+      }
+      continue
+    }
+    add(name, 1)
+  }
+}
+
+/**
+ * 非 git 的目录（手动解压安装的插件，实测本机 `douyin-sticker-plugin` 就是）。
+ *
+ * 拿不到 status，分不出「用户资产」和「仓库自带」—— 但这种插件本来也没有仓库能还原，
+ * 整个目录都得带走。列出顶层每一项让用户能挑，体积不大的默认勾上。
+ */
+export function discoverPlain(dir, {prefix, excludes = new Set()} = {}) {
+  const entries = []
+  for (const name of listChildren(dir, excludes)) {
+    entries.push(...buildEntries({
+      dir, prefix, rel: name, paths: [name], kinds: new Set(['plain']), excludes, depth: 1,
+    }))
+  }
+  // 空目录也给一条，否则这一组连个能勾的都没有
+  if (!entries.length) {
+    return [{
+      key: `${prefix}|.`, rel: '.', paths: ['.'], kind: 'plain',
+      size: 0, files: 0, truncated: false, recommended: false,
+    }]
+  }
+  entries.sort((a, b) => a.rel.localeCompare(b.rel))
+  return entries
 }
 
 /**
@@ -495,6 +549,8 @@ function isCacheName(rel) {
  */
 function recommend({rel, size, files, truncated, kind}) {
   if (kind === 'modified') return true
+  // 仓库自带、也没动过的：clone 就有，不默认勾 —— 但列出来了，想整个带走随时能勾
+  if (kind === 'tracked') return false
   if (isCacheName(rel)) return false
   if (truncated) return false
   return size <= RECOMMEND_MAX_SIZE && files <= RECOMMEND_MAX_FILES
