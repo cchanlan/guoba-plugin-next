@@ -6,7 +6,7 @@ import {_paths, cfg} from '#guoba.platform'
 import {ZipWriter, readEntries, readEntryBuffer, extractEntry, safeJoin} from '../../utils/zip.js'
 import {
   discoverTarget, discoverPlain, repoInfo, sanitizeRemote, shouldSkipName,
-  DISCOVER_LIMITS,
+  gitArgs, DISCOVER_LIMITS,
 } from '../../utils/backupDiscover.js'
 
 /** 备份包放这儿（Yunzai 根的相对路径） */
@@ -35,6 +35,27 @@ const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
 const PACK_NAME_RE = /^[\w.-]+\.zip$/i
 /** 插件目录名规则：不许有分隔符和相对路径 */
 const PLUGIN_NAME_RE = /^[\w.-]+$/
+
+/**
+ * GitHub 反代候选（还原前会连直连一起测速，挑最快的）。
+ *
+ * 都是前缀式用法：`https://<反代>/https://github.com/user/repo.git`。用户可以在
+ * `config/application.yaml` 的 `backup.githubProxies` 里改这份名单。
+ */
+const DEFAULT_PROXIES = [
+  'https://github.akams.cn/',
+  'https://ghfast.top/',
+  'https://gh-proxy.com/',
+  'https://ghproxy.net/',
+  'https://github.moeyy.xyz/',
+  'https://hub.gitmirror.com/',
+]
+/** 测速探针：拿 `git ls-remote` 探一个极小的仓库，走的就是真实 clone 的那条路 */
+const PROXY_PROBE_REPO = 'https://github.com/octocat/Hello-World.git'
+/** 单条线路的测速超时 */
+const PROXY_TIMEOUT = 6000
+/** 测速结果缓存多久，免得连续还原每次都花几秒重测 */
+const PROXY_TTL = 5 * 60 * 1000
 
 /**
  * 热重载键：锅巴热重载时本模块被重新 import，实例是新的，但上一代的定时任务还挂在
@@ -90,6 +111,8 @@ export default class BackupService extends Service {
   #canceled = false
   /** @type {Set<import('node:child_process').ChildProcess>} 正在跑的子进程，取消时要杀掉 */
   #running = new Set()
+  /** @type {{prefix: string, at: number}|null} 上次测速选中的反代，见 {@link PROXY_TTL} */
+  #proxyCache = null
 
   // ------------------------------------------------------------------ 扫描
 
@@ -546,33 +569,66 @@ export default class BackupService extends Service {
 
   async #runRestore({abs, keys, plugins, autoNpmInstall, autoRestart}) {
     const manifest = this.#readManifest(abs)
-    const result = {cloned: [], skipped: [], failed: [], pending: [], restored: 0, backupDir: ''}
+    const result = {cloned: [], copied: [], skipped: [], failed: [], pending: [], restored: 0, backupDir: ''}
 
-    // ---- 阶段一：把缺的插件拉回来 ----
+    // 先把「要解哪些文件」算出来 —— 阶段一要靠它判断哪些插件压根不用 clone
+    const prefixes = this.#restorePrefixes(manifest, keys)
+    const {entries} = readEntries(abs)
+    const targets = entries.filter((e) =>
+      e.name !== MANIFEST_NAME && matchAnyPrefix(e.name, prefixes))
+
+    // ---- 阶段一：把缺的插件弄回来 ----
     this.#task.phase = 'cloning'
     const byName = new Map((manifest.plugins ?? []).map((p) => [p.name, p]))
-    /** clone 失败 / 没装的插件，它们的文件改道去 .pending-restore，不能直接丢 */
+    /** 没弄回来的插件，它们的文件改道去 .pending-restore，不能直接丢 */
     const unavailable = new Set()
-    if (plugins.length) this.#log(`需要安装 ${plugins.length} 个插件`)
-    this.#task.total = plugins.length
+    const installedNow = this.#installedPlugins()
+
+    /**
+     * 备份时整个插件都勾上了（要解的文件里有 index.js / package.json）——
+     * 那它就是一份完整插件，直接解出来即可。**不该再去 clone**：白等几分钟，
+     * 网络不好还会失败，最后解出来的还是同一批文件。
+     */
+    const byFiles = []
+    const needClone = []
     for (const name of plugins) {
-      this.#throwIfCanceled()
-      const info = byName.get(name)
-      const res = await this.#clonePlugin(name, info)
-      if (res.ok) {
-        result.cloned.push(name)
-        if (autoNpmInstall) await this.#npmInstall(name)
-      } else if (res.skipped) {
-        result.skipped.push({name, reason: res.reason})
-      } else {
-        result.failed.push({name, reason: res.reason})
-        unavailable.add(name)
+      if (installedNow.has(name)) {
+        result.skipped.push({name, reason: '已安装，跳过'})
+        continue
       }
-      this.#task.current++
+      if (this.#targetsHaveWholePlugin(targets, name)) byFiles.push(name)
+      else needClone.push(name)
     }
 
-    // 勾了条目但插件既没装也没 clone 成功的，一样得改道
+    for (const name of byFiles) {
+      this.#log(`${name}：备份包里是整个插件，直接按文件还原，不 clone`)
+      result.copied.push(name)
+    }
+
+    if (needClone.length) {
+      this.#log(`需要 clone ${needClone.length} 个插件`)
+      // 只有真要 clone 时才值得花几秒测速
+      const proxy = await this.#pickProxy(needClone.map((n) => byName.get(n)?.remote))
+      this.#task.total = needClone.length
+      for (const name of needClone) {
+        this.#throwIfCanceled()
+        const res = await this.#clonePlugin(name, byName.get(name), proxy)
+        if (res.ok) {
+          result.cloned.push(name)
+          if (autoNpmInstall) await this.#npmInstall(name)
+        } else if (res.skipped) {
+          result.skipped.push({name, reason: res.reason})
+        } else {
+          result.failed.push({name, reason: res.reason})
+          unavailable.add(name)
+        }
+        this.#task.current++
+      }
+    }
+
+    // 勾了条目、插件却既没装也没弄回来的，一样得改道
     const installed = this.#installedPlugins()
+    for (const name of byFiles) installed.add(name)
     for (const key of keys) {
       const target = key.split('|')[0]
       if (!target.startsWith('plugin:')) continue
@@ -582,23 +638,6 @@ export default class BackupService extends Service {
 
     // ---- 阶段二：解文件 ----
     this.#task.phase = 'extracting'
-    const prefixes = this.#restorePrefixes(manifest, keys)
-    const {entries} = readEntries(abs)
-
-    // 装不上的插件，如果备份时是「整个插件」一起打包的（包里有 index.js / package.json），
-    // 那根本不需要 clone —— 直接解出来就是完整插件。Windows 上 clone GitHub 动不动
-    // SSL_ERROR，这条路是「网络不行也能搬家」的保底。
-    for (const name of [...unavailable]) {
-      if (!this.#packHasWholePlugin(entries, name)) continue
-      unavailable.delete(name)
-      const i = result.failed.findIndex((f) => f.name === name)
-      if (i !== -1) result.failed.splice(i, 1)
-      result.cloned.push(name)
-      this.#log(`${name}：备份包里是整个插件，直接按文件还原，不用 clone`)
-    }
-
-    const targets = entries.filter((e) =>
-      e.name !== MANIFEST_NAME && matchAnyPrefix(e.name, prefixes))
     this.#task.current = 0
     this.#task.total = targets.length
     this.#task.bytes = 0
@@ -657,14 +696,14 @@ export default class BackupService extends Service {
   }
 
   /**
-   * 包里是不是整个插件（而不是只有配置数据）。
+   * 要解的文件里是不是一份完整插件（而不是只有配置数据）。
    *
-   * 判据就是插件的入口：`index.js` / `package.json` 是每个 Yunzai 插件都有、且一定被 git
-   * 跟踪的文件 —— 它们出现在包里，只可能是用户备份时把整个插件目录都勾上了。
+   * 判据是插件的入口：`index.js` / `package.json` 是每个 Yunzai 插件都有、且一定被 git
+   * 跟踪的文件 —— 它们在待解列表里，只可能是备份时把整个插件目录都勾上了。
    */
-  #packHasWholePlugin(entries, name) {
+  #targetsHaveWholePlugin(targets, name) {
     const base = `${FILES_PREFIX}plugins/${name}/`
-    return entries.some((e) => e.name === `${base}index.js` || e.name === `${base}package.json`)
+    return targets.some((e) => e.name === `${base}index.js` || e.name === `${base}package.json`)
   }
 
   /**
@@ -707,11 +746,158 @@ export default class BackupService extends Service {
   }
 
   /**
+   * 挑一个最快的 GitHub 反代。
+   *
+   * 直连也参与比较（`''`），谁快用谁 —— 服务器在国外或者本来就通的话，套反代反而更慢。
+   * 探的是 git 自己的 refs 接口（`/info/refs?service=git-upload-pack`），能同时验证
+   * 「这个反代到底能不能用来 clone」，光 ping 首页是测不出来的。
+   *
+   * @param {string[]} remotes 待 clone 的仓库地址，用来判断有没有 GitHub 的
+   * @return {Promise<string>} 反代前缀，直连是空串
+   */
+  async #pickProxy(remotes = []) {
+    const urls = remotes.filter(Boolean)
+    // 一个 GitHub 的都没有就别测了（gitee / gitcode 用不上反代）
+    if (!urls.some((u) => /(^|\/\/)([^/]*\.)?github\.com\//i.test(u))) return ''
+    const now = Date.now()
+    if (this.#proxyCache && now - this.#proxyCache.at < PROXY_TTL) {
+      const {prefix} = this.#proxyCache
+      this.#log(`沿用刚测过的线路：${prefix || '直连'}`)
+      return prefix
+    }
+
+    const configured = cfg.get('base.githubReverseProxy') ? cfg.get('base.githubProxyUrl') : ''
+    const list = [
+      '',
+      ...(cfg.get('backup.githubProxies') || DEFAULT_PROXIES),
+      configured,
+    ]
+    // 去重 + 统一带上结尾斜杠
+    const candidates = [...new Set(list.map((p) => {
+      const s = String(p ?? '').trim()
+      if (!s) return ''
+      return s.endsWith('/') ? s : `${s}/`
+    }))]
+
+    this.#log(`测试 ${candidates.length} 条线路的速度`)
+    const probes = await Promise.all(candidates.map((prefix) => this.#probeProxy(prefix)))
+    probes.sort((a, b) => a.ms - b.ms)
+    for (const p of probes) {
+      this.#log(`  ${p.prefix || '直连'}：${p.ok ? `${p.ms} ms` : p.reason}`, p.ok ? 'cmd' : 'warn')
+    }
+    const best = probes.find((p) => p.ok)
+    if (!best) {
+      this.#log('所有线路都不通，仍然按直连试一次', 'warn')
+      return ''
+    }
+    this.#log(`选用线路：${best.prefix || '直连'}（${best.ms} ms）`)
+    this.#proxyCache = {prefix: best.prefix, at: now}
+    return best.prefix
+  }
+
+  /**
+   * 探一条线路。
+   *
+   * **必须用 git 自己去探**，不能用 fetch —— 实测这台机器上 fetch 直连 github 超时，而
+   * `git ls-remote` 1.1 秒就回来了（git 的代理/SSL 栈跟 Node 的不是一套），拿 fetch 测出来
+   * 的结论会把最快的线路判成不可用。用 `ls-remote` 还顺带筛掉「只代理 raw/release、不支持
+   * git 智能 HTTP」的反代（实测 github.akams.cn 和 hub.gitmirror.com 就是这种，几十毫秒
+   * 就回一句「仓库不存在」，用 fetch 探则是一个看起来很快的 404）。
+   */
+  #probeProxy(prefix) {
+    const url = `${prefix}${PROXY_PROBE_REPO}`
+    return new Promise((resolve) => {
+      const started = Date.now()
+      let proc
+      try {
+        proc = spawn('git', gitArgs('ls-remote', '--heads', url), {
+          cwd: this.root,
+          windowsHide: true,
+          env: {...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo'},
+        })
+      } catch (err) {
+        resolve({prefix, ok: false, ms: Infinity, reason: err.message})
+        return
+      }
+      this.#running.add(proc)
+      let out = ''
+      let err = ''
+      let settled = false
+      let timedOut = false
+      const done = (res) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        this.#running.delete(proc)
+        resolve(res)
+      }
+      proc.stdout?.on('data', (b) => {
+        if (out.length < 4096) out += b
+      })
+      proc.stderr?.on('data', (b) => {
+        if (err.length < 512) err += b
+      })
+      const timer = setTimeout(() => {
+        timedOut = true
+        this.#killTree(proc)
+      }, PROXY_TIMEOUT)
+      proc.on('error', (e) => done({prefix, ok: false, ms: Infinity, reason: e.message}))
+      // 超时后只能等 exit：git 被杀掉后它 fork 出来的 git-remote-https 还攥着 stdout，
+      // 管道不关 `close` 就不触发，实测有线路能因此卡两分钟
+      proc.on('exit', () => {
+        if (timedOut) done({prefix, ok: false, ms: Infinity, reason: `超时（>${PROXY_TIMEOUT / 1000}s）`})
+      })
+      proc.on('close', (code) => {
+        if (code === 0 && out.includes('refs/heads/')) {
+          done({prefix, ok: true, ms: Date.now() - started})
+          return
+        }
+        const reason = timedOut
+          ? `超时（>${PROXY_TIMEOUT / 1000}s）`
+          : (err.trim().split('\n').pop() || `退出码 ${code}`).slice(0, 90)
+        done({prefix, ok: false, ms: Infinity, reason})
+      })
+    })
+  }
+
+  /**
+   * 结束一个子进程连带它拉起来的那些。
+   *
+   * `git` 只是个外壳，真正干网络活的是它 fork 出来的 `git-remote-https`。直接 SIGKILL
+   * 外壳会把里面那个变成孤儿：继续占着网络，还攥着 stdout 让 `close` 事件发不出来。
+   * 所以先 SIGTERM（git 会把信号传给子进程并自己清理），赖着不走的再 SIGKILL。
+   */
+  #killTree(proc) {
+    if (!proc?.pid || proc.killed) return
+    try {
+      if (process.platform === 'win32') {
+        // Windows 没有信号，taskkill /T 才能带走整棵进程树
+        spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], {windowsHide: true})
+        return
+      }
+      proc.kill('SIGTERM')
+      const {pid} = proc
+      setTimeout(() => {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {
+          // 已经退了
+        }
+      }, 2000)
+    } catch (err) {
+      logger.warn(`[Guoba] 终止子进程失败：${err.message}`)
+    }
+  }
+
+  /**
    * clone 一个插件。
    *
+   * @param {string} name
+   * @param {object} info 包里的插件清单
+   * @param {string} [proxy] {@link #pickProxy} 选出来的反代前缀
    * @return {Promise<{ok: boolean, skipped?: boolean, reason?: string}>}
    */
-  async #clonePlugin(name, info) {
+  async #clonePlugin(name, info, proxy = '') {
     if (!PLUGIN_NAME_RE.test(name)) return {ok: false, reason: '插件名不合法'}
     // 前端只会传包里列出的插件名，传别的说明是手拼的请求 —— 没有清单就不知道该装什么，
     // 更不能凭一个名字就在 plugins/ 下建目录
@@ -734,7 +920,7 @@ export default class BackupService extends Service {
       this.#log(`${name}：${check.reason}`, 'warn')
       return {ok: false, reason: check.reason}
     }
-    const url = this.#proxyUrl(info.remote)
+    const url = this.#proxyUrl(info.remote, proxy)
     const args = ['clone', '--depth', '1', '--single-branch']
     if (info.branch && /^[\w./-]+$/.test(info.branch)) args.push('-b', info.branch)
     args.push(url, dir)
@@ -778,13 +964,15 @@ export default class BackupService extends Service {
     return {ok: true}
   }
 
-  /** 按本机配置拼 GitHub 反代，跟 GitTools._getProxyUrl 同一套规则 */
-  #proxyUrl(repoUrl) {
-    if (!cfg.get('base.githubReverseProxy')) return repoUrl
-    let proxy = cfg.get('base.githubProxyUrl')
-    if (!proxy) return repoUrl
-    if (!proxy.endsWith('/')) proxy += '/'
-    return /github\.com/.test(repoUrl) ? `${proxy}${repoUrl}` : repoUrl
+  /**
+   * 套上测速选出来的反代。只对 GitHub 生效 —— gitee / gitcode 本来就在国内。
+   *
+   * @param {string} repoUrl 原始地址（manifest 里存的一定是脱敏后的原始地址）
+   * @param {string} [proxy] 反代前缀，空串表示直连
+   */
+  #proxyUrl(repoUrl, proxy = '') {
+    if (!proxy || !/github\.com/.test(repoUrl)) return repoUrl
+    return `${proxy}${repoUrl}`
   }
 
   /** 给新装的插件装依赖。装不上只警告 —— 大多数插件没有自己的依赖 */
@@ -823,7 +1011,10 @@ export default class BackupService extends Service {
         return
       }
       this.#running.add(proc)
+      let settled = false
       const done = (res) => {
+        if (settled) return
+        settled = true
         this.#running.delete(proc)
         resolve(res)
       }
@@ -840,6 +1031,10 @@ export default class BackupService extends Service {
       proc.stdout?.on('data', feed)
       proc.stderr?.on('data', feed)
       proc.on('error', (err) => done({code: -1, tail: err.message}))
+      // 被取消杀掉时同样只能靠 exit：孤儿的 git-remote-https 会让 close 迟迟不来
+      proc.on('exit', (code) => {
+        if (this.#canceled) done({code: code ?? -1, tail: '已取消'})
+      })
       proc.on('close', (code) => done({code: code ?? -1, tail: tail.join('; ')}))
     })
   }
@@ -928,31 +1123,12 @@ export default class BackupService extends Service {
     return true
   }
 
-  /** 杀掉当前所有子进程（git clone / pnpm install） */
+  /** 杀掉当前所有子进程（git clone / pnpm install / 测速用的 ls-remote） */
   #killRunning() {
     for (const proc of this.#running) {
       if (!proc.pid || proc.killed) continue
-      try {
-        if (process.platform === 'win32') {
-          // Windows 下 kill() 只结束 git.exe 本身，它拉起的 git-remote-https 会变孤儿，
-          // 继续往目录里写；taskkill /T 才能带走整棵进程树
-          spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], {windowsHide: true})
-        } else {
-          proc.kill('SIGTERM')
-          // 5 秒还没退就来硬的
-          const pid = proc.pid
-          setTimeout(() => {
-            try {
-              process.kill(pid, 'SIGKILL')
-            } catch {
-              // 已经退了
-            }
-          }, 5000)
-        }
-        this.#log('已终止正在执行的命令', 'warn')
-      } catch (err) {
-        logger.warn(`[Guoba] 终止备份子进程失败：${err.message}`)
-      }
+      this.#killTree(proc)
+      this.#log('已终止正在执行的命令', 'warn')
     }
     this.#running.clear()
   }

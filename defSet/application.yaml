@@ -62,3 +62,13 @@ backup:
   keep: 5
   # 定时备份要备份哪些条目（条目 key 列表，留空则备份页面上默认勾选的那批）
   keys: []
+  # 还原时 clone 插件用的 GitHub 反代候选。
+  # 开始 clone 之前会把这些线路连「直连」一起测一遍速（探 git 的 refs 接口，6 秒超时），
+  # 挑最快的那条用，结果缓存 5 分钟。留空则只用直连。
+  githubProxies:
+    - https://github.akams.cn/
+    - https://ghfast.top/
+    - https://gh-proxy.com/
+    - https://ghproxy.net/
+    - https://github.moeyy.xyz/
+    - https://hub.gitmirror.com/

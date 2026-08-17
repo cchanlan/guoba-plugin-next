@@ -1092,7 +1092,10 @@ export interface BackupTask {
   result:
     | { file: string; size: number; files: number }
     | {
+        /** clone 装上的 */
         cloned: string[]
+        /** 包里就是整个插件，直接按文件还原、没走 clone 的 */
+        copied: string[]
         skipped: Array<{ name: string; reason: string }>
         failed: Array<{ name: string; reason: string }>
         pending: string[]

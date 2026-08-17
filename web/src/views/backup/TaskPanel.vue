@@ -51,6 +51,7 @@ const restoreResult = computed(() => {
   if (!r || props.task?.type !== 'restore') return null
   return r as {
     cloned: string[]
+    copied: string[]
     skipped: Array<{ name: string; reason: string }>
     failed: Array<{ name: string; reason: string }>
     pending: string[]
@@ -128,8 +129,11 @@ watch(
     <a-alert v-else-if="restoreResult" :type="statusType" show-icon class="g-bk-task-alert">
       <template #message>还原完成：写入 {{ restoreResult.restored }} 个文件</template>
       <template #description>
+        <div v-if="restoreResult.copied?.length">
+          按文件直接还原（包里是整个插件，没走 clone）：{{ restoreResult.copied.join('、') }}
+        </div>
         <div v-if="restoreResult.cloned.length">
-          新装插件：{{ restoreResult.cloned.join('、') }}
+          clone 装上的：{{ restoreResult.cloned.join('、') }}
         </div>
         <div v-if="restoreResult.skipped.length">
           已存在跳过：{{ restoreResult.skipped.map((s) => s.name).join('、') }}
