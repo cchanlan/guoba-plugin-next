@@ -12,6 +12,9 @@ const CPU_SAMPLE_INTERVAL = 200
  */
 const IGNORE_FS = /^(udev|tmpfs|devtmpfs|overlay|squashfs|shm|none)$/i
 
+/** 磁盘取不到时告警的最小间隔：首页每 5 秒来一次，不节流就是每 5 秒刷一行 */
+const DISK_WARN_INTERVAL = 10 * 60 * 1000
+
 /**
  * 系统状态与消息统计。
  *
@@ -23,6 +26,9 @@ export class StatusService extends Service {
   constructor(app) {
     super(app)
   }
+
+  /** 上次为磁盘失败打日志的时刻，见 {@link DISK_WARN_INTERVAL} */
+  #diskWarnAt = 0
 
   /** 取一次各 CPU 核心的累计时间片 */
   #cpuSnapshot() {
@@ -60,7 +66,12 @@ export class StatusService extends Service {
     try {
       drives = await diskInfo.getDrives()
     } catch (e) {
-      logger.warn('[Guoba] 获取磁盘信息失败：', e.message || e)
+      // 取不到就取不到，首页少一块磁盘卡而已 —— 但别每 5 秒刷一行 warn 把日志淹了
+      const now = Date.now()
+      if (now - this.#diskWarnAt > DISK_WARN_INTERVAL) {
+        this.#diskWarnAt = now
+        logger.warn('[Guoba] 获取磁盘信息失败：', e.message || e)
+      }
       return null
     }
     if (!Array.isArray(drives) || drives.length === 0) {
