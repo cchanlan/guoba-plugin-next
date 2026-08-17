@@ -103,6 +103,13 @@ async function loadPacks() {
   }
 }
 
+/** 本地没装、地址也过得了白名单的 —— 只有这些勾了才有意义 */
+function installableNames(list = manifest.value?.plugins ?? []) {
+  return list
+    .filter((p) => !p.installed && p.allowed !== false && (p.remote || p.noGit))
+    .map((p) => p.name)
+}
+
 async function loadInfo() {
   if (!file.value) {
     info.value = null
@@ -114,10 +121,7 @@ async function loadInfo() {
     info.value = data
     // 默认全选条目：都选这个包了，多半是想整包还原
     picked.value = (data.manifest.entries ?? []).map((e) => e.key)
-    // 插件只勾「本地没装、地址又过得了白名单」的那些
-    pickedPlugins.value = (data.manifest.plugins ?? [])
-      .filter((p) => !p.installed && p.allowed !== false && (p.remote || p.noGit))
-      .map((p) => p.name)
+    pickedPlugins.value = installableNames(data.manifest.plugins ?? [])
   } catch {
     info.value = null
   } finally {
@@ -253,6 +257,18 @@ onMounted(async () => {
           <span class="g-bk-h4-sub">
             共 {{ manifest.plugins?.length ?? 0 }} 个，其中 {{ missingPlugins.length }} 个本地没装
           </span>
+          <span class="g-bk-h4-acts">
+            <a-button
+              size="small"
+              :disabled="running"
+              title="勾上所有本地没装、地址又在白名单里的插件"
+              @click="pickedPlugins = installableNames()"
+            >
+              全选可装
+            </a-button>
+            <a-button size="small" :disabled="running" @click="pickedPlugins = []">清空</a-button>
+            <span class="g-bk-h4-sub">已选 {{ pickedPlugins.length }} 个</span>
+          </span>
         </h4>
         <div v-if="!manifest.plugins?.length" class="g-bk-empty">这个包里没有插件清单</div>
         <div v-else class="g-bk-plugins">
@@ -360,6 +376,13 @@ onMounted(async () => {
   color: var(--g-text-dim);
 }
 
+.g-bk-h4-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
 .g-bk-plugins {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -415,6 +438,16 @@ onMounted(async () => {
 
 @media (max-width: 768px) {
   .g-bk-select {
+    width: 100%;
+  }
+
+  /* 标题和按钮挤一行放不下，按钮整行换到下面 */
+  .g-bk-h4 {
+    flex-wrap: wrap;
+  }
+
+  .g-bk-h4-acts {
+    margin-left: 0;
     width: 100%;
   }
 
