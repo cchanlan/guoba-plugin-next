@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import {spawn} from 'node:child_process'
+import YAML from 'yaml'
 import {GuobaError, Service} from '#guoba.framework'
 import {_paths, cfg} from '#guoba.platform'
 import {ZipWriter, readEntries, readEntryBuffer, extractEntry, safeJoin} from '../../utils/zip.js'
@@ -58,6 +59,42 @@ const PROXY_TIMEOUT = 6000
 const PROXY_TTL = 5 * 60 * 1000
 
 /**
+ * **还原时**这些字段保持本机原样，其它一切照常覆盖。
+ *
+ * 注意只管还原，不管备份 —— 包里内容是完整的（Redis 配置、各账号 ck、黑白名单全都在），
+ * 换台机器照样能整包搬走。只有这么几项「一换就坏」的例外：
+ *
+ * - `masterQQ` / `master`：主人绑定。新机器的 bot 号跟备份来源不同的话，盖过去就不认主人了
+ * - `chromium_path` / `puppeteer_ws`：Windows 的 `C:\...` 盖到 Linux 上，渲染直接崩
+ * - `server.yaml` 的 `url`：对外访问地址，IP 变了图片链接就全失效
+ * - `pm2.yaml` 的 `apps`：通篇是这台机器的路径和进程名
+ *
+ * 键是相对 Yunzai 根的路径，值是 yaml 字段路径。清单里多余的字段名匹配不上也无害，
+ * 所以不同 Yunzai 分支都兼容。锅巴自己那份在构造时按实际目录名补进去。
+ */
+const KEEP_LOCAL_BASE = [
+  ['config/config/other.yaml', ['masterQQ', 'master']],
+  ['config/config/bot.yaml', ['chromium_path', 'puppeteer_ws']],
+  ['config/config/server.yaml', ['url']],
+  ['config/pm2.yaml', ['apps']],
+]
+
+/**
+ * 锅巴自己的配置里要留在本机的。
+ *
+ * `jwt.secret` 一换，浏览器手上的 token 立刻失效 —— 还原到一半页面就跳登录页了（用户实测
+ * 踩到）；`auth.*` 一换，账号密码变成备份来源那台机器的。而能点到「还原」的人必然已经
+ * 登录过、也就必然设过账号，所以锅巴的账号体系压根不该跟着备份走。
+ */
+const GUOBA_KEEP_FIELDS = [
+  'jwt.secret',
+  'auth.username',
+  'auth.passwordHash',
+  'auth.trustedIps',
+  'auth.trustedDevices',
+]
+
+/**
  * 热重载键：锅巴热重载时本模块被重新 import，实例是新的，但上一代的定时任务还挂在
  * node-schedule 里。把 job 挂到 process 上，新实例构造时看到旧的先取消。同 TermService。
  */
@@ -91,6 +128,12 @@ export default class BackupService extends Service {
     this.backupDir = path.join(this.root, BACKUP_DIR)
     /** 扫描和打包都要跳过备份目录自己，否则备份会把上一次的包卷进来 */
     this.excludes = new Set([this.backupDir])
+
+    /** @type {Map<string, string[]>} 相对路径 → 还原时保持本机原样的字段 */
+    this.keepLocal = new Map([
+      ...KEEP_LOCAL_BASE,
+      [this.#guobaCfgRel(), GUOBA_KEEP_FIELDS],
+    ])
 
     // 装上锅巴就把备份目录建出来：文件管理里能直接看见，也方便把别处拿来的包丢进去
     try {
@@ -664,6 +707,8 @@ export default class BackupService extends Service {
         } else {
           if (!redirect) this.#backupExisting(dest, rel, bakDir)
           await extractEntry(abs, entry, dest)
+          // 主人绑定、chromium 路径、锅巴登录凭证这些换了机器就会坏，保持本机原样
+          if (!redirect && this.keepLocal.has(rel)) this.#keepLocalFields(dest, bakDir, rel)
           result.restored++
         }
       } catch (err) {
@@ -727,9 +772,52 @@ export default class BackupService extends Service {
     return out
   }
 
+  /** 锅巴自己的用户配置在包里 / 磁盘上的相对路径 */
+  #guobaCfgRel() {
+    return `plugins/${path.basename(_paths.pluginRoot)}/config/application.yaml`
+  }
+
+  /**
+   * 还原完这个 yaml 之后，把「换了机器就会坏」的那几项填回本机的值。
+   *
+   * 备份包里这些字段是完整的（备份不做任何删减），只是还原时不拿它们盖本机的 ——
+   * 盖了的话：bot 不认主人（`masterQQ`）、渲染崩（`chromium_path` 指向另一个系统的路径）、
+   * 图片链接失效（`server.yaml` 的 url 是旧 IP）、锅巴把你踢回登录页（`jwt.secret`）。
+   *
+   * 本机原样在 `.restore-bak-*` 里有完整一份，从那儿取。
+   */
+  #keepLocalFields(dest, bakDir, rel) {
+    const fields = this.keepLocal.get(rel)
+    const localFile = path.join(bakDir, rel)
+    // 本机压根没这个文件（全新装的机器）就不用管，包里那份直接生效
+    if (!fields || !fs.existsSync(localFile)) return
+    try {
+      const local = YAML.parse(fs.readFileSync(localFile, 'utf8')) ?? {}
+      const doc = YAML.parseDocument(fs.readFileSync(dest, 'utf8'))
+      const kept = []
+      for (const f of fields) {
+        const parts = f.split('.')
+        const value = parts.reduce((o, k) => (o == null ? o : o[k]), local)
+        if (value === undefined) continue
+        doc.setIn(parts, value)
+        kept.push(f)
+      }
+      if (!kept.length) return
+      fs.writeFileSync(dest, doc.toString())
+      this.#log(`${rel}：${kept.join('、')} 保持本机原样`)
+    } catch (err) {
+      // 合并不了就把本机那份整个放回去 —— 宁可这个文件不还原，也不能让 bot 不认主人
+      try {
+        fs.copyFileSync(localFile, dest)
+        this.#log(`${rel} 合并失败（${err.message}），已保留本机原样`, 'warn')
+      } catch {
+        this.#log(`${rel} 合并失败：${err.message}`, 'error')
+      }
+    }
+  }
+
   /** 覆盖之前把原文件挪走。同一个相对路径在 bakDir 里保持原样，方便手工找回 */
-  #backupExisting(dest, rel, bakDir) {
-    let st
+  #backupExisting(dest, rel, bakDir) {    let st
     try {
       st = fs.lstatSync(dest)
     } catch {

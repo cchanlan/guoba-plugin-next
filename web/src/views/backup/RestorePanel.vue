@@ -103,11 +103,22 @@ async function loadPacks() {
   }
 }
 
-/** 本地没装、地址也过得了白名单的 —— 只有这些勾了才有意义 */
+/** 装得上的：本地没装、地址也过得了白名单。「全选可装」按钮用这个 */
 function installableNames(list = manifest.value?.plugins ?? []) {
   return list
     .filter((p) => !p.installed && p.allowed !== false && (p.remote || p.noGit))
     .map((p) => p.name)
+}
+
+/**
+ * 进页面时默认勾哪些。
+ *
+ * 只勾「备份时确实带了它文件」的（manifest 里 keys 非空）—— 备份时压根没选的插件默认全勾上，
+ * 等于每次还原都得手动取消一遍。想把清单里的插件全装回来，点「全选可装」。
+ */
+function defaultPluginNames(list = manifest.value?.plugins ?? []) {
+  const installable = new Set(installableNames(list))
+  return list.filter((p) => installable.has(p.name) && p.keys?.length).map((p) => p.name)
 }
 
 async function loadInfo() {
@@ -121,7 +132,7 @@ async function loadInfo() {
     info.value = data
     // 默认全选条目：都选这个包了，多半是想整包还原
     picked.value = (data.manifest.entries ?? []).map((e) => e.key)
-    pickedPlugins.value = installableNames(data.manifest.plugins ?? [])
+    pickedPlugins.value = defaultPluginNames(data.manifest.plugins ?? [])
   } catch {
     info.value = null
   } finally {
@@ -210,6 +221,12 @@ onMounted(async () => {
         既没装上、包里也只有配置数据的插件，它的文件会暂存到 <code>.pending-restore/</code>，
         等插件装好后再还原一次即可，不会丢。
       </p>
+      <p>
+        <b>备份包内容是完整的</b>（Redis 配置、各账号 ck、黑白名单全都在），但还原时有几项
+        会<b>保持本机原样</b> —— 主人绑定（<code>masterQQ</code>）、
+        <code>chromium_path</code>、对外访问地址、pm2 配置、以及锅巴自己的账号密码。
+        换了机器或换了 bot 号，这些盖过去只会让 bot 不认主人、渲染崩掉、把你踢回登录页。
+      </p>
     </div>
 
     <div class="g-bk-bar">
@@ -266,6 +283,14 @@ onMounted(async () => {
             >
               全选可装
             </a-button>
+            <a-button
+              size="small"
+              :disabled="running"
+              title="只勾备份时带了文件的那些"
+              @click="pickedPlugins = defaultPluginNames()"
+            >
+              只选备份过的
+            </a-button>
             <a-button size="small" :disabled="running" @click="pickedPlugins = []">清空</a-button>
             <span class="g-bk-h4-sub">已选 {{ pickedPlugins.length }} 个</span>
           </span>
@@ -284,6 +309,9 @@ onMounted(async () => {
             <a-tag v-else-if="p.allowed === false" color="red">不在白名单</a-tag>
             <a-tag v-else-if="!p.remote && !p.noGit" color="orange">没有仓库地址</a-tag>
             <a-tag v-else color="blue">待安装</a-tag>
+            <!-- 备份时勾了它的文件才默认勾上，否则每次还原都要手动取消一遍 -->
+            <a-tag v-if="p.keys?.length" color="cyan">包里有文件</a-tag>
+            <a-tag v-else>仅清单</a-tag>
             <span v-if="p.branch" class="g-bk-pbranch">{{ p.branch }}</span>
             <span class="g-bk-premote" :title="p.remote">{{ p.remote || '（无远程地址）' }}</span>
           </div>

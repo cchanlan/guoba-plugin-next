@@ -30,7 +30,6 @@ const SKIP_NAMES = new Set([
   'node_modules', '.git', '.svn', '.hg',
   'logs', 'log', 'temp', 'tmp', '.cache',
   '.DS_Store', 'Thumbs.db', '.idea', '.vscode',
-  'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock',
   'core', 'dump.core',
 ])
 
@@ -50,6 +49,14 @@ const DRILL_SIZE = 20 * 1024 * 1024
 const MAX_DRILL_DEPTH = 2
 /** 子项太多就别拆了，UI 上一屏几百个复选框没法用 */
 const MAX_DRILL_CHILDREN = 60
+/**
+ * 「里面还有目录、拆开让人看清结构」的子项上限。
+ *
+ * 比 {@link MAX_DRILL_CHILDREN} 严得多：这条规则是为了让 `config` 这种小而有层次的目录
+ * 在页面上点得开（看清里面有 `config` 和 `default_config` 两样东西），而不是把
+ * `plugins/example` 那 40 个 js 拆成 40 行。
+ */
+const MAX_STRUCTURE_CHILDREN = 12
 
 /** git 地址里的 `user:token@` —— 备份包会被下载甚至转发，绝不能带出去 */
 const CREDENTIAL_RE = /^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i
@@ -248,63 +255,29 @@ function parseStatusLine(line) {
   return {status, rel: isDir ? rel.slice(0, -1) : rel, isDir}
 }
 
-/** 一条候选路径 → 归并用的分组键。`plugins/` 下取两段，其他取一段 */
-function groupKey(rel, groupDepth) {
-  const parts = rel.split('/')
-  return parts.slice(0, groupDepth(parts)).join('/')
-}
 /**
- * 目标目录里的用户资产。
+ * 跑一遍 git status，得到「哪条路径是什么状态」。
  *
- * @param {string} dir 目标目录绝对路径
- * @param {object} opts
- * @param {string} opts.prefix key 前缀，`root` 或 `plugin:<name>`
- * @param {Set<string>} [opts.excludes] 要跳过的绝对路径
- * @param {boolean} [opts.splitPlugins] 根目录用：把 `plugins/<name>/` 目录形态的条目单独挑出来
- * @return {Promise<{isRepo: boolean, entries: object[], pluginDirs: string[], deleted: string[]}>}
+ * 只是**打标签**用的，不决定有哪些条目 —— 条目一律来自文件系统，见 {@link discoverTarget}。
+ *
+ * @return {Promise<{ok: boolean, marks: Map<string, string>, deleted: string[]}>}
  */
-export async function discoverTarget(dir, {prefix, excludes = new Set(), splitPlugins = false} = {}) {
-  if (!isGitRepo(dir)) {
-    return discoverFlat(dir, {prefix, excludes, splitPlugins})
-  }
+async function gitMarks(dir) {
   const res = await git(dir, gitArgs('status', '--porcelain', '--ignored'))
-  if (!res.ok) {
-    return discoverFlat(dir, {prefix, excludes, splitPlugins})
-  }
+  if (!res.ok) return {ok: false, marks: new Map(), deleted: []}
 
   /** @type {Map<string, string>} rel → kind */
-  const found = new Map()
+  const marks = new Map()
   const modifiedCandidates = []
   const deleted = []
-  const pluginDirs = []
 
   for (const raw of res.stdout.split('\n')) {
     const it = parseStatusLine(raw)
     if (!it) continue
-    const {status, rel, isDir} = it
+    const {status, rel} = it
     if (isSkipped(rel)) continue
-
-    // git 把「整个目录都未跟踪」聚合成最上层一条 `?? plugins/`（根仓库的 .gitignore 里
-    // 没有 plugins 相关规则时就是这样，非 TRSS 的分支有这种），这时得自己展开一层，
-    // 否则所有插件会被并成一个几 G 的 `plugins` 条目
-    if (splitPlugins && isDir && rel === 'plugins') {
-      for (const name of listChildren(path.join(dir, 'plugins'), excludes)) {
-        if (isDirectory(path.join(dir, 'plugins', name))) pluginDirs.push(name)
-        else found.set(`plugins/${name}`, status === '!!' ? 'ignored' : 'untracked')
-      }
-      continue
-    }
-
-    // `plugins/<name>/` 目录形态 = 独立安装的插件，交给插件流程单独处理；
-    // `plugins/<name>/<file>` 文件形态 = 用户往 Yunzai 自带目录（other / example）里
-    // 加的东西，留在这里当根条目 —— 原先想整个排除 plugins/，那样就会漏掉它们
-    if (splitPlugins && isDir && /^plugins\/[^/]+$/.test(rel)) {
-      pluginDirs.push(rel.slice('plugins/'.length))
-      continue
-    }
-
     if (status === '!!' || status === '??') {
-      found.set(rel, status === '!!' ? 'ignored' : 'untracked')
+      marks.set(rel, status === '!!' ? 'ignored' : 'untracked')
     } else if (status.includes('D')) {
       deleted.push(rel)
     } else if (status.includes('M') || status.includes('A') || status.includes('R')) {
@@ -314,91 +287,111 @@ export async function discoverTarget(dir, {prefix, excludes = new Set(), splitPl
 
   const realModified = await filterRealModified(dir, modifiedCandidates)
   for (const rel of realModified) {
-    if (!isSkipped(rel)) found.set(rel, 'modified')
+    if (!isSkipped(rel)) marks.set(rel, 'modified')
   }
-
-  // 归并：git 的粒度靠不住 —— 目录里只要有一个被跟踪的文件，它就展开逐条列
-  // （`temp/` 因为 temp/.gitignore 被跟踪展开成 110 多条，`config/` 因为
-  //  !/config/default_config 例外散成好几条），所以按顶层路径段自己归并一次
-  const groupDepth = splitPlugins
-    ? (parts) => (parts[0] === 'plugins' && parts.length > 1 ? 2 : 1)
-    : () => 1
-  /** @type {Map<string, {paths: string[], kinds: Set<string>}>} */
-  const groups = new Map()
-  for (const [rel, kind] of found) {
-    const key = groupKey(rel, groupDepth)
-    let g = groups.get(key)
-    if (!g) groups.set(key, (g = {paths: [], kinds: new Set()}))
-    g.paths.push(rel)
-    g.kinds.add(kind)
-  }
-
-  const entries = []
-  for (const [rel, g] of groups) {
-    // 整个目录就是一个条目时不必再记成员，打包时直接收整个目录
-    const paths = g.paths.length === 1 && g.paths[0] === rel ? [rel] : g.paths.sort()
-    entries.push(...buildEntries({
-      dir, prefix, rel, paths, kinds: g.kinds, excludes,
-      depth: rel.split('/').length,
-    }))
-  }
-  addTracked({dir, prefix, entries, excludes, splitPlugins, pluginDirs})
-  entries.sort((a, b) => a.rel.localeCompare(b.rel))
-  return {isRepo: true, entries, pluginDirs, deleted}
+  return {ok: true, marks, deleted}
 }
 
 /**
- * 把 git 没提到的顶层项也补进条目里（仓库自带的 `apps/`、`model/`、`resources/`…）。
+ * 一个路径该标什么 kind。
  *
- * 为什么必须有这一步：光靠 git 的话，配置数据不在插件目录里的插件（quote-plugin 的数据在
- * Yunzai 根 `data/quote`、ffmpeg-plugin 压根没配置）一个条目都没有，页面上勾都勾不上 ——
- * 用户想连仓库代码一起带走都做不到。**能勾什么该由目录里有什么决定，不由 git 决定。**
- *
- * 顶层项和更细的 git 条目会同时存在（`resources` 整个 + `resources/profile/background`），
- * 树上就是父子关系：勾父 = 整个都要。重复的部分由 BackupService 的父吸收逻辑消掉。
+ * 四种情形，顺序不能换：
+ * 1. git 直接点了这条路径 → 用它的状态
+ * 2. 祖先被整体标了（`!! resources/`）→ 继承祖先，里面的东西都是同一类
+ * 3. 目录里有被标记的子孙 → 单一种类就用它，多种就是 `mixed`
+ * 4. 都没有 → `tracked`，clone 就有的东西
  */
-function addTracked({dir, prefix, entries, excludes, splitPlugins, pluginDirs}) {
-  const covered = new Set(entries.map((e) => e.rel))
-  const plugins = new Set(pluginDirs)
-  const add = (rel, depth) => {
-    if (covered.has(rel)) return
-    // 大目录会被 buildEntries 下钻成子条目，而 git 侧多半已经列过其中一部分了
-    // （`data` 下钻出的 `data/PlayerData` 就是），同 rel 收两遍会让树上冒出重复节点
-    for (const entry of buildEntries({
-      dir, prefix, rel, paths: [rel], kinds: new Set(['tracked']), excludes, depth,
-    })) {
-      if (covered.has(entry.rel)) continue
-      covered.add(entry.rel)
-      entries.push(entry)
-    }
+function markOf(rel, marks, isDir) {
+  if (!marks.size) return 'plain'
+  if (marks.has(rel)) return marks.get(rel)
+
+  const parts = rel.split('/')
+  for (let i = parts.length - 1; i > 0; i--) {
+    const anc = parts.slice(0, i).join('/')
+    if (marks.has(anc)) return marks.get(anc)
   }
 
+  if (isDir) {
+    const prefix = `${rel}/`
+    const kinds = new Set()
+    for (const [k, v] of marks) {
+      if (k.startsWith(prefix)) kinds.add(v)
+    }
+    if (kinds.size === 1) return [...kinds][0]
+    if (kinds.size > 1) return 'mixed'
+  }
+  return 'tracked'
+}
+
+/**
+ * 目标目录里能备份的东西。
+ *
+ * **条目一律来自文件系统，不是来自 git。** 之前反过来干过一次，代价很惨：git 只报它关心
+ * 的路径，`GloryOfKings-Plugin` 的 `.gitignore` 写了 `config/config/*`，于是条目名叫
+ * `config` 而实际只装了 `config/config`，`config/default_config/` 从来没进过包 —— 用户
+ * 勾了「config」，还原完插件却因为缺 `default_config` 起不来。
+ *
+ * 所以现在：**一个条目就是一个真实路径**（一个文件，或一整个目录，`paths` 永远是 `[rel]`），
+ * 勾了就是勾整个，不会漏。git 只负责给条目打 kind、决定要不要默认勾上。
+ *
+ * @param {string} dir 目标目录绝对路径
+ * @param {object} opts
+ * @param {string} opts.prefix key 前缀，`root` 或 `plugin:<name>`
+ * @param {Set<string>} [opts.excludes] 要跳过的绝对路径
+ * @param {boolean} [opts.splitPlugins] 根目录用：把 `plugins/<name>` 挑出来交给插件流程
+ * @return {Promise<{isRepo: boolean, entries: object[], pluginDirs: string[], deleted: string[]}>}
+ */
+export async function discoverTarget(dir, {prefix, excludes = new Set(), splitPlugins = false} = {}) {
+  const isRepo = isGitRepo(dir)
+  const {ok, marks, deleted} = isRepo ? await gitMarks(dir) : {ok: false, marks: new Map(), deleted: []}
+  const entries = []
+  const pluginDirs = []
+  const ctx = {dir, prefix, marks, excludes}
+
   for (const name of listChildren(dir, excludes)) {
-    // plugins/ 下的子目录各自是独立的插件（单独成组），这里只补 Yunzai 自带的那几个
-    // （adapter / system / other / example）—— 它们属于 Bot 本体
     if (splitPlugins && name === 'plugins' && isDirectory(path.join(dir, 'plugins'))) {
       for (const sub of listChildren(path.join(dir, 'plugins'), excludes)) {
-        if (plugins.has(sub)) continue
-        add(`plugins/${sub}`, 2)
+        const rel = `plugins/${sub}`
+        if (isPluginDir(path.join(dir, 'plugins', sub), rel, marks)) {
+          pluginDirs.push(sub)
+          continue
+        }
+        // Yunzai 自带的 adapter / system / other 这些属于 Bot 本体，留作根条目
+        entries.push(...buildEntries({...ctx, rel}))
       }
       continue
     }
-    add(name, 1)
+    entries.push(...buildEntries({...ctx, rel: name}))
   }
+
+  entries.sort((a, b) => a.rel.localeCompare(b.rel))
+  return {isRepo: isRepo && ok, entries, pluginDirs, deleted}
+}
+
+/**
+ * `plugins/<name>` 是独立安装的插件，还是 Yunzai 自带的目录？
+ *
+ * 有 `.git` 的一定是插件。没有 `.git` 的看根仓库怎么看它：被 ignore 或未跟踪说明是用户
+ * 自己弄进来的（手动解压装的插件，实测 `douyin-sticker-plugin`、`plugins/example` 都是
+ * 这种）；被跟踪的就是 Yunzai 自带的（`adapter` / `system` / `other`）。
+ */
+function isPluginDir(abs, rel, marks) {
+  if (isGitRepo(abs)) return true
+  const mark = markOf(rel, marks, true)
+  return mark === 'ignored' || mark === 'untracked'
 }
 
 /**
  * 非 git 的目录（手动解压安装的插件，实测本机 `douyin-sticker-plugin` 就是）。
  *
  * 拿不到 status，分不出「用户资产」和「仓库自带」—— 但这种插件本来也没有仓库能还原，
- * 整个目录都得带走。列出顶层每一项让用户能挑，体积不大的默认勾上。
+ * 整个目录都得带走。列出每一项让用户能挑，体积不大的默认勾上。
  */
 export function discoverPlain(dir, {prefix, excludes = new Set()} = {}) {
   const entries = []
+  const ctx = {dir, prefix, marks: new Map(), excludes}
   for (const name of listChildren(dir, excludes)) {
-    entries.push(...buildEntries({
-      dir, prefix, rel: name, paths: [name], kinds: new Set(['plain']), excludes, depth: 1,
-    }))
+    entries.push(...buildEntries({...ctx, rel: name}))
   }
   // 空目录也给一条，否则这一组连个能勾的都没有
   if (!entries.length) {
@@ -412,107 +405,46 @@ export function discoverPlain(dir, {prefix, excludes = new Set()} = {}) {
 }
 
 /**
- * 一组路径按下一个路径段再分开。
+ * 一个路径 → 条目。必要时往下拆成子条目。
  *
- * 只要有任何一条路径本身就等于当前条目（`paths = ['data']`），就返回 null —— 那种情况
- * 得读文件系统才知道下一层有什么。
+ * 两种情况会拆：
+ * - **太大**：`data` 3.3 G 不拆的话用户只能被迫全选，拆开才能只挑 `data/PlayerData`
+ * - **里面还有目录**：这样页面上点开就能看清「这个 config 里到底有 config 和 default_config
+ *   两样东西」，不用猜。子项太多的不拆（`plugins/example` 那 40 个 js 拆开只会刷屏）
  *
- * @return {Map<string, string[]>|null} 子条目路径 → 归它的成员
+ * 无论拆不拆，每个条目都是一个完整的真实路径，勾了就是整个拿走。
  */
-function splitByNextSegment(paths, depth) {
-  const map = new Map()
-  for (const p of paths) {
-    const parts = p.split('/')
-    if (parts.length <= depth) return null
-    const child = parts.slice(0, depth + 1).join('/')
-    let list = map.get(child)
-    if (!list) map.set(child, (list = []))
-    list.push(p)
-  }
-  return map
-}
+function buildEntries({dir, prefix, rel, marks, excludes, drilled = 0}) {
+  const abs = path.join(dir, rel)
+  const isDir = isDirectory(abs)
+  const {size, files, truncated} = measure(abs, excludes)
 
-/**
- * 一组路径 → 条目。体积超标的会继续往下拆，直到够小或到 {@link MAX_DRILL_DEPTH} 层。
- *
- * 拆分有两条路子：git 给的路径本身够细时按路径段分（`data` 那 31 条子路径就是），
- * 只给了一个目录名时读一层目录。前者是主要情形 —— 只要目录里有任何被跟踪的文件，
- * git 就会展开逐条列，反而帮了忙。
- */
-function buildEntries({dir, prefix, rel, paths, kinds, excludes, depth = 1, drilled = 0}) {
-  let size = 0
-  let files = 0
-  let truncated = false
-  for (const p of paths) {
-    const m = measure(path.join(dir, p), excludes)
-    size += m.size
-    files += m.files
-    truncated = truncated || m.truncated
-  }
-
-  // 大目录拆成子条目，让用户能只挑 data/PlayerData 而不是被 3.2G 的 data 逼着全选。
   // 名字像缓存的不拆 —— `data/puppeteer` 是 Chrome 的 profile 目录，拆开是 30 多个
   // 各自只有几百 K 的子目录，每个都能过体积阈值，于是 615M 缓存全被默认勾上
-  if (drilled < MAX_DRILL_DEPTH && (size > DRILL_SIZE || truncated) && !isCacheName(rel)) {
-    let children = splitByNextSegment(paths, depth)
-    if (!children && paths.length === 1 && paths[0] === rel && isDirectory(path.join(dir, rel))) {
-      children = new Map(listChildren(path.join(dir, rel), excludes)
-        .map((name) => [`${rel}/${name}`, [`${rel}/${name}`]]))
-    }
-    if (children && children.size > 1 && children.size <= MAX_DRILL_CHILDREN) {
-      const out = []
-      for (const [childRel, childPaths] of children) {
-        out.push(...buildEntries({
-          dir, prefix, rel: childRel, paths: childPaths, kinds, excludes,
-          depth: depth + 1, drilled: drilled + 1,
-        }))
-      }
-      return out
+  if (isDir && drilled < MAX_DRILL_DEPTH && !isCacheName(rel)) {
+    const children = listChildren(abs, excludes)
+    const tooBig = size > DRILL_SIZE || truncated
+    const hasSubDirs = children.some((n) => isDirectory(path.join(abs, n)))
+    const worthShowing = hasSubDirs && children.length <= MAX_STRUCTURE_CHILDREN
+    if (children.length > 1 && children.length <= MAX_DRILL_CHILDREN && (tooBig || worthShowing)) {
+      return children.flatMap((name) => buildEntries({
+        dir, prefix, rel: `${rel}/${name}`, marks, excludes, drilled: drilled + 1,
+      }))
     }
   }
 
-  const kind = kinds.size === 1 ? [...kinds][0] : 'mixed'
+  const kind = markOf(rel, marks, isDir)
   return [{
     key: `${prefix}|${rel}`,
     rel,
-    paths: paths.length === 1 && paths[0] === rel ? [rel] : paths,
+    // 永远是单个真实路径：勾了它就是把这个文件 / 这整个目录拿走，不会只拿一部分
+    paths: [rel],
     kind,
     size,
     files,
     truncated,
     recommended: recommend({rel, size, files, truncated, kind}),
   }]
-}
-
-/**
- * 非 git 目录的降级发现：扫一层，剩下的每项按同一套规则做条目。
- *
- * Yunzai 根不是 git 仓库时走这里（下载 zip 解压装的、或者 .git 被删了、仓库损坏）。
- * 没有 git 帮忙区分「用户资产」和「仓库自带」，只能把整层都列出来 —— 会多出 `lib/`、
- * `renderers/` 这类 clone 就有的东西，体积都不大，用户自己取消勾选即可。总比一条都
- * 扫不出来、整个 Bot 本体没法备份要好。大目录照样会自动下钻，缓存名照样不默认勾。
- */
-function discoverFlat(dir, {prefix, excludes = new Set(), splitPlugins = false} = {}) {
-  const entries = []
-  const pluginDirs = []
-  const add = (rel, depth) => entries.push(...buildEntries({
-    dir, prefix, rel, paths: [rel], kinds: new Set(['plain']), excludes, depth,
-  }))
-
-  for (const name of listChildren(dir, excludes)) {
-    if (isSkipped(name)) continue
-    // plugins/ 下的子目录是插件，交给插件流程；散文件（用户往自带目录里加的）留作根条目
-    if (splitPlugins && name === 'plugins' && isDirectory(path.join(dir, 'plugins'))) {
-      for (const sub of listChildren(path.join(dir, 'plugins'), excludes)) {
-        if (isDirectory(path.join(dir, 'plugins', sub))) pluginDirs.push(sub)
-        else add(`plugins/${sub}`, 2)
-      }
-      continue
-    }
-    add(name, 1)
-  }
-  entries.sort((a, b) => a.rel.localeCompare(b.rel))
-  return {isRepo: false, entries, pluginDirs, deleted: []}
 }
 
 function isDirectory(abs) {
