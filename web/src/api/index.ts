@@ -954,5 +954,216 @@ export const apiTermRestart = () =>
 /** 会话信息 */
 export const apiTermStatus = () => get<TermStatus>('/term/status', {}, { showError: false })
 
+/* ---------------- 备份还原 ---------------- */
+
+/**
+ * 一个可备份的条目。
+ *
+ * `key` 形如 `root|data/PlayerData`、`plugin:miao-plugin|config/cfg`，前后端和 manifest
+ * 都用它对齐，定时备份存的也是这个。
+ */
+export interface BackupEntry {
+  key: string
+  /** 相对所属目标的路径。非 git 插件是 `.`，表示整个插件目录 */
+  rel: string
+  /** 这个条目实际要打包的路径（git 把目录展开成多条时会多于一项） */
+  paths: string[]
+  /** 来源：被 .gitignore 忽略 / 未跟踪 / 跟踪文件被改过 / 非 git 插件整目录 */
+  kind: 'ignored' | 'untracked' | 'modified' | 'mixed' | 'plain'
+  size: number
+  files: number
+  /** 体积统计触顶提前结束了，size/files 是下限 */
+  truncated: boolean
+  /** 默认是否勾选（体积小、不像缓存的才勾） */
+  recommended: boolean
+}
+
+/** 一个插件的备份信息 */
+export interface BackupPlugin {
+  name: string
+  /** 是不是 git 仓库 */
+  git: boolean
+  noGit: boolean
+  /** 已脱敏的仓库地址（不含 token 和反代前缀），还原时按它 clone */
+  remote?: string
+  branch?: string
+  commit?: string
+  /** 有未提交的改动 */
+  dirty?: boolean
+  entries: BackupEntry[]
+  error?: string
+}
+
+export interface BackupScan {
+  root: { entries: BackupEntry[]; deleted: string[]; isRepo: boolean }
+  plugins: BackupPlugin[]
+  limits: {
+    RECOMMEND_MAX_SIZE: number
+    RECOMMEND_MAX_FILES: number
+    DRILL_SIZE: number
+    STAT_MAX_FILES: number
+    STAT_MAX_BYTES: number
+  }
+  scannedAt: number
+}
+
+/** 服务器上的一个备份包 */
+export interface BackupFile {
+  name: string
+  size: number
+  mtime: number
+  /** 读不出 manifest（包坏了或不是锅巴的包）时为 null */
+  summary: {
+    note: string
+    createdAt: string
+    entries: number
+    plugins: number
+    totalSize: number
+  } | null
+}
+
+/** manifest 里的条目，比扫描结果少了 kind / recommended */
+export interface BackupManifestEntry {
+  key: string
+  target: string
+  rel: string
+  paths: string[]
+  size: number
+  files: number
+}
+
+/** manifest 里的插件，inspect 时补上本地状态 */
+export interface BackupManifestPlugin {
+  name: string
+  git: boolean
+  noGit: boolean
+  remote: string
+  branch: string
+  commit: string
+  dirty: boolean
+  keys: string[]
+  /** 本地已经装了 */
+  installed?: boolean
+  /** remote 是否过得了 Git 安装白名单，false 则还原时装不了 */
+  allowed?: boolean
+}
+
+export interface BackupManifest {
+  version: number
+  createdAt: string
+  note: string
+  bot: {
+    name: string
+    version: string
+    guobaVersion: string
+    node: string
+    platform: string
+  }
+  totalFiles: number
+  totalSize: number
+  entries: BackupManifestEntry[]
+  plugins: BackupManifestPlugin[]
+  deleted: string[]
+}
+
+export interface BackupInspect {
+  name: string
+  manifest: BackupManifest
+  installed: string[]
+}
+
+/** 备份 / 还原任务。同一时刻只会有一个 */
+export interface BackupTask {
+  id: string
+  type: 'create' | 'restore'
+  phase: 'collecting' | 'packing' | 'cloning' | 'extracting' | 'done' | 'error' | 'canceled'
+  file: string
+  current: number
+  total: number
+  bytes: number
+  totalBytes: number
+  done: boolean
+  error: string
+  /** 定时备份触发的 */
+  auto?: boolean
+  startAt: number
+  endAt: number
+  /** 打包完成后是 `{file, size, files}`，还原完成后是下面这堆 */
+  result:
+    | { file: string; size: number; files: number }
+    | {
+        cloned: string[]
+        skipped: Array<{ name: string; reason: string }>
+        failed: Array<{ name: string; reason: string }>
+        pending: string[]
+        restored: number
+        /** 被覆盖的原文件挪去了哪儿（相对 Yunzai 根），空串表示没覆盖任何文件 */
+        backupDir: string
+      }
+    | null
+}
+
+export interface BackupLog {
+  seq: number
+  level: 'info' | 'warn' | 'error' | 'cmd'
+  text: string
+}
+
+export interface BackupSettings {
+  enable: boolean
+  cron: string
+  keep: number
+  keys: string[]
+}
+
+/** 扫描可备份的条目。force 跳过后端 60 秒缓存 */
+export const apiBackupScan = (force = false) =>
+  get<BackupScan>('/backup/scan', force ? { force: 'true' } : {})
+
+/** 服务器上已有的备份包，新的在前 */
+export const apiBackupList = () => get<BackupFile[]>('/backup/list')
+
+/** 开始打包，返回任务初态；进度靠 apiBackupTask 轮询 */
+export const apiBackupCreate = (body: { keys: string[]; note?: string }) =>
+  post<{ task: BackupTask | null; logs: BackupLog[]; cursor: number }>('/backup/create', body)
+
+/** 任务状态 + 增量日志。cursor 传上次拿到的值，首次传 -1 拿全量 */
+export const apiBackupTask = (cursor: number) =>
+  get<{ task: BackupTask | null; logs: BackupLog[]; cursor: number }>(
+    '/backup/task',
+    { cursor },
+    { showError: false },
+  )
+
+export const apiBackupCancel = () => post<boolean>('/backup/cancel', {})
+
+/** 还原前预览包内容 */
+export const apiBackupInspect = (file: string) => get<BackupInspect>('/backup/inspect', { file })
+
+/** 开始还原，返回任务初态 */
+export const apiBackupRestore = (body: {
+  file: string
+  keys: string[]
+  plugins?: string[]
+  autoNpmInstall?: boolean
+  autoRestart?: boolean
+}) => post<{ task: BackupTask | null; logs: BackupLog[]; cursor: number }>('/backup/restore', body)
+
+export const apiBackupRemove = (file: string) => post<boolean>('/backup/remove', { file })
+
+/** 上传外部备份包：FormData 的 files 字段，走 multipart */
+export const apiBackupUpload = (fd: FormData) => post<string[]>('/backup/upload', fd)
+
+export const apiBackupSettings = () => get<BackupSettings>('/backup/settings')
+
+export const apiBackupSaveSettings = (body: BackupSettings) =>
+  post<BackupSettings>('/backup/settings', body)
+
+/** 下载地址，token 走 query 才能直接写进 <a href> */
+export function backupDownloadUrl(file: string, token: string) {
+  const q = new URLSearchParams({ file, token })
+  return `${API_BASE}/backup/download?${q.toString()}`
+}
+
 export * from './miao'
 export { request, get, post, put, del } from './request'

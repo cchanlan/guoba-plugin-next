@@ -70,6 +70,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '终端', icon: 'ant-design:code-outlined' },
       },
       {
+        path: 'backup',
+        name: 'Backup',
+        component: () => import('@/views/backup/index.vue'),
+        meta: { title: '备份还原', icon: 'ant-design:save-outlined' },
+      },
+      {
         path: 'plugins',
         name: 'PluginsStore',
         component: () => import('@/views/plugins/index.vue'),

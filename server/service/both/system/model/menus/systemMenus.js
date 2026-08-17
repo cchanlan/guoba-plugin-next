@@ -97,6 +97,16 @@ export const SystemMenus = {
       icon: 'ant-design:code-outlined',
     },
   },
+  // 备份还原
+  backup: {
+    path: '/backup',
+    name: 'Backup',
+    component: '/guoba/backup/index',
+    meta: {
+      title: '备份还原',
+      icon: 'ant-design:save-outlined',
+    },
+  },
   // 配置管理
   config: {
     path: '/config',
