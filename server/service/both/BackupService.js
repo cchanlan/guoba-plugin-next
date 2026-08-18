@@ -5,6 +5,7 @@ import YAML from 'yaml'
 import {GuobaError, Service} from '#guoba.framework'
 import {_paths, cfg} from '#guoba.platform'
 import {ZipWriter, readEntries, readEntryBuffer, extractEntry, safeJoin} from '../../utils/zip.js'
+import {parseReadmeInstall} from '../../utils/readmeInstall.js'
 import {
   discoverTarget, discoverPlain, repoInfo, sanitizeRemote, shouldSkipName,
   gitArgs, DISCOVER_LIMITS,
@@ -43,6 +44,11 @@ const PLUGIN_NAME_RE = /^[\w.-]+$/
  * `pnpm add ... -w` —— 不然 pnpm 会把它当命令行选项，而不是包名。
  */
 const DEP_NAME_RE = /^(?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/i
+/** README 最多读 1 MiB，外部仓库不能拿超大文档拖垮还原 */
+const README_MAX_SIZE = 1024 * 1024
+/** README 安装命令只认这些包管理器和动作，绝不执行原始 shell */
+const SAFE_INSTALL_MANAGERS = new Set(['pnpm', 'npm', 'cnpm', 'yarn'])
+const SAFE_INSTALL_ACTIONS = new Set(['install', 'i', 'add'])
 
 /** 装依赖用的包管理器。Yunzai 是 pnpm workspace，只能是 pnpm，见 {@link BackupService.#installDeps} */
 const PNPM = 'pnpm'
@@ -62,9 +68,13 @@ const NEED_SHELL = process.platform === 'win32'
  * `config/application.yaml` 的 `backup.githubProxies` 里改这份名单。
  */
 const DEFAULT_PROXIES = [
+  'https://ghproxy.1888866.xyz/',
+  'https://gh-proxy.com/',
+  'https://ui.ghproxy.cc/',
+  'https://gitwarp.com/',
+  'https://gh.jasonzeng.dev/',
   'https://github.akams.cn/',
   'https://ghfast.top/',
-  'https://gh-proxy.com/',
   'https://ghproxy.net/',
   'https://github.moeyy.xyz/',
   'https://hub.gitmirror.com/',
@@ -662,6 +672,8 @@ export default class BackupService extends Service {
       cloned: [], copied: [], skipped: [], failed: [], pending: [], restored: 0, backupDir: '',
       /** @type {object|null} 阶段三的结果，见 {@link #installDeps} */
       deps: null,
+      /** 每个插件 clone / 解文件后立刻执行的依赖安装结果 */
+      pluginDeps: [],
       /** 依赖没装上时不重启，见 {@link #runRestore} 末尾 */
       restartSkipped: false,
     }
@@ -672,104 +684,80 @@ export default class BackupService extends Service {
     const targets = entries.filter((e) =>
       e.name !== MANIFEST_NAME && matchAnyPrefix(e.name, prefixes))
 
-    // ---- 阶段一：把缺的插件弄回来 ----
-    this.#task.phase = 'cloning'
+    // ---- 阶段一 / 二 / 插件依赖：每个插件按 clone → 解文件 → 安装依赖顺序处理 ----
     const byName = new Map((manifest.plugins ?? []).map((p) => [p.name, p]))
-    /** 没弄回来的插件，它们的文件改道去 .pending-restore，不能直接丢 */
     const unavailable = new Set()
     const installedNow = this.#installedPlugins()
-
-    /**
-     * 备份时整个插件都勾上了（要解的文件里有 index.js / package.json）——
-     * 那它就是一份完整插件，直接解出来即可。**不该再去 clone**：白等几分钟，
-     * 网络不好还会失败，最后解出来的还是同一批文件。
-     */
-    const byFiles = []
-    const needClone = []
+    const byFiles = new Set()
+    const requestedPlugins = new Set(plugins)
+    const pluginTargets = new Map()
+    const rootTargets = []
+    for (const entry of targets) {
+      const rel = entry.name.slice(FILES_PREFIX.length)
+      const m = rel.match(/^plugins\/([^/]+)\//)
+      // `plugins/adapter` / `system` / `other` 是 Bot 根条目，不在 manifest.plugins 里，
+      // 不能误当成待安装插件分组，否则会被改道进 pending
+      if (m && byName.has(m[1])) {
+        const list = pluginTargets.get(m[1]) ?? []
+        list.push(entry)
+        pluginTargets.set(m[1], list)
+      } else {
+        rootTargets.push(entry)
+      }
+    }
+    const selectedKeys = new Set(keys)
     for (const name of plugins) {
-      if (installedNow.has(name)) {
-        result.skipped.push({name, reason: '已安装，跳过'})
-        continue
-      }
-      if (byName.get(name)?.whole === true) byFiles.push(name)
-      else needClone.push(name)
+      const info = byName.get(name)
+      // 包里完整还不够：本次还原也得把备份时的全部插件条目都勾上。否则用户只还原 config，
+      // 却因 manifest.whole 跳过 clone，最终仍会得到残缺插件
+      if (info?.whole === true && Array.isArray(info.keys) && info.keys.length
+        && info.keys.every((key) => selectedKeys.has(key))) byFiles.add(name)
     }
 
-    for (const name of byFiles) {
-      this.#log(`${name}：备份包里是整个插件，直接按文件还原，不 clone`)
-      result.copied.push(name)
-    }
-
-    if (needClone.length) {
-      this.#log(`需要 clone ${needClone.length} 个插件`)
-      // 只有真要 clone 时才值得花几秒测速
-      const proxy = await this.#pickProxy(needClone.flatMap((n) =>
-        this.#remoteCandidates(byName.get(n)).map((it) => it.url)))
-      this.#task.total = needClone.length
-      for (const name of needClone) {
-        this.#throwIfCanceled()
-        const res = await this.#clonePlugin(name, byName.get(name), proxy)
-        if (res.ok) {
-          // 依赖不在这儿装：现在磁盘上的 package.json 还是本机旧的那份，阶段二才会写回
-          // 备份里的。统一等阶段三在根目录一次装齐，见 {@link #installDeps}
-          result.cloned.push(name)
-        } else if (res.skipped) {
-          result.skipped.push({name, reason: res.reason})
-        } else {
-          result.failed.push({name, reason: res.reason})
-          unavailable.add(name)
-        }
-        this.#task.current++
-      }
-    }
-
-    // 勾了条目、插件却既没装也没弄回来的，一样得改道
-    const installed = this.#installedPlugins()
-    for (const name of byFiles) installed.add(name)
-    for (const key of keys) {
-      const target = key.split('|')[0]
-      if (!target.startsWith('plugin:')) continue
-      const name = target.slice('plugin:'.length)
-      if (!installed.has(name)) unavailable.add(name)
-    }
-
-    // ---- 阶段二：解文件 ----
     this.#task.phase = 'extracting'
     this.#task.current = 0
     this.#task.total = targets.length
     this.#task.bytes = 0
     this.#task.totalBytes = targets.reduce((s, e) => s + e.size, 0)
     this.#log(`待还原 ${targets.length} 个文件，共 ${fmtSize(this.#task.totalBytes)}`)
-
     const bakDir = path.join(this.backupDir, `${RESTORE_BAK_PREFIX}${stamp()}`)
     result.backupDir = path.relative(this.root, bakDir)
-    for (const entry of targets) {
+
+    // 根配置 / 数据先落地，插件逐个处理时 package.json 才是包里的最终版本
+    await this.#extractEntries(abs, rootTargets, bakDir, unavailable, result)
+    const orderedPlugins = [...new Set([...plugins, ...pluginTargets.keys()])]
+    const cloneUrls = orderedPlugins.flatMap((n) => this.#remoteCandidates(byName.get(n)).map((it) => it.url))
+    const proxy = await this.#pickProxy(cloneUrls)
+    for (const name of orderedPlugins) {
       this.#throwIfCanceled()
-      const rel = entry.name.slice(FILES_PREFIX.length)
-      const redirect = redirectFor(rel, unavailable)
-      const destRoot = redirect ? path.join(this.backupDir, PENDING_DIR) : this.root
-      const destRel = redirect || rel
-      const dest = safeJoin(destRoot, destRel)
-      if (!dest) {
-        // 包里的路径想跑到根目录外面去 —— 恶意包或者坏包，跳过
-        this.#log(`跳过越界路径：${entry.name}`, 'warn')
-        continue
-      }
-      try {
-        if (entry.name.endsWith('/')) {
-          fs.mkdirSync(dest, {recursive: true})
-        } else {
-          if (!redirect) this.#backupExisting(dest, rel, bakDir)
-          await extractEntry(abs, entry, dest)
-          // 主人绑定、chromium 路径、锅巴登录凭证这些换了机器就会坏，保持本机原样
-          if (!redirect && this.keepLocal.has(rel)) this.#keepLocalFields(dest, bakDir, rel)
-          result.restored++
+      const info = byName.get(name)
+      let available = installedNow.has(name) || byFiles.has(name)
+      if (installedNow.has(name)) result.skipped.push({name, reason: '已安装，跳过 clone'})
+      else if (byFiles.has(name)) {
+        available = true
+        this.#log(`${name}：备份时明确勾选了全部条目，按文件还原，不 clone`)
+        result.copied.push(name)
+      } else if (requestedPlugins.has(name)) {
+        this.#task.phase = 'cloning'
+        const res = await this.#clonePlugin(name, info, proxy)
+        if (res.ok) result.cloned.push(name)
+        else if (res.skipped) result.skipped.push({name, reason: res.reason})
+        else {
+          result.failed.push({name, reason: res.reason})
+          unavailable.add(name)
+          available = false
         }
-      } catch (err) {
-        this.#log(`还原 ${rel} 失败：${err.message}`, 'warn')
+      } else {
+        unavailable.add(name)
+        available = false
       }
-      this.#task.current++
-      this.#task.bytes += entry.size
+      const entriesForPlugin = pluginTargets.get(name) ?? []
+      await this.#extractEntries(abs, entriesForPlugin, bakDir, unavailable, result)
+      if (available && autoNpmInstall) {
+        this.#task.phase = 'installing'
+        const dep = await this.#installPluginDeps(name)
+        result.pluginDeps.push(dep)
+      }
     }
 
     if (unavailable.size) {
@@ -794,11 +782,12 @@ export default class BackupService extends Service {
       this.#throwIfCanceled()
     }
 
-    // pnpm 失败、或者体检仍有缺包，都不该重启：进去就是满屏「缺少依赖」
-    result.restartSkipped = autoRestart && !!result.deps
-      && (!result.deps.ok || result.deps.missing.length > 0)
+    // 某个插件安装失败、根 pnpm 失败或体检仍有缺包，都不该重启
+    const pluginDepsFailed = result.pluginDeps.some((it) => !it.ok)
+    result.restartSkipped = autoRestart && (pluginDepsFailed || (!!result.deps
+      && (!result.deps.ok || result.deps.missing.length > 0)))
     if (result.restartSkipped) {
-      const cmd = result.deps.addCmd || 'pnpm install'
+      const cmd = result.deps?.addCmd || 'pnpm install'
       this.#log('依赖没装齐，已跳过自动重启 —— 现在重启插件会大面积报缺依赖。'
         + `请手动执行 ${cmd}，成功后再重启 Bot`, 'error')
     }
@@ -811,6 +800,36 @@ export default class BackupService extends Service {
     this.#finishTask(result)
 
     if (doRestart) setTimeout(() => doRestart(), 1000)
+  }
+
+  /** 解一组条目。插件不可用时通过 unavailable 自动改道进 `.pending-restore`。 */
+  async #extractEntries(abs, entries, bakDir, unavailable, result) {
+    for (const entry of entries) {
+      this.#throwIfCanceled()
+      const rel = entry.name.slice(FILES_PREFIX.length)
+      const redirect = redirectFor(rel, unavailable)
+      const destRoot = redirect ? path.join(this.backupDir, PENDING_DIR) : this.root
+      const destRel = redirect || rel
+      const dest = safeJoin(destRoot, destRel)
+      if (!dest) {
+        this.#log(`跳过越界路径：${entry.name}`, 'warn')
+        continue
+      }
+      try {
+        if (entry.name.endsWith('/')) {
+          fs.mkdirSync(dest, {recursive: true})
+        } else {
+          if (!redirect) this.#backupExisting(dest, rel, bakDir)
+          await extractEntry(abs, entry, dest)
+          if (!redirect && this.keepLocal.has(rel)) this.#keepLocalFields(dest, bakDir, rel)
+          result.restored++
+        }
+      } catch (err) {
+        this.#log(`还原 ${rel} 失败：${err.message}`, 'warn')
+      }
+      this.#task.current++
+      this.#task.bytes += entry.size
+    }
   }
 
   /**
@@ -1152,6 +1171,87 @@ export default class BackupService extends Service {
   #proxyUrl(repoUrl, proxy = '') {
     if (!proxy || !/github\.com/.test(repoUrl)) return repoUrl
     return `${proxy}${repoUrl}`
+  }
+
+  /**
+   * 给刚还原好的单个插件安装依赖。
+   *
+   * package.json 是主来源，固定从根用路径 filter 安装，避免插件 cwd 的 pnpm install 把整个
+   * workspace 重装一遍。README 只扫描安全代码块，原始文本绝不进 shell；额外包统一转成
+   * `pnpm --filter ./plugins/<name> add`，这样最后一次根 install 后也不会丢。
+   */
+  async #installPluginDeps(name) {
+    const out = {name, ran: false, ok: true, reason: '', readme: {accepted: [], rejected: []}}
+    if (!PLUGIN_NAME_RE.test(name)) return {...out, ok: false, reason: '插件名不合法'}
+    const dir = path.join(this.root, 'plugins', name)
+    const pkgFile = path.join(dir, 'package.json')
+    let pkg = null
+    try {
+      if (fs.statSync(pkgFile).size > README_MAX_SIZE) throw new Error('package.json 过大')
+      pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'))
+    } catch (err) {
+      if (fs.existsSync(pkgFile)) return {...out, ok: false, reason: `package.json 无法读取：${err.message}`}
+    }
+
+    let readme = {install: false, packages: [], accepted: [], rejected: []}
+    for (const file of ['README.md', 'Readme.md', 'readme.md']) {
+      const abs = path.join(dir, file)
+      try {
+        if (!fs.existsSync(abs) || fs.statSync(abs).size > README_MAX_SIZE) continue
+        readme = parseReadmeInstall(fs.readFileSync(abs, 'utf8'), {
+          pluginName: name, packageName: typeof pkg?.name === 'string' ? pkg.name : '',
+        })
+        break
+      } catch {
+        // README 只是补充，读失败不影响 package.json 安装
+      }
+    }
+    out.readme = {accepted: readme.accepted, rejected: readme.rejected}
+    for (const line of readme.rejected) this.#log(`${name}：忽略 README 命令 ${line}`, 'warn')
+    const filter = `./plugins/${name}`
+
+    if (pkg) {
+      out.ran = true
+      this.#log(`${name}：安装 package.json 依赖`)
+      const res = await this.#spawnLogged(PNPM, [
+        '--filter', filter, 'install', '--no-frozen-lockfile', '--fail-if-no-match',
+      ], {cwd: this.root, shell: NEED_SHELL})
+      if (res.code !== 0) {
+        out.ok = false
+        out.reason = res.tail || `pnpm install 退出码 ${res.code}`
+      }
+    }
+
+    const declared = new Set([
+      ...Object.keys(pkg?.dependencies ?? {}),
+      ...Object.keys(pkg?.optionalDependencies ?? {}),
+      ...Object.keys(pkg?.devDependencies ?? {}),
+    ])
+    const supplements = readme.packages.filter((p) => !declared.has(packageBaseName(p)))
+    if (supplements.length && pkg) {
+      out.ran = true
+      this.#log(`${name}：README 补充依赖 ${supplements.join('、')}`)
+      const res = await this.#spawnLogged(PNPM, [
+        '--filter', filter, 'add', '--save-prod', ...supplements,
+      ], {cwd: this.root, shell: NEED_SHELL})
+      if (res.code !== 0) {
+        out.ok = false
+        out.reason = res.tail || `README 补充依赖安装失败（${res.code}）`
+      }
+    }
+    if (!pkg && readme.packages.length) {
+      out.ran = true
+      this.#log(`${name}：没有 package.json，README 依赖安装到 Yunzai 根`, 'warn')
+      const res = await this.#spawnLogged(PNPM, ['add', '-w', '--save-prod', ...readme.packages], {
+        cwd: this.root, shell: NEED_SHELL,
+      })
+      if (res.code !== 0) {
+        out.ok = false
+        out.reason = res.tail || `README 依赖安装失败（${res.code}）`
+      }
+    }
+    if (!out.ran) this.#log(`${name}：没有需要安装的依赖`)
+    return out
   }
 
   /**
@@ -1580,6 +1680,16 @@ function stamp(date = new Date()) {
   const p = (n) => String(n).padStart(2, '0')
   return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}`
     + `-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`
+}
+
+/** `pkg@1.2.3` → `pkg`；`@scope/pkg@1.2.3` → `@scope/pkg` */
+function packageBaseName(spec) {
+  const s = String(spec || '')
+  if (s.startsWith('@')) {
+    const at = s.indexOf('@', 1)
+    return at === -1 ? s : s.slice(0, at)
+  }
+  return s.split('@')[0]
 }
 
 function fmtSize(bytes) {

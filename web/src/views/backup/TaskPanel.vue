@@ -58,6 +58,13 @@ const restoreResult = computed(() => {
     restored: number
     backupDir: string
     deps: BackupDepsResult | null
+    pluginDeps?: Array<{
+      name: string
+      ran: boolean
+      ok: boolean
+      reason: string
+      readme: { accepted: string[]; rejected: string[] }
+    }>
     restartSkipped: boolean
   }
 })
@@ -152,6 +159,11 @@ watch(
         </div>
         <div v-if="restoreResult.backupDir">
           被覆盖的原文件已存进 <code>{{ restoreResult.backupDir }}</code>
+        </div>
+
+        <div v-for="p in restoreResult.pluginDeps ?? []" :key="`deps:${p.name}`" :class="{ 'is-warn': !p.ok }">
+          {{ p.name }}：{{ p.ok ? (p.ran ? '插件依赖安装完成' : '没有需要安装的依赖') : `依赖安装失败（${p.reason}）` }}
+          <template v-if="p.readme.rejected.length">；忽略 {{ p.readme.rejected.length }} 条不安全的 README 命令</template>
         </div>
 
         <!-- 依赖：还原写回的是 package.json，装不上重启就会满屏「缺少依赖」，得说清楚 -->

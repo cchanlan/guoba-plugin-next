@@ -169,7 +169,7 @@ function confirmStart() {
       `将写入 ${picked.value.length} 个条目`
       + (pickedPlugins.value.length ? `，并安装 ${pickedPlugins.value.length} 个插件。` : '。'),
       '同名文件会被覆盖，覆盖前原文件会挪到 data/guoba/backups/.restore-bak-<时间戳>/。',
-      autoNpmInstall.value ? '之后会在 Yunzai 根执行 pnpm install，视网络可能要几分钟。' : '',
+      autoNpmInstall.value ? '之后会逐插件安全安装依赖，最后在 Yunzai 根执行 pnpm install，可能需要几分钟。' : '',
       autoRestart.value ? '完成后会重启 Bot，机器人会短暂离线。' : '部分配置需要手动重启 Bot 才生效。',
     ].filter(Boolean).join(' '),
     okText: '开始还原',
@@ -359,8 +359,9 @@ onMounted(async () => {
           </a-checkbox>
         </div>
         <div class="g-bk-opts-tip">
-          Yunzai 是 pnpm workspace，在根执行一次就会把所有插件的依赖一起装上，视网络可能要几分钟。
-          依赖没装上时不会自动重启 —— 那样重启只会满屏报错。
+          每个插件落地后会先按 package.json 安装，并安全识别 README 里的依赖命令；脚本、管道、
+          全局安装等不安全命令只记录不执行。全部插件完成后还会在 Yunzai 根执行一次 pnpm install
+          收敛 workspace，视网络可能要几分钟。依赖没装齐时不会自动重启。
         </div>
 
         <div class="g-bk-foot">

@@ -1131,6 +1131,14 @@ export interface BackupTask {
         backupDir: string
         /** 没勾「还原后安装依赖」时是 null */
         deps: BackupDepsResult | null
+        /** 每个插件落地后立即执行的依赖安装结果 */
+        pluginDeps?: Array<{
+          name: string
+          ran: boolean
+          ok: boolean
+          reason: string
+          readme: { accepted: string[]; rejected: string[] }
+        }>
         /** 依赖没装上，所以没有按勾选去重启 */
         restartSkipped: boolean
       }
