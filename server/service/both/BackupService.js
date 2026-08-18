@@ -789,18 +789,24 @@ export default class BackupService extends Service {
     // 根配置 / 数据先落地，插件逐个处理时 package.json 才是包里的最终版本
     await this.#extractEntries(abs, rootTargets, bakDir, unavailable, result)
     const orderedPlugins = [...new Set([...plugins, ...pluginTargets.keys()])]
+    // 只有「请求安装、本地没装、包里也不是整份」的插件才会真 clone。拿全部插件去测速的话，
+    // 一台插件都装齐的机器只还原 config 也要白等几秒线路探测
+    const willClone = orderedPlugins.filter((name) =>
+      requestedPlugins.has(name) && !installedNow.has(name) && !byFiles.has(name))
     // 只拿本次真会尝试的 URL 测速：手选一个就别拿其它候选干扰线路判断
-    const cloneUrls = orderedPlugins.flatMap((name) => {
+    const cloneUrls = willClone.flatMap((name) => {
       const selected = cloneRemotes.get(name)
       return selected ? [selected] : this.#remoteCandidates(byName.get(name)).map((it) => it.url)
     })
-    const proxy = await this.#pickProxy(cloneUrls)
+    const proxy = cloneUrls.length ? await this.#pickProxy(cloneUrls) : ''
     for (const name of orderedPlugins) {
       this.#throwIfCanceled()
       const info = byName.get(name)
       let available = installedNow.has(name) || byFiles.has(name)
-      if (installedNow.has(name)) result.skipped.push({name, reason: '已安装，跳过 clone'})
-      else if (byFiles.has(name)) {
+      // 只对「请求安装」的插件记跳过原因：勾了配置的已装插件全列出来只会刷屏
+      if (installedNow.has(name)) {
+        if (requestedPlugins.has(name)) result.skipped.push({name, reason: '已安装，跳过 clone'})
+      } else if (byFiles.has(name)) {
         available = true
         this.#log(`${name}：备份时明确勾选了全部条目，按文件还原，不 clone`)
         result.copied.push(name)
