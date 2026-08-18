@@ -311,40 +311,55 @@ export default class BackupService extends Service {
   }
 
   remove(name) {
-    fs.rmSync(this.absOf(name), {force: true})
+    const clean = String(name ?? '').trim()
+    if (this.#task && !this.#task.done && path.basename(this.#task.file) === clean) {
+      throw new GuobaError('这个备份包正在使用，任务结束后再删除')
+    }
+    fs.rmSync(this.absOf(clean), {force: true})
     return true
   }
 
-  /** 上传外部备份包。multer 已经把文件落到 data/upload_tmp/，这里搬过去 */
+  /**
+   * 上传外部备份包。multer 已经把文件落到 data/upload_tmp/。
+   * 多文件上传按事务处理：任意一个包无效就回滚本批已经移入备份目录的包，避免接口报错但
+   * 实际留下半批结果；无论失败发生在 rename 前后，都尽力清理临时文件。
+   */
   async saveUpload(files) {
     const list = Array.isArray(files) ? files : (files ? [files] : [])
     if (!list.length) throw new GuobaError('没有收到文件')
     fs.mkdirSync(this.backupDir, {recursive: true})
     const saved = []
-    for (const file of list) {
-      const origin = file.originalname || file.name || 'backup.zip'
-      if (!/\.zip$/i.test(origin)) throw new GuobaError('只支持 .zip 备份包')
-      if (file.size > MAX_UPLOAD_SIZE) throw new GuobaError('备份包过大')
-      const name = this.#uniqueName(this.#safePackName(origin))
-      const dest = path.join(this.backupDir, name)
-      const tmp = file.path || file.filepath
-      try {
-        fs.renameSync(tmp, dest)
-      } catch {
-        // 跨设备 rename 会失败（upload_tmp 和备份目录可能不在一个挂载点）
-        fs.copyFileSync(tmp, dest)
-        fs.rmSync(tmp, {force: true})
+    const tempPaths = list.map((file) => file.path || file.filepath).filter(Boolean)
+    try {
+      for (const file of list) {
+        const origin = file.originalname || file.name || 'backup.zip'
+        if (!/\.zip$/i.test(origin)) throw new GuobaError('只支持 .zip 备份包')
+        if (file.size > MAX_UPLOAD_SIZE) throw new GuobaError('备份包过大')
+        const name = this.#uniqueName(this.#safePackName(origin))
+        const dest = path.join(this.backupDir, name)
+        const tmp = file.path || file.filepath
+        try {
+          fs.renameSync(tmp, dest)
+        } catch {
+          // 跨设备 rename 会失败（upload_tmp 和备份目录可能不在一个挂载点）
+          fs.copyFileSync(tmp, dest)
+          fs.rmSync(tmp, {force: true})
+        }
+        // 上传的包必须能读出 manifest，不然还原时才发现就晚了
+        try {
+          this.#readManifest(dest)
+        } catch (err) {
+          fs.rmSync(dest, {force: true})
+          throw new GuobaError(`不是有效的锅巴备份包：${err.message}`)
+        }
+        saved.push(name)
       }
-      // 上传的包必须能读出 manifest，不然还原时才发现就晚了
-      try {
-        this.#readManifest(dest)
-      } catch (err) {
-        fs.rmSync(dest, {force: true})
-        throw new GuobaError(`不是有效的锅巴备份包：${err.message}`)
-      }
-      saved.push(name)
+      return saved
+    } catch (err) {
+      for (const name of saved) fs.rmSync(path.join(this.backupDir, name), {force: true})
+      for (const tmp of tempPaths) fs.rmSync(tmp, {force: true})
+      throw err
     }
-    return saved
   }
 
   /** 上传文件名里可能有中文、空格、路径 —— 一律洗成安全形态 */
@@ -431,7 +446,7 @@ export default class BackupService extends Service {
     const picked = this.#normalizeKeys(keys)
     if (!picked.length) throw new GuobaError('没有勾选任何要备份的内容')
     this.#startTask('create')
-    const fileName = `guoba-backup-${stamp()}.zip`
+    const fileName = this.#uniqueName(`guoba-backup-${stamp()}.zip`)
     this.#task.file = fileName
     // 不 await：接口立刻返回，前端轮询 /backup/task 看进度
     this.#runCreate(picked, note, fileName).catch((err) => this.#failTask(err))
@@ -491,6 +506,7 @@ export default class BackupService extends Service {
       await zip.addBuffer(MANIFEST_NAME, JSON.stringify(manifest, null, 2))
 
       this.#task.phase = 'packing'
+      const failedFiles = []
       for (const f of files) {
         this.#throwIfCanceled()
         if (f.isDir) {
@@ -499,12 +515,16 @@ export default class BackupService extends Service {
           try {
             await zip.addFile(FILES_PREFIX + f.entryName, f.abs, {stat: f.stat})
           } catch (err) {
-            // 单个文件读失败（权限 / 正被写）不该毁掉整个备份
-            this.#log(`跳过 ${f.entryName}：${err.message}`, 'warn')
+            failedFiles.push({name: f.entryName, reason: err.message})
+            this.#log(`打包 ${f.entryName} 失败：${err.message}`, 'error')
           }
         }
         this.#task.current++
         this.#task.bytes += f.size
+      }
+      // 用户勾选的是备份承诺，不允许少文件的 ZIP 冒充成功；不完整包由 finally 删除
+      if (failedFiles.length) {
+        throw new GuobaError(`有 ${failedFiles.length} 个文件打包失败，已取消生成不完整备份`)
       }
       const res = await zip.finalize()
       ok = true
@@ -678,7 +698,7 @@ export default class BackupService extends Service {
   async #runRestore({abs, keys, plugins, autoNpmInstall, autoRestart}) {
     const manifest = this.#readManifest(abs)
     const result = {
-      cloned: [], copied: [], skipped: [], failed: [], pending: [], restored: 0, backupDir: '',
+      cloned: [], copied: [], skipped: [], failed: [], fileFailures: [], pending: [], restored: 0, backupDir: '',
       /** @type {object|null} 阶段三的结果，见 {@link #installDeps} */
       deps: null,
       /** 每个插件 clone / 解文件后立刻执行的依赖安装结果 */
@@ -797,7 +817,7 @@ export default class BackupService extends Service {
 
     // 某个插件安装失败、根 pnpm 失败或体检仍有缺包，都不该重启
     const pluginDepsFailed = result.pluginDeps.some((it) => !it.ok)
-    result.restartSkipped = autoRestart && (pluginDepsFailed || (!!result.deps
+    result.restartSkipped = autoRestart && (result.fileFailures.length > 0 || pluginDepsFailed || (!!result.deps
       && (!result.deps.ok || result.deps.missing.length > 0)))
     if (result.restartSkipped) {
       const cmd = result.deps?.addCmd || 'pnpm install'
@@ -842,6 +862,7 @@ export default class BackupService extends Service {
         // 旧文件已经挪走、但新文件解压/CRC 校验失败时必须立刻放回去；不然虽然
         // .restore-bak 里还能手工救，Bot 当前配置已经凭空消失了
         if (backup) this.#restoreExisting(backup, dest, rel)
+        result.fileFailures.push({name: rel, reason: err.message})
         this.#log(`还原 ${rel} 失败：${err.message}`, 'warn')
       }
       this.#task.current++
@@ -1686,7 +1707,7 @@ export default class BackupService extends Service {
       return
     }
     this.#startTask('create')
-    const fileName = `guoba-backup-auto-${stamp()}.zip`
+    const fileName = this.#uniqueName(`guoba-backup-auto-${stamp()}.zip`)
     this.#task.file = fileName
     this.#task.auto = true
     try {

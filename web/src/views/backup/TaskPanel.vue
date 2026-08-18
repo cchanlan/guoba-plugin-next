@@ -54,6 +54,7 @@ const restoreResult = computed(() => {
     copied: string[]
     skipped: Array<{ name: string; reason: string }>
     failed: Array<{ name: string; reason: string }>
+    fileFailures: Array<{ name: string; reason: string }>
     pending: string[]
     restored: number
     backupDir: string
@@ -152,6 +153,11 @@ watch(
         </div>
         <div v-if="restoreResult.failed.length" class="is-warn">
           安装失败：{{ restoreResult.failed.map((s) => `${s.name}（${s.reason}）`).join('；') }}
+        </div>
+        <div v-if="restoreResult.fileFailures?.length" class="is-warn">
+          文件还原失败（旧文件已尽力自动恢复）：{{
+            restoreResult.fileFailures.map((s) => `${s.name}（${s.reason}）`).join('；')
+          }}
         </div>
         <div v-if="restoreResult.pending.length" class="is-warn">
           {{ restoreResult.pending.join('、') }} 的文件暂存在

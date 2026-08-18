@@ -1125,6 +1125,8 @@ export interface BackupTask {
         copied: string[]
         skipped: Array<{ name: string; reason: string }>
         failed: Array<{ name: string; reason: string }>
+        /** 解压 / 写入失败的文件；有值时旧文件已尽力自动回滚 */
+        fileFailures: Array<{ name: string; reason: string }>
         pending: string[]
         restored: number
         /** 被覆盖的原文件挪去了哪儿（相对 Yunzai 根），空串表示没覆盖任何文件 */

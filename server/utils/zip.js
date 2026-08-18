@@ -634,8 +634,23 @@ export async function extractEntry(absPath, entry, destAbs) {
  */
 export function safeJoin(rootAbs, entryName) {
   const rel = normalizeEntryName(entryName).replace(/\/+$/, '')
-  if (!rel || rel.split('/').includes('..')) return null
+  const parts = rel.split('/')
+  if (!rel || parts.includes('..')) return null
   const abs = path.resolve(rootAbs, rel)
   if (abs !== rootAbs && !abs.startsWith(rootAbs + path.sep)) return null
+
+  // 字符串在根内不代表最终落盘也在根内：目标机可能已有 `config -> /etc` 这样的符号链接。
+  // createWriteStream 会直接跟随它，外部备份包就能借此写出 Yunzai。逐段 lstat，连最终文件本身
+  // 是 symlink 也拒绝。不存在的后续路径安全，因为调用方只会在已验证的父链下面 mkdir。
+  let current = path.resolve(rootAbs)
+  for (const part of parts) {
+    current = path.join(current, part)
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) return null
+    } catch (err) {
+      if (err?.code === 'ENOENT') break
+      return null
+    }
+  }
   return abs
 }
