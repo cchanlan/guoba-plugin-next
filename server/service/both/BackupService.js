@@ -780,14 +780,15 @@ export default class BackupService extends Service {
       this.#log('依赖没装齐，已跳过自动重启 —— 现在重启插件会大面积报缺依赖。'
         + `请手动执行 ${cmd}，成功后再重启 Bot`, 'error')
     }
-    // 日志要在结束任务之前打完：前端拿到 done 就停轮询，之后再 push 的日志看不见了
-    if (autoRestart && !result.restartSkipped) this.#log('即将重启 Bot')
+    // 重启模块先加载成功，再结束任务：前端拿到 done 就停轮询，之后的导入错误看不见
+    let doRestart
+    if (autoRestart && !result.restartSkipped) {
+      ({doRestart} = await import('../../../utils/botActions.js'))
+      this.#log('即将重启 Bot')
+    }
     this.#finishTask(result)
 
-    if (autoRestart && !result.restartSkipped) {
-      const {doRestart} = await import('../../../utils/botActions.js')
-      setTimeout(() => doRestart(), 1000)
-    }
+    if (doRestart) setTimeout(() => doRestart(), 1000)
   }
 
   /**
