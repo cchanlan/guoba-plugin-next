@@ -749,9 +749,13 @@ export default class BackupService extends Service {
       } else if (requestedPlugins.has(name)) {
         this.#task.phase = 'cloning'
         const res = await this.#clonePlugin(name, info, proxy)
-        if (res.ok) result.cloned.push(name)
-        else if (res.skipped) result.skipped.push({name, reason: res.reason})
-        else {
+        if (res.ok) {
+          available = true
+          result.cloned.push(name)
+        } else if (res.skipped) {
+          available = true
+          result.skipped.push({name, reason: res.reason})
+        } else {
           result.failed.push({name, reason: res.reason})
           unavailable.add(name)
           available = false
@@ -824,16 +828,20 @@ export default class BackupService extends Service {
         this.#log(`跳过越界路径：${entry.name}`, 'warn')
         continue
       }
+      let backup = ''
       try {
         if (entry.name.endsWith('/')) {
           fs.mkdirSync(dest, {recursive: true})
         } else {
-          if (!redirect) this.#backupExisting(dest, rel, bakDir)
+          if (!redirect) backup = this.#backupExisting(dest, rel, bakDir)
           await extractEntry(abs, entry, dest)
           if (!redirect && this.keepLocal.has(rel)) this.#keepLocalFields(dest, bakDir, rel)
           result.restored++
         }
       } catch (err) {
+        // 旧文件已经挪走、但新文件解压/CRC 校验失败时必须立刻放回去；不然虽然
+        // .restore-bak 里还能手工救，Bot 当前配置已经凭空消失了
+        if (backup) this.#restoreExisting(backup, dest, rel)
         this.#log(`还原 ${rel} 失败：${err.message}`, 'warn')
       }
       this.#task.current++
@@ -907,19 +915,37 @@ export default class BackupService extends Service {
   }
 
   /** 覆盖之前把原文件挪走。同一个相对路径在 bakDir 里保持原样，方便手工找回 */
-  #backupExisting(dest, rel, bakDir) {    let st
+  #backupExisting(dest, rel, bakDir) {
+    let st
     try {
       st = fs.lstatSync(dest)
     } catch {
-      return
+      return ''
     }
-    if (!st.isFile()) return
+    if (!st.isFile()) return ''
     const bak = path.join(bakDir, rel)
     fs.mkdirSync(path.dirname(bak), {recursive: true})
     try {
       fs.renameSync(dest, bak)
     } catch {
       fs.copyFileSync(dest, bak)
+    }
+    return bak
+  }
+
+  /** 新文件写失败时把刚才挪走的旧文件放回原位 */
+  #restoreExisting(bak, dest, rel) {
+    try {
+      fs.mkdirSync(path.dirname(dest), {recursive: true})
+      fs.rmSync(dest, {force: true})
+      try {
+        fs.renameSync(bak, dest)
+      } catch {
+        fs.copyFileSync(bak, dest)
+      }
+      this.#log(`${rel}：新文件写入失败，已恢复原文件`, 'warn')
+    } catch (err) {
+      this.#log(`${rel}：原文件自动恢复失败，请从 ${path.relative(this.root, bak)} 手动取回：${err.message}`, 'error')
     }
   }
 
