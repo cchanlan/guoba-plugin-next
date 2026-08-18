@@ -179,8 +179,9 @@ function remoteOptions(p: NonNullable<typeof manifest.value>['plugins'][number])
   ]
 }
 
+/** 未安装插件直接显示来源选择器；未勾选安装时禁用，避免用户不知道选项藏在哪儿 */
 function canPickRemote(p: NonNullable<typeof manifest.value>['plugins'][number]) {
-  return !p.installed && pickedPlugins.value.includes(p.name) && remotesOf(p).length > 0
+  return !p.installed && remotesOf(p).length > 0
 }
 
 function confirmStart() {
@@ -363,7 +364,7 @@ onMounted(async () => {
             </a-checkbox>
             <a-tag v-if="p.installed" color="green">已安装</a-tag>
             <a-tag v-else-if="p.allowed === false" color="red">不在白名单</a-tag>
-            <a-tag v-else-if="!p.remote && !p.noGit" color="orange">没有仓库地址</a-tag>
+            <a-tag v-else-if="!remotesOf(p).length && !p.noGit" color="orange">没有仓库地址</a-tag>
             <a-tag v-else color="blue">待安装</a-tag>
             <!-- 备份时勾了它的文件才默认勾上，否则每次还原都要手动取消一遍 -->
             <a-tag v-if="p.keys?.length" color="cyan">包里有文件</a-tag>
@@ -377,11 +378,12 @@ onMounted(async () => {
             </span>
             <div v-if="canPickRemote(p)" class="g-bk-remote-picker">
               <span class="g-bk-remote-label">克隆来源</span>
+              <span class="g-bk-remote-count">{{ remotesOf(p).length }} 个地址</span>
               <a-select
                 v-model:value="cloneRemotes[p.name]"
                 size="small"
                 class="g-bk-remote-select"
-                :disabled="running"
+                :disabled="running || !pickedPlugins.includes(p.name)"
                 :options="remoteOptions(p)"
                 option-label-prop="label"
               />
@@ -534,6 +536,7 @@ onMounted(async () => {
 }
 
 .g-bk-remote-label,
+.g-bk-remote-count,
 .g-bk-remote-tip {
   flex-shrink: 0;
   font-size: 12px;
