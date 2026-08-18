@@ -1042,6 +1042,8 @@ export interface BackupManifestPlugin {
   remote: string
   /** 新包有全部候选；旧包没有这个字段 */
   remotes?: Array<{ name: string; url: string; allowed?: boolean }>
+  /** 新包明确记录是否勾选了插件全部条目；旧包缺失时按 false 处理 */
+  whole?: boolean
   branch: string
   commit: string
   dirty: boolean

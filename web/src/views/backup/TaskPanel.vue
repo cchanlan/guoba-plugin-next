@@ -135,7 +135,7 @@ watch(
       <template #message>还原完成：写入 {{ restoreResult.restored }} 个文件</template>
       <template #description>
         <div v-if="restoreResult.copied?.length">
-          按文件直接还原（包里是整个插件，没走 clone）：{{ restoreResult.copied.join('、') }}
+          按文件直接还原（备份时明确勾选了插件全部条目，没走 clone）：{{ restoreResult.copied.join('、') }}
         </div>
         <div v-if="restoreResult.cloned.length">
           clone 装上的：{{ restoreResult.cloned.join('、') }}

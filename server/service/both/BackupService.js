@@ -540,20 +540,25 @@ export default class BackupService extends Service {
       for (const entry of p.entries) take(entry, `plugin:${p.name}`, `plugins/${p.name}`)
     }
 
-    const plugins = scanned.plugins.map((p) => ({
-      name: p.name,
-      git: !!p.git,
-      noGit: !!p.noGit,
-      remote: sanitizeRemote(p.remote || ''),
-      // 新包记录所有可 clone remote；保留上面的 remote 单值兼容旧锅巴
-      remotes: (p.remotes ?? []).map((it) => ({
-        name: String(it.name || ''), url: sanitizeRemote(it.url || ''),
-      })).filter((it) => it.url),
-      branch: p.branch || '',
-      commit: p.commit || '',
-      dirty: !!p.dirty,
-      keys: p.entries.filter((e) => wanted.has(e.key)).map((e) => e.key),
-    }))
+    const plugins = scanned.plugins.map((p) => {
+      const keys = p.entries.filter((e) => wanted.has(e.key)).map((e) => e.key)
+      return {
+        name: p.name,
+        git: !!p.git,
+        noGit: !!p.noGit,
+        remote: sanitizeRemote(p.remote || ''),
+        // 新包记录所有可 clone remote；保留上面的 remote 单值兼容旧锅巴
+        remotes: (p.remotes ?? []).map((it) => ({
+          name: String(it.name || ''), url: sanitizeRemote(it.url || ''),
+        })).filter((it) => it.url),
+        branch: p.branch || '',
+        commit: p.commit || '',
+        dirty: !!p.dirty,
+        keys,
+        // 必须明确记账，不能靠包里出现 package.json 猜：用户完全可以只手动勾这一个文件
+        whole: p.entries.length > 0 && keys.length === p.entries.length,
+      }
+    })
     return {items, plugins}
   }
 
@@ -686,7 +691,7 @@ export default class BackupService extends Service {
         result.skipped.push({name, reason: '已安装，跳过'})
         continue
       }
-      if (this.#targetsHaveWholePlugin(targets, name)) byFiles.push(name)
+      if (byName.get(name)?.whole === true) byFiles.push(name)
       else needClone.push(name)
     }
 
@@ -806,17 +811,6 @@ export default class BackupService extends Service {
     this.#finishTask(result)
 
     if (doRestart) setTimeout(() => doRestart(), 1000)
-  }
-
-  /**
-   * 要解的文件里是不是一份完整插件（而不是只有配置数据）。
-   *
-   * 判据是插件的入口：`index.js` / `package.json` 是每个 Yunzai 插件都有、且一定被 git
-   * 跟踪的文件 —— 它们在待解列表里，只可能是备份时把整个插件目录都勾上了。
-   */
-  #targetsHaveWholePlugin(targets, name) {
-    const base = `${FILES_PREFIX}plugins/${name}/`
-    return targets.some((e) => e.name === `${base}index.js` || e.name === `${base}package.json`)
   }
 
   /**
