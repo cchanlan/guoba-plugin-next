@@ -7,7 +7,7 @@
  */
 import { computed, nextTick, ref, watch } from 'vue'
 import GIcon from '@/components/GIcon.vue'
-import { backupDownloadUrl, type BackupLog, type BackupTask } from '@/api'
+import { backupDownloadUrl, type BackupDepsResult, type BackupLog, type BackupTask } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { formatBytes } from '@/utils/format'
 import { PHASE_TEXT } from './types'
@@ -57,8 +57,13 @@ const restoreResult = computed(() => {
     pending: string[]
     restored: number
     backupDir: string
+    deps: BackupDepsResult | null
+    restartSkipped: boolean
   }
 })
+
+/** 依赖安装结果。没勾「还原后安装依赖」时是 null，卡片里那几段就整段不显示 */
+const deps = computed(() => restoreResult.value?.deps ?? null)
 
 const statusType = computed(() => {
   const t = props.task
@@ -148,7 +153,26 @@ watch(
         <div v-if="restoreResult.backupDir">
           被覆盖的原文件已存进 <code>{{ restoreResult.backupDir }}</code>
         </div>
-        <div>部分插件的配置需要重启 Bot 才会生效。</div>
+
+        <!-- 依赖：还原写回的是 package.json，装不上重启就会满屏「缺少依赖」，得说清楚 -->
+        <div v-if="deps && !deps.ran" class="is-warn">
+          {{ deps.reason }}，依赖没装上。Yunzai 用了 pnpm 专有的依赖写法，请先装 pnpm
+          （<code>npm i -g pnpm</code>），再到 Yunzai 根目录执行 <code>pnpm install</code>。
+        </div>
+        <div v-else-if="deps && !deps.ok" class="is-warn">
+          依赖安装失败：{{ deps.reason }}。请到 Yunzai 根目录手动执行
+          <code>pnpm install</code>，成功后再重启 Bot。
+        </div>
+        <div v-else-if="deps && !deps.missing?.length">依赖已安装（在 Yunzai 根执行了 pnpm install）。</div>
+        <div v-if="deps?.missing?.length" class="is-warn">
+          还有 {{ deps.missing.length }} 个声明过的依赖找不到：{{
+            deps.missing.map((m) => `${m.name}（${m.from}）`).join('、')
+          }}。到 Yunzai 根目录执行 <code>{{ deps.addCmd }}</code>
+        </div>
+        <div v-if="restoreResult.restartSkipped" class="is-warn">
+          依赖没装上，已跳过自动重启 —— 现在重启插件会大面积报缺依赖。
+        </div>
+        <div v-else>部分插件的配置需要重启 Bot 才会生效。</div>
       </template>
     </a-alert>
 

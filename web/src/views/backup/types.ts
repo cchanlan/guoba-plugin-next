@@ -77,6 +77,7 @@ export const PHASE_TEXT: Record<string, string> = {
   packing: '打包中',
   cloning: '安装插件',
   extracting: '写入文件',
+  installing: '安装依赖',
   done: '已完成',
   error: '出错了',
   canceled: '已取消',

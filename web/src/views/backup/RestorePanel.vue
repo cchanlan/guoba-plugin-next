@@ -163,8 +163,9 @@ function confirmStart() {
       `将写入 ${picked.value.length} 个条目`
       + (pickedPlugins.value.length ? `，并安装 ${pickedPlugins.value.length} 个插件。` : '。'),
       '同名文件会被覆盖，覆盖前原文件会挪到 data/guoba/backups/.restore-bak-<时间戳>/。',
+      autoNpmInstall.value ? '之后会在 Yunzai 根执行 pnpm install，视网络可能要几分钟。' : '',
       autoRestart.value ? '完成后会重启 Bot，机器人会短暂离线。' : '部分配置需要手动重启 Bot 才生效。',
-    ].join(' '),
+    ].filter(Boolean).join(' '),
     okText: '开始还原',
     okType: 'danger',
     cancelText: '取消',
@@ -220,6 +221,11 @@ onMounted(async () => {
       <p>
         既没装上、包里也只有配置数据的插件，它的文件会暂存到 <code>.pending-restore/</code>，
         等插件装好后再还原一次即可，不会丢。
+      </p>
+      <p>
+        备份包里带的是 <code>package.json</code> 而不是 <code>node_modules</code>，所以还原完
+        <b>一定要装依赖</b>（默认已勾上）—— 少了这一步，重启后插件会满屏报
+        <code>Cannot find package 'xxx'</code>。
       </p>
       <p>
         <b>备份包内容是完整的</b>（Redis 配置、各账号 ck、黑白名单全都在），但还原时有几项
@@ -327,11 +333,15 @@ onMounted(async () => {
 
         <div class="g-bk-opts">
           <a-checkbox v-model:checked="autoNpmInstall" :disabled="running">
-            新装插件后执行 pnpm install
+            还原后安装依赖（在 Yunzai 根执行 pnpm install）
           </a-checkbox>
           <a-checkbox v-model:checked="autoRestart" :disabled="running">
             完成后重启 Bot（会短暂离线）
           </a-checkbox>
+        </div>
+        <div class="g-bk-opts-tip">
+          Yunzai 是 pnpm workspace，在根执行一次就会把所有插件的依赖一起装上，视网络可能要几分钟。
+          依赖没装上时不会自动重启 —— 那样重启只会满屏报错。
         </div>
 
         <div class="g-bk-foot">
@@ -458,6 +468,12 @@ onMounted(async () => {
   flex-wrap: wrap;
   gap: 16px;
   margin-top: 14px;
+}
+
+.g-bk-opts-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--g-text-dim);
 }
 
 .g-bk-foot {

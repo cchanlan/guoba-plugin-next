@@ -1072,11 +1072,32 @@ export interface BackupInspect {
   installed: string[]
 }
 
+/** 还原完成后的依赖安装结果 */
+export interface BackupDepsResult {
+  /** pnpm install 真的跑了（找不到 pnpm 就是 false） */
+  ran: boolean
+  ok: boolean
+  /** 没成功的原因 */
+  reason: string
+  /** 装完仍然解析不到的：声明在谁的 package.json 里（from 是「根」或插件名） */
+  missing: Array<{ name: string; from: string }>
+  /** 一条能直接复制的 `pnpm add ... -w` */
+  addCmd: string
+}
+
 /** 备份 / 还原任务。同一时刻只会有一个 */
 export interface BackupTask {
   id: string
   type: 'create' | 'restore'
-  phase: 'collecting' | 'packing' | 'cloning' | 'extracting' | 'done' | 'error' | 'canceled'
+  phase:
+    | 'collecting'
+    | 'packing'
+    | 'cloning'
+    | 'extracting'
+    | 'installing'
+    | 'done'
+    | 'error'
+    | 'canceled'
   file: string
   current: number
   total: number
@@ -1102,6 +1123,10 @@ export interface BackupTask {
         restored: number
         /** 被覆盖的原文件挪去了哪儿（相对 Yunzai 根），空串表示没覆盖任何文件 */
         backupDir: string
+        /** 没勾「还原后安装依赖」时是 null */
+        deps: BackupDepsResult | null
+        /** 依赖没装上，所以没有按勾选去重启 */
+        restartSkipped: boolean
       }
     | null
 }

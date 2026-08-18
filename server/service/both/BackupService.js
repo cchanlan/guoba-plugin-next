@@ -36,6 +36,24 @@ const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
 const PACK_NAME_RE = /^[\w.-]+\.zip$/i
 /** 插件目录名规则：不许有分隔符和相对路径 */
 const PLUGIN_NAME_RE = /^[\w.-]+$/
+/**
+ * npm 包名规则（普通包 / @scope/pkg）。
+ *
+ * 每段必须以字母或数字开头，不能让 `--filter` / `-w` / `..` 这种名字混进给用户复制的
+ * `pnpm add ... -w` —— 不然 pnpm 会把它当命令行选项，而不是包名。
+ */
+const DEP_NAME_RE = /^(?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/i
+
+/** 装依赖用的包管理器。Yunzai 是 pnpm workspace，只能是 pnpm，见 {@link BackupService.#installDeps} */
+const PNPM = 'pnpm'
+/**
+ * 起 pnpm 要不要过 shell。
+ *
+ * Windows 上 pnpm 是 `pnpm.cmd`，而 Node 18.20 / 20.12 起 spawn 一个 `.cmd` 不过 shell 会
+ * 直接抛 `EINVAL`（CVE-2024-27980 的修复）—— 那边必须过 shell，否则依赖安装一次都成功不了。
+ * 传给 pnpm 的参数全是本文件里硬编码的常量，没有任何用户输入拼进命令行，过 shell 是安全的。
+ */
+const NEED_SHELL = process.platform === 'win32'
 
 /**
  * GitHub 反代候选（还原前会连直连一起测速，挑最快的）。
@@ -106,7 +124,7 @@ const JOB_KEY = Symbol.for('guoba.backup.job')
  * 搬家场景：把 Bot 的配置、数据、各插件的配置打成一个 zip 带走，到新机器上传同一个包就能
  * 复原 —— 包括**按清单把插件重新 clone 下来**。
  *
- * 三个设计要点：
+ * 四个设计要点：
  *
  * 1. **备份什么由 git 决定，不写死目录名**。`.git` 本身不打包（本机 22 个插件的 .git 合计
  *    1.9 G），只记仓库清单（remote / branch / commit），还原时按清单 clone。仓库自带的素材
@@ -115,6 +133,8 @@ const JOB_KEY = Symbol.for('guoba.backup.job')
  *    不需要任何映射表，手工用解压软件打开也能看懂。
  * 3. **还原前先备份**。被覆盖的原文件挪进 `data/guoba/backups/.restore-bak-<时间戳>/`，
  *    还原错了能捞回来。插件 clone 失败时它的文件也不丢，暂存到 `.pending-restore/`。
+ * 4. **还原完要装依赖**。包里带的是 `package.json`，不是 `node_modules` —— 少了这一步，
+ *    重启后 Yunzai 会满屏报 `Cannot find package`。见 {@link #installDeps}。
  */
 export default class BackupService extends Service {
 
@@ -588,15 +608,20 @@ export default class BackupService extends Service {
   /**
    * 还原。后台跑，进度靠 {@link taskStatus} 轮询。
    *
-   * 顺序很重要：**先 clone 插件，再解文件**。反过来的话插件目录已经有文件了，
-   * `git clone` 到非空目录会直接失败。
+   * 三个阶段，顺序都有讲究：
+   *
+   * 1. **clone 缺的插件**。得在解文件之前 —— 插件目录已经有文件了，`git clone` 到非空目录
+   *    会直接失败。
+   * 2. **解文件**，原路写回。
+   * 3. **装依赖**（`autoNpmInstall`）。必须在解文件之后：`package.json` 是这一步才落地的，
+   *    早装等于按本机旧的那份装，白装。见 {@link #installDeps}。
    *
    * @param {object} opts
    * @param {string} opts.file 备份包名
    * @param {string[]} opts.keys 要还原的条目 key
    * @param {string[]} [opts.plugins] 要 clone 的插件名（本地没装的那些）
-   * @param {boolean} [opts.autoNpmInstall] clone 完是否顺手装依赖
-   * @param {boolean} [opts.autoRestart] 全部完成后是否重启 Bot
+   * @param {boolean} [opts.autoNpmInstall] 还原完是否在 Yunzai 根跑一次 `pnpm install`
+   * @param {boolean} [opts.autoRestart] 全部完成后是否重启 Bot（依赖没装上时会跳过）
    */
   async restore({file, keys, plugins = [], autoNpmInstall = false, autoRestart = false} = {}) {
     const abs = this.absOf(file)
@@ -612,7 +637,13 @@ export default class BackupService extends Service {
 
   async #runRestore({abs, keys, plugins, autoNpmInstall, autoRestart}) {
     const manifest = this.#readManifest(abs)
-    const result = {cloned: [], copied: [], skipped: [], failed: [], pending: [], restored: 0, backupDir: ''}
+    const result = {
+      cloned: [], copied: [], skipped: [], failed: [], pending: [], restored: 0, backupDir: '',
+      /** @type {object|null} 阶段三的结果，见 {@link #installDeps} */
+      deps: null,
+      /** 依赖没装上时不重启，见 {@link #runRestore} 末尾 */
+      restartSkipped: false,
+    }
 
     // 先把「要解哪些文件」算出来 —— 阶段一要靠它判断哪些插件压根不用 clone
     const prefixes = this.#restorePrefixes(manifest, keys)
@@ -657,8 +688,9 @@ export default class BackupService extends Service {
         this.#throwIfCanceled()
         const res = await this.#clonePlugin(name, byName.get(name), proxy)
         if (res.ok) {
+          // 依赖不在这儿装：现在磁盘上的 package.json 还是本机旧的那份，阶段二才会写回
+          // 备份里的。统一等阶段三在根目录一次装齐，见 {@link #installDeps}
           result.cloned.push(name)
-          if (autoNpmInstall) await this.#npmInstall(name)
         } else if (res.skipped) {
           result.skipped.push({name, reason: res.reason})
         } else {
@@ -731,10 +763,28 @@ export default class BackupService extends Service {
     }
     this.#log(`还原完成：${result.restored} 个文件`
       + (result.cloned.length ? `，新装插件 ${result.cloned.length} 个` : ''))
+
+    // ---- 阶段三：装依赖 ----
+    // 必须在阶段二之后：package.json 是刚才解出来的，现在才是备份里那份
+    if (autoNpmInstall) {
+      this.#task.phase = 'installing'
+      result.deps = await this.#installDeps()
+      this.#throwIfCanceled()
+    }
+
+    // pnpm 失败、或者体检仍有缺包，都不该重启：进去就是满屏「缺少依赖」
+    result.restartSkipped = autoRestart && !!result.deps
+      && (!result.deps.ok || result.deps.missing.length > 0)
+    if (result.restartSkipped) {
+      const cmd = result.deps.addCmd || 'pnpm install'
+      this.#log('依赖没装齐，已跳过自动重启 —— 现在重启插件会大面积报缺依赖。'
+        + `请手动执行 ${cmd}，成功后再重启 Bot`, 'error')
+    }
+    // 日志要在结束任务之前打完：前端拿到 done 就停轮询，之后再 push 的日志看不见了
+    if (autoRestart && !result.restartSkipped) this.#log('即将重启 Bot')
     this.#finishTask(result)
 
-    if (autoRestart) {
-      this.#log('即将重启 Bot')
+    if (autoRestart && !result.restartSkipped) {
       const {doRestart} = await import('../../../utils/botActions.js')
       setTimeout(() => doRestart(), 1000)
     }
@@ -1063,13 +1113,120 @@ export default class BackupService extends Service {
     return `${proxy}${repoUrl}`
   }
 
-  /** 给新装的插件装依赖。装不上只警告 —— 大多数插件没有自己的依赖 */
-  async #npmInstall(name) {
-    const cwd = path.join(this.root, 'plugins', name)
-    if (!fs.existsSync(path.join(cwd, 'package.json'))) return
-    this.#log(`${name}：安装依赖`)
-    const res = await this.#spawnLogged('pnpm', ['install'], {cwd})
-    if (res.code !== 0) this.#log(`${name}：依赖安装失败，请手动执行 pnpm install`, 'warn')
+  /**
+   * 装依赖：在 **Yunzai 根**跑一次 `pnpm install`。
+   *
+   * 为什么是根目录、而不是逐个插件目录：Yunzai 是 pnpm workspace（`pnpm-workspace.yaml`
+   * 里 `packages: ['plugins/**']`），根跑一次就把根和所有插件的依赖一次装齐。逐个插件跑
+   * 反而是错的 —— pnpm 在 workspace 子目录里执行 install 装的还是整个 workspace，N 个插件
+   * 就把整个 workspace 装 N 遍。
+   *
+   * 为什么非要装：还原写回的是 `package.json`（用户加过依赖，所以它一定是 modified、
+   * 一定在包里），声明有了但 `node_modules` 里没有。不装就重启，Yunzai 加载插件时会满屏
+   * 报 `Cannot find package 'cheerio'` 之类 —— 这个功能就是为了修那份日志。
+   *
+   * @return {Promise<{ran: boolean, ok: boolean, reason: string, missing: object[], addCmd: string}>}
+   */
+  async #installDeps() {
+    const out = {ran: false, ok: false, reason: '', missing: [], addCmd: ''}
+    if (this.#canceled) {
+      out.reason = '已取消'
+      return out
+    }
+    // 找不到 pnpm 就明确报出来，**不回落 npm**：根 package.json 里有 `link:lib/modules/...`
+    // 这类 pnpm 专有协议的依赖，还有 pnpm.patchedDependencies（log4js / streamroller 两个
+    // 补丁）—— npm 不认，装出来的 node_modules 是坏的，帮倒忙比不帮更糟
+    const probe = await this.#spawnLogged(PNPM, ['--version'], {cwd: this.root, shell: NEED_SHELL})
+    if (probe.code !== 0) {
+      out.reason = '没找到 pnpm'
+      this.#log('没找到 pnpm，依赖装不了。请先装上（npm i -g pnpm）再手动执行 pnpm install。'
+        + 'Yunzai 用了 pnpm 专有的 link: 依赖和依赖补丁，换 npm 装会装坏，所以这里不代劳', 'error')
+      return out
+    }
+
+    out.ran = true
+    this.#log('在 Yunzai 根执行 pnpm install（workspace 会把所有插件的依赖一起装上）')
+    // --no-frozen-lockfile 不能省：pnpm 在 CI=true 的环境里默认 frozen，而还原进来的
+    // package.json 跟本机 lockfile 常常不匹配（跨平台还原时 sharp / canvas 那些带二进制的
+    // optional 依赖也不一样），不加这个 flag 会直接失败
+    const res = await this.#spawnLogged(PNPM, ['install', '--no-frozen-lockfile'], {
+      cwd: this.root, shell: NEED_SHELL,
+    })
+    if (res.code !== 0) {
+      out.reason = res.tail || `pnpm install 退出码 ${res.code}`
+      this.#log(`依赖安装失败：${out.reason}`, 'error')
+      this.#log('请到 Yunzai 根目录手动执行 pnpm install，成功后再重启 Bot', 'warn')
+      return out
+    }
+    out.ok = true
+    this.#log('依赖安装完成')
+
+    // 装完体检一遍：install 成功也可能有漏网的（谁的 package.json 都没声明、原先靠
+    // node_modules 里现成的包在用），这些只能靠用户自己 pnpm add
+    const missing = this.#checkDeps()
+    if (missing.length) {
+      out.missing = missing
+      out.addCmd = `pnpm add ${[...new Set(missing.map((m) => m.name))].join(' ')} -w`
+      this.#log(`还有 ${missing.length} 个声明过的依赖找不到：`
+        + missing.map((m) => `${m.name}（${m.from}）`).join('、'), 'warn')
+      this.#log(`到 Yunzai 根目录执行：${out.addCmd}`, 'warn')
+    } else {
+      this.#log('依赖体检通过，没有缺失')
+    }
+    return out
+  }
+
+  /**
+   * 依赖体检：谁的 `package.json` 声明了、`node_modules` 里却找不到。
+   *
+   * **用目录存在性判断，不用 `require.resolve`** —— ESM-only 的包（node-fetch v3、chalk 5）
+   * `exports` 里只有 import 条件，`require.resolve` 会抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`，
+   * 把装好的包误判成缺失。查目录对 pnpm 的布局同样有效：pnpm 会在每个 workspace 包下建
+   * `node_modules/<dep>` 符号链接，`link:` 协议的依赖也是这么落地的。
+   *
+   * @return {object[]} `[{name, from}]`，from 是声明它的地方（`根` 或插件名）
+   */
+  #checkDeps() {
+    const targets = [{from: '根', dir: this.root}]
+    const pluginsDir = path.join(this.root, 'plugins')
+    try {
+      for (const it of fs.readdirSync(pluginsDir, {withFileTypes: true})) {
+        if (!it.isDirectory() || !PLUGIN_NAME_RE.test(it.name)) continue
+        targets.push({from: it.name, dir: path.join(pluginsDir, it.name)})
+      }
+    } catch {
+      // 没有 plugins 目录就只查根
+    }
+
+    const missing = []
+    for (const {from, dir} of targets) {
+      let pkg
+      try {
+        pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
+      } catch {
+        // 没有 package.json（大多数单文件插件）或者读不出来 —— 没声明就没什么可查的
+        continue
+      }
+      for (const name of Object.keys(pkg?.dependencies ?? {})) {
+        // package.json 正常情况下不会有非法包名；外部包可能手改过，体检不能把它拼进命令
+        if (!DEP_NAME_RE.test(name)) continue
+        if (!this.#hasModule(dir, name)) missing.push({name, from})
+      }
+    }
+    return missing
+  }
+
+  /** 从 dir 往上逐级找 `node_modules/<name>`，找到 Yunzai 根为止（就是 Node 的解析算法） */
+  #hasModule(dir, name) {
+    let cur = dir
+    for (;;) {
+      if (fs.existsSync(path.join(cur, 'node_modules', name))) return true
+      if (cur === this.root) return false
+      const up = path.dirname(cur)
+      // 已经到文件系统根、或者走出 Yunzai 了就停
+      if (up === cur || !up.startsWith(this.root)) return false
+      cur = up
+    }
   }
 
   /**
@@ -1077,6 +1234,9 @@ export default class BackupService extends Service {
    *
    * 进程会登记到 {@link #running}，取消时能被 {@link #killRunning} 杀掉 —— 不然一个大仓库
    * 的 clone 会把取消请求晾在那儿好几分钟。
+   *
+   * `opts` 直接透给 `spawn`，所以 `shell: true` 也是从这儿传（Windows 上跑 pnpm 必须过
+   * shell，见 {@link NEED_SHELL}）。过 shell 时参数会被 shell 再解析一遍，只能传常量。
    *
    * @return {Promise<{code: number, tail: string}>}
    */
