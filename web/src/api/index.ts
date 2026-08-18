@@ -1156,6 +1156,10 @@ export interface BackupSettings {
   cron: string
   keep: number
   keys: string[]
+  /** node-schedule 当前确实挂着，不只是配置里 enable=true */
+  active?: boolean
+  /** 下一次执行时间（ISO），未启用或注册失败时为空 */
+  nextAt?: string
 }
 
 /** 扫描可备份的条目。force 跳过后端 60 秒缓存 */

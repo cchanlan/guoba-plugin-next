@@ -22,6 +22,8 @@ const isMobile = computed(() => appStore.isMobile)
 const enable = ref(false)
 const cron = ref('0 0 4 * * ?')
 const keep = ref(5)
+const active = ref(false)
+const nextAt = ref('')
 /** 'recommend' = 留空由后端按推荐项备份；'custom' = 用下面勾的 keys */
 const mode = ref<'recommend' | 'custom'>('recommend')
 const keys = ref<string[]>([])
@@ -61,6 +63,8 @@ async function load() {
     enable.value = s.enable
     cron.value = s.cron || '0 0 4 * * ?'
     keep.value = s.keep || 5
+    active.value = !!s.active
+    nextAt.value = s.nextAt || ''
     keys.value = s.keys ?? []
     mode.value = keys.value.length ? 'custom' : 'recommend'
     if (mode.value === 'custom') await loadScan()
@@ -103,6 +107,8 @@ async function save() {
     enable.value = s.enable
     cron.value = s.cron
     keep.value = s.keep
+    active.value = !!s.active
+    nextAt.value = s.nextAt || ''
     keys.value = s.keys ?? []
     message.success(enable.value ? '已保存，定时备份已启用' : '已保存，定时备份已关闭')
   } catch {
@@ -133,6 +139,11 @@ onMounted(load)
       >
         <a-form-item label="启用">
           <a-switch v-model:checked="enable" />
+          <a-tag v-if="enable && active" color="green">已挂载</a-tag>
+          <a-tag v-else-if="enable" color="red">未挂载</a-tag>
+          <span v-if="enable && active && nextAt" class="g-bk-hint">
+            下次执行：{{ new Date(nextAt).toLocaleString() }}
+          </span>
           <span class="g-bk-hint">关掉后已挂的定时任务会立即撤销</span>
         </a-form-item>
 

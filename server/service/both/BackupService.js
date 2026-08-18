@@ -127,6 +127,8 @@ const GUOBA_KEEP_FIELDS = [
  * node-schedule 里。把 job 挂到 process 上，新实例构造时看到旧的先取消。同 TermService。
  */
 const JOB_KEY = Symbol.for('guoba.backup.job')
+/** 跨热重载实例共享的注册代次，防止旧实例动态 import 晚回来又挂一个 job */
+const JOB_GENERATION_KEY = Symbol.for('guoba.backup.job-generation')
 
 /**
  * 备份与还原。
@@ -186,6 +188,11 @@ export default class BackupService extends Service {
   #running = new Set()
   /** @type {{prefix: string, at: number}|null} 上次测速选中的反代，见 {@link PROXY_TTL} */
   #proxyCache = null
+  /**
+   * 调度注册代次。applySchedule 要动态 import，热重载 / 连点保存时旧调用可能比新调用晚返回；
+   * 只允许最后一代真正挂 job。
+   */
+  #scheduleGeneration = 0
 
   // ------------------------------------------------------------------ 扫描
 
@@ -503,8 +510,10 @@ export default class BackupService extends Service {
       ok = true
       this.#task.packSize = res.bytes
       this.#log(`备份完成：${fileName}（${fmtSize(res.bytes)}）`)
-      this.#finishTask({file: fileName, size: res.bytes, files: files.length})
+      // 清理日志也属于这次任务：先清理再标 done，否则前端看到 done 就停轮询，日志永远看不到；
+      // 也避免下一次任务在旧包还没删完时就进来
       await this.#applyRetention()
+      this.#finishTask({file: fileName, size: res.bytes, files: files.length})
     } finally {
       if (!ok) {
         await zip.abort().catch(() => {})
@@ -1525,26 +1534,44 @@ export default class BackupService extends Service {
   // ------------------------------------------------------------------ 设置 / 定时
 
   getSettings() {
+    const job = process[JOB_KEY]
     return {
       enable: !!cfg.get('backup.enable'),
       cron: cfg.get('backup.cron') || '0 0 4 * * ?',
       keep: Number(cfg.get('backup.keep') ?? 5),
       keys: cfg.get('backup.keys') || [],
+      /** 配置开着不等于真挂上了（node-schedule 缺失 / cron 无效都会失败） */
+      active: !!job,
+      nextAt: job?.nextInvocation?.()?.toISOString?.() || '',
     }
   }
 
   async saveSettings(data = {}) {
     const keep = Number(data.keep)
     const cron = String(data.cron ?? '').trim()
-    if (cron && cron.split(/\s+/).length < 5) throw new GuobaError('cron 表达式不完整')
+    const enable = !!data.enable
+    const segments = cron ? cron.split(/\s+/) : []
+    if (enable && !cron) throw new GuobaError('启用定时备份时必须填写 cron 表达式')
+    if (cron && (segments.length < 5 || segments.length > 6)) {
+      throw new GuobaError('cron 表达式需为 5 段或 6 段')
+    }
     if (!Number.isFinite(keep) || keep < 1 || keep > 100) {
       throw new GuobaError('保留份数需要在 1 ~ 100 之间')
     }
-    cfg.set('backup.enable', !!data.enable)
+
+    // 先验证、尝试挂新 job；成功以后再落配置。原先反过来写，cron 无效时接口仍返回
+    // 「已启用」，但 scheduleJob 实际返回 null，重启也永远不会跑
+    const scheduled = await this.applySchedule({enable, cron})
+    if (enable && !scheduled) {
+      // 新配置挂不上时恢复原配置对应的 job，避免一次输错 cron 把原本正常的定时也关掉
+      await this.applySchedule()
+      throw new GuobaError('定时任务注册失败，请检查 cron 或服务日志')
+    }
+
+    cfg.set('backup.enable', enable)
     if (cron) cfg.set('backup.cron', cron)
     cfg.set('backup.keep', Math.floor(keep))
     cfg.set('backup.keys', this.#normalizeKeys(data.keys))
-    await this.applySchedule()
     return this.getSettings()
   }
 
@@ -1554,10 +1581,19 @@ export default class BackupService extends Service {
    * `node-schedule` 是 Yunzai 自己的依赖，动态 import 是为了「锅巴不新增 npm 依赖」——
    * 依赖检查不过会让锅巴整个起不来，定时备份不值得冒这个风险。拿不到就只关掉这个功能。
    */
-  async applySchedule() {
+  async applySchedule(override) {
+    const generation = (process[JOB_GENERATION_KEY] || 0) + 1
+    process[JOB_GENERATION_KEY] = generation
+    this.#scheduleGeneration = generation
+    // 无论新设置最终能否注册，先撤掉旧 job；否则无效 cron 时旧 job 会残留，
+    // 下一次恢复/热重载又可能再挂一个，造成重复备份
     this.#cancelJob()
-    const {enable, cron} = this.getSettings()
-    if (!enable) return false
+    const settings = override || this.getSettings()
+    const {enable, cron} = settings
+    if (!enable) {
+      this.#cancelJob()
+      return false
+    }
     let schedule
     try {
       schedule = (await import('node-schedule')).default ?? await import('node-schedule')
@@ -1566,10 +1602,18 @@ export default class BackupService extends Service {
       return false
     }
     try {
+      // import 完成时可能已经有更新的一代设置了。旧调用不得再挂 job；跨热重载实例也靠
+      // process 上的 generation 判断，不然两个实例各自的私有计数挡不住
+      if (generation !== process[JOB_GENERATION_KEY] || generation !== this.#scheduleGeneration) return false
       const job = schedule.scheduleJob(cron, () => {
         this.#autoBackup().catch((err) => logger.error('[Guoba] 定时备份失败：', err))
       })
       if (!job) throw new Error(`cron 表达式无效：${cron}`)
+      // scheduleJob 本身虽同步，但保守再核对一次，失去代次的 job 立即取消
+      if (generation !== process[JOB_GENERATION_KEY]) {
+        job.cancel()
+        return false
+      }
       process[JOB_KEY] = job
       logger.info(`[Guoba] 定时备份已启用：${cron}`)
       return true
