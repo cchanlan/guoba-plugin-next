@@ -63,6 +63,8 @@ const MAX_STRUCTURE_CHILDREN = 12
 
 /** git 地址里的 `user:token@` —— 备份包会被下载甚至转发，绝不能带出去 */
 const CREDENTIAL_RE = /^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i
+/** 查询参数里常见的凭证名（大小写不敏感） */
+const SECRET_QUERY_RE = /^(?:access_?token|private_?token|oauth_?token|auth|authorization|password|passwd|secret|api_?key)$/i
 /** GitHub 反代前缀：`https://<代理域名>/https://github.com/...` */
 const PROXY_PREFIX_RE = /^https?:\/\/[^/]+\/(?=https?:\/\/)/i
 
@@ -114,8 +116,9 @@ function gitArgs(...args) {
  * 清洗 git 远程地址，让它能安全写进备份包。
  *
  * 两件事：
- * 1. **摘掉嵌在 URL 里的凭证**。实测本机就有 `https://user:token@gitcode.com/...` 这种
- *    remote —— 备份包是要下载、可能转发给别人的，token 跟着走出去就等于泄露。
+ * 1. **摘掉嵌在 URL 里的凭证**。包括 `https://user:token@host/...`、查询参数里的
+ *    `?access_token=...`，以及 fragment。备份包是要下载、可能转发给别人的，任何一种
+ *    token 跟着走出去都等于泄露。
  * 2. **剥掉 GitHub 反代前缀**（`https://api.fate.vip/https://github.com/...`）。代理是
  *    本机网络环境的产物，换台机器该用那台机器自己配的代理，所以清单里只存原始地址，
  *    还原时再按 `base.githubReverseProxy` 重新拼。顺带让白名单校验能正常工作 ——
@@ -126,7 +129,19 @@ export function sanitizeRemote(url) {
   if (!out) return ''
   out = out.replace(PROXY_PREFIX_RE, '')
   out = out.replace(CREDENTIAL_RE, '$1')
-  return out
+  try {
+    const parsed = new URL(out)
+    parsed.username = ''
+    parsed.password = ''
+    parsed.hash = ''
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (SECRET_QUERY_RE.test(key)) parsed.searchParams.delete(key)
+    }
+    return parsed.toString()
+  } catch {
+    // 无法解析的值后面不会被当成可 clone URL；这里至少继续返回已去 userinfo 的版本
+    return out.split('#', 1)[0]
+  }
 }
 
 /** 是不是 git 仓库 */
