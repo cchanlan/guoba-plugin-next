@@ -219,10 +219,16 @@ export default class BackupService extends Service {
         const prefix = `plugin:${name}`
         try {
           const info = await repoInfo(dir)
+          // 只把当前锅巴安装白名单内的地址交给前端 / manifest；其它 HTTP remote 虽然语法
+          // 正确，但还原时一定会被拒绝，不应冒充「可克隆地址」。origin 不在白名单而镜像在时，
+          // 镜像会成为首选；全部都不允许则按无地址处理，避免还原时才发现。
+          const remotes = (info.remotes ?? []).filter((it) => this.#remoteAllowed(it.url).ok)
           const entries = info.git
             ? (await discoverTarget(dir, {prefix, excludes: this.excludes})).entries
             : discoverPlain(dir, {prefix, excludes: this.excludes})
-          out.push({name, ...info, noGit: !info.git, entries})
+          out.push({
+            name, ...info, remote: remotes[0]?.url || '', remotes, noGit: !info.git, entries,
+          })
         } catch (err) {
           logger.warn(`[Guoba] 扫描插件 ${name} 失败：${err.message}`)
           out.push({name, git: false, noGit: true, entries: [], error: err.message})
@@ -366,12 +372,18 @@ export default class BackupService extends Service {
     const abs = this.absOf(name)
     const manifest = this.#readManifest(abs)
     const installed = this.#installedPlugins()
-    const plugins = (manifest.plugins ?? []).map((p) => ({
-      ...p,
-      installed: installed.has(p.name),
-      // clone 地址不在白名单里的话，还原时装不了，提前告诉用户
-      allowed: !p.remote || this.#remoteAllowed(p.remote).ok,
-    }))
+    const plugins = (manifest.plugins ?? []).map((p) => {
+      const remotes = this.#remoteCandidates(p).map((it) => ({
+        ...it, allowed: this.#remoteAllowed(it.url).ok,
+      }))
+      return {
+        ...p,
+        remotes,
+        installed: installed.has(p.name),
+        // 候选里有一个过白名单就装得上；只有非 git 插件没有地址时才算可按文件还原
+        allowed: (!p.git && !p.remote) || remotes.some((it) => it.allowed),
+      }
+    })
     return {
       name,
       manifest: {...manifest, plugins},
@@ -533,6 +545,10 @@ export default class BackupService extends Service {
       git: !!p.git,
       noGit: !!p.noGit,
       remote: sanitizeRemote(p.remote || ''),
+      // 新包记录所有可 clone remote；保留上面的 remote 单值兼容旧锅巴
+      remotes: (p.remotes ?? []).map((it) => ({
+        name: String(it.name || ''), url: sanitizeRemote(it.url || ''),
+      })).filter((it) => it.url),
       branch: p.branch || '',
       commit: p.commit || '',
       dirty: !!p.dirty,
@@ -682,7 +698,8 @@ export default class BackupService extends Service {
     if (needClone.length) {
       this.#log(`需要 clone ${needClone.length} 个插件`)
       // 只有真要 clone 时才值得花几秒测速
-      const proxy = await this.#pickProxy(needClone.map((n) => byName.get(n)?.remote))
+      const proxy = await this.#pickProxy(needClone.flatMap((n) =>
+        this.#remoteCandidates(byName.get(n)).map((it) => it.url)))
       this.#task.total = needClone.length
       for (const name of needClone) {
         this.#throwIfCanceled()
@@ -1029,7 +1046,29 @@ export default class BackupService extends Service {
   }
 
   /**
-   * clone 一个插件。
+   * 包里的 remote 候选。新包有 `remotes[]`，旧包只有 `remote`，这里统一成同一个形状。
+   * 所有值都再次 sanitize —— 上传的 manifest 是外部输入，不能相信它已经由本机生成过。
+   */
+  #remoteCandidates(info) {
+    if (!info) return []
+    const raw = Array.isArray(info.remotes) ? [...info.remotes] : []
+    if (info.remote && !raw.some((it) => it?.url === info.remote)) {
+      raw.unshift({name: 'origin', url: info.remote})
+    }
+    const seen = new Set()
+    const out = []
+    for (const it of raw) {
+      const url = sanitizeRemote(typeof it === 'string' ? it : it?.url)
+      if (!url || seen.has(url)) continue
+      seen.add(url)
+      out.push({name: String(it?.name || ''), url})
+    }
+    return out
+  }
+
+  /**
+   * clone 一个插件。一个仓库可能配了 origin / upstream / 镜像，按清单顺序逐个尝试；
+   * 某条不在白名单或 clone 失败就换下一条，全部失败才算安装失败。
    *
    * @param {string} name
    * @param {object} info 包里的插件清单
@@ -1038,40 +1077,47 @@ export default class BackupService extends Service {
    */
   async #clonePlugin(name, info, proxy = '') {
     if (!PLUGIN_NAME_RE.test(name)) return {ok: false, reason: '插件名不合法'}
-    // 前端只会传包里列出的插件名，传别的说明是手拼的请求 —— 没有清单就不知道该装什么，
-    // 更不能凭一个名字就在 plugins/ 下建目录
     if (!info) return {ok: false, reason: '备份包里没有这个插件'}
     const dir = path.join(this.root, 'plugins', name)
     if (fs.existsSync(dir)) {
-      // 已经装了就不动它 —— 覆盖安装会毁掉用户现有的改动
       return {ok: false, skipped: true, reason: '已安装，跳过'}
     }
-    if (!info.remote) {
-      // 非 git 插件（手动解压装的）没有 remote，文件直接解出来就是完整插件；
-      // 是 git 仓库却没记下地址（本地没配 origin）就只能让用户自己装
-      if (!info.noGit) return {ok: false, reason: '备份里没记下仓库地址，请手动安装'}
+    const candidates = this.#remoteCandidates(info)
+    if (!candidates.length) {
+      // 非 git 插件没有 remote，包里的文件就是完整插件；git 仓库没地址则没法凭空安装
+      if (!info.noGit) return {ok: false, reason: '备份里没记下可克隆的仓库地址，请手动安装'}
       fs.mkdirSync(dir, {recursive: true})
       this.#log(`${name}：备份里没有仓库地址，按文件直接还原`)
       return {ok: true}
     }
-    const check = this.#remoteAllowed(info.remote)
-    if (!check.ok) {
-      this.#log(`${name}：${check.reason}`, 'warn')
-      return {ok: false, reason: check.reason}
+
+    const reasons = []
+    for (const remote of candidates) {
+      this.#throwIfCanceled()
+      const check = this.#remoteAllowed(remote.url)
+      if (!check.ok) {
+        reasons.push(`${remote.name || remote.url}：${check.reason}`)
+        this.#log(`${name}：跳过 ${remote.name || remote.url}（${check.reason}）`, 'warn')
+        continue
+      }
+      const url = this.#proxyUrl(remote.url, proxy)
+      const args = ['clone', '--depth', '1', '--single-branch']
+      if (info.branch && /^[\w./-]+$/.test(info.branch)) args.push('-b', info.branch)
+      args.push(url, dir)
+      this.#log(`${name}：clone ${remote.name ? `${remote.name} ` : ''}${url}`
+        + (info.branch ? ` (${info.branch})` : ''))
+      const res = await this.#spawnLogged('git', args, {cwd: this.root})
+      if (res.code === 0) {
+        this.#log(`${name}：安装成功`)
+        return {ok: true}
+      }
+      const reason = res.tail || `git clone 退出码 ${res.code}`
+      reasons.push(`${remote.name || remote.url}：${reason}`)
+      this.#log(`${name}：这条地址失败，尝试下一个（${reason}）`, 'warn')
+      // clone 失败会留下半个目录，不清掉的话下一条不能往同一个路径 clone
+      fs.rmSync(dir, {recursive: true, force: true})
     }
-    const url = this.#proxyUrl(info.remote, proxy)
-    const args = ['clone', '--depth', '1', '--single-branch']
-    if (info.branch && /^[\w./-]+$/.test(info.branch)) args.push('-b', info.branch)
-    args.push(url, dir)
-    this.#log(`${name}：clone ${url}${info.branch ? ` (${info.branch})` : ''}`)
-    const res = await this.#spawnLogged('git', args, {cwd: this.root})
-    if (res.code === 0) {
-      this.#log(`${name}：安装成功`)
-      return {ok: true}
-    }
-    // clone 失败会留下半个目录，不清掉的话下次还原会被判成「已安装」
-    fs.rmSync(dir, {recursive: true, force: true})
-    return {ok: false, reason: res.tail || `git clone 退出码 ${res.code}`}
+    return {ok: false, reason: reasons.join('；') || '没有可用的仓库地址'}
   }
 
   /**

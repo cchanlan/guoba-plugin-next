@@ -147,6 +147,12 @@ function togglePlugin(name: string, checked: boolean) {
   pickedPlugins.value = [...next]
 }
 
+/** 新包有 remotes，旧包只有 remote；展示层统一成数组 */
+function remotesOf(p: NonNullable<typeof manifest.value>['plugins'][number]) {
+  if (p.remotes?.length) return p.remotes
+  return p.remote ? [{ name: 'origin', url: p.remote, allowed: p.allowed }] : []
+}
+
 function confirmStart() {
   if (!file.value) {
     message.warning('先选一个备份包')
@@ -214,6 +220,10 @@ onMounted(async () => {
         <code>data/guoba/backups/.restore-bak-&lt;时间戳&gt;/</code>，出问题能捞回来。
       </p>
       <p>
+        插件代码默认不进包；备份时会从插件 <code>.git</code> 读取并脱敏全部可克隆地址，
+        还原时按顺序尝试。<code>.git</code> 本身不会写进包，避免把 Git 历史和凭据带走。
+      </p>
+      <p>
         本地没装的插件按包里的清单 <code>git clone</code>（地址要在 Git 安装白名单内）。
         如果备份时是<b>整个插件</b>一起打包的，包里已经有完整文件了，clone 失败也会直接
         按文件还原 —— Windows 上 clone GitHub 老是 SSL 报错时，这条路更稳。
@@ -226,6 +236,10 @@ onMounted(async () => {
         备份包里带的是 <code>package.json</code> 而不是 <code>node_modules</code>，所以还原完
         <b>一定要装依赖</b>（默认已勾上）—— 少了这一步，重启后插件会满屏报
         <code>Cannot find package 'xxx'</code>。
+      </p>
+      <p>
+        插件代码默认不进包；备份时会从插件 <code>.git</code> 读取并脱敏全部可克隆地址，
+        还原时按顺序尝试。<code>.git</code> 本身不会写进包，避免把 Git 历史和凭据带走。
       </p>
       <p>
         <b>备份包内容是完整的</b>（Redis 配置、各账号 ck、黑白名单全都在），但还原时有几项
@@ -319,7 +333,12 @@ onMounted(async () => {
             <a-tag v-if="p.keys?.length" color="cyan">包里有文件</a-tag>
             <a-tag v-else>仅清单</a-tag>
             <span v-if="p.branch" class="g-bk-pbranch">{{ p.branch }}</span>
-            <span class="g-bk-premote" :title="p.remote">{{ p.remote || '（无远程地址）' }}</span>
+            <span
+              class="g-bk-premote"
+              :title="remotesOf(p).map((r) => `${r.name || 'remote'}: ${r.url}`).join('\\n')"
+            >
+              {{ remotesOf(p).map((r) => r.url).join(' · ') || '（无可克隆地址）' }}
+            </span>
           </div>
         </div>
 
@@ -507,6 +526,7 @@ onMounted(async () => {
   .g-bk-premote {
     flex: 0 0 100%;
     padding-left: 24px;
+    overflow-wrap: anywhere;
   }
 
   /* bordered 的 descriptions 在窄屏标签列会挤成一列字 */

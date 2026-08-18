@@ -2,9 +2,9 @@
 /**
  * 新建备份。
  *
- * 勾什么由 git 说话 —— 后端只列被 .gitignore 忽略、未跟踪、或改过的文件（详见
- * server/utils/backupDiscover.js），仓库自带的素材和 `.git` 都不打包，插件靠清单
- * 在还原时重新 clone。所以「推荐项」通常只有几百 MB，而不是几个 G。
+ * 「只选推荐」按搬家策略选择 Bot 根的 data/config/resources，以及每个插件的 config。
+ * 仓库自带的代码和 `.git` 都不打包；插件的 clone 地址从 `.git` 读取并脱敏后写进清单，
+ * 还原时按候选地址重新 clone。其它条目仍可手动勾选。
  */
 import { computed, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
@@ -45,7 +45,8 @@ const groups = computed<PickerGroup[]>(() => {
       subtitle: p.git
         ? `${p.branch || '?'}${at}`
         : '非 git 插件，整目录备份',
-      warn: p.dirty ? '有未提交改动' : p.git && !p.remote ? '没有远程地址' : '',
+      warn: p.dirty ? '有未提交改动' : p.git && !p.remote ? '没有可克隆地址' : '',
+      remotes: p.remotes,
       // 配置和数据不在插件目录里的插件（比如数据存在 Yunzai 根 data/ 下的）没有推荐项，
       // 但仓库自带的文件仍然列得出来 —— 想整个带走随时能勾
       emptyHint: p.git
@@ -111,19 +112,18 @@ onMounted(async () => {
   <div class="g-bk-create">
     <div class="g-bk-tip">
       <p>
-        <b>每个目录都能自己勾</b>，勾多少由你定。默认勾上的是 git 认出来的用户资产
-        （被忽略、未跟踪、你改过的文件 —— 也就是配置、数据、自备素材），标着
-        <b>仓库自带</b>的是 clone 就有的代码和素材，默认不勾但随时能勾。
+        <b>只选推荐</b>是一套搬家默认值：Bot 本体完整选择 <code>data/</code>、
+        <code>config/</code>、<code>resources/</code>；插件只选择 <code>config/</code>。
+        根配置里的主人、渲染路径、服务地址和锅巴登录字段还原时会保持新机器原样。
       </p>
       <p>
-        插件有两种带法：<b>只勾配置数据</b>（包很小，还原时按记下的仓库地址
-        <code>git clone</code> 回来再盖上配置）或者<b>整组勾满</b>（整个插件都在包里，
-        还原时不用 clone，网络不通也能搬家）。组头的标签会显示当前是哪种。
+        插件代码默认不进包：扫描会从每个 <code>.git</code> 读取并脱敏全部 HTTP(S) remote，
+        还原时逐个尝试 clone，再盖上配置。想离线搬家仍可手动把插件整组勾满。
       </p>
       <p>
         <code>.git</code>、<code>node_modules</code>、<code>logs</code>、<code>temp</code>
-        一律不进包 —— 前者用清单还原，后几个重装即得。大目录已按子目录拆开，
-        备份包存在服务器 <code>data/guoba/backups/</code>。
+        一律不进包；其它文件也都保留在列表中，可按需手动选择。备份包存在服务器
+        <code>data/guoba/backups/</code>。
       </p>
     </div>
 

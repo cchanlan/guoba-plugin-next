@@ -968,8 +968,8 @@ export interface BackupEntry {
   rel: string
   /** 这个条目实际要打包的路径（git 把目录展开成多条时会多于一项） */
   paths: string[]
-  /** 来源：被 .gitignore 忽略 / 未跟踪 / 跟踪文件被改过 / 非 git 插件整目录 */
-  kind: 'ignored' | 'untracked' | 'modified' | 'mixed' | 'plain'
+  /** 来源：被 .gitignore 忽略 / 未跟踪 / 跟踪文件被改过 / 仓库自带 / 非 git 插件 */
+  kind: 'ignored' | 'untracked' | 'modified' | 'mixed' | 'plain' | 'tracked'
   size: number
   files: number
   /** 体积统计触顶提前结束了，size/files 是下限 */
@@ -984,8 +984,10 @@ export interface BackupPlugin {
   /** 是不是 git 仓库 */
   git: boolean
   noGit: boolean
-  /** 已脱敏的仓库地址（不含 token 和反代前缀），还原时按它 clone */
+  /** 首选的已脱敏仓库地址（不含 token 和反代前缀），兼容旧接口 */
   remote?: string
+  /** .git 中筛出的全部 HTTP(S) remote，origin 优先，地址均已脱敏 */
+  remotes?: Array<{ name: string; url: string }>
   branch?: string
   commit?: string
   /** 有未提交的改动 */
@@ -1038,6 +1040,8 @@ export interface BackupManifestPlugin {
   git: boolean
   noGit: boolean
   remote: string
+  /** 新包有全部候选；旧包没有这个字段 */
+  remotes?: Array<{ name: string; url: string; allowed?: boolean }>
   branch: string
   commit: string
   dirty: boolean

@@ -26,6 +26,8 @@ export interface PickerGroup {
   subtitle?: string
   /** 醒目提示，如「本地未安装」 */
   warn?: string
+  /** 可克隆的远程仓库（地址已脱敏），新建备份页显示 */
+  remotes?: Array<{ name: string; url: string }>
   /** 一个条目都没有时显示的说明，替代笼统的「没有需要备份的内容」 */
   emptyHint?: string
   entries: PickerEntry[]

@@ -330,6 +330,17 @@ function groupMode(group: PickerGroup) {
               {{ groupMode(v.group)!.text }}
             </a-tag>
             <a-tag v-if="v.group.warn" color="orange">{{ v.group.warn }}</a-tag>
+            <a-popover v-if="v.group.remotes?.length" placement="bottom">
+              <template #content>
+                <div class="g-bk-remotes">
+                  <div v-for="r in v.group.remotes" :key="`${r.name}:${r.url}`" class="g-bk-remote">
+                    <b>{{ r.name || 'remote' }}</b>
+                    <code>{{ r.url }}</code>
+                  </div>
+                </div>
+              </template>
+              <a-tag color="cyan" class="g-bk-gmode">可克隆地址 {{ v.group.remotes.length }} 个</a-tag>
+            </a-popover>
             <span v-if="v.group.subtitle" class="g-bk-gsub">{{ v.group.subtitle }}</span>
             <span v-if="v.group.entries.length" class="g-bk-gstat">
               {{ groupStat(v.group).count }}/{{ v.group.entries.length }}
@@ -446,6 +457,26 @@ function groupMode(group: PickerGroup) {
 .g-bk-gstat {
   font-size: 12px;
   color: var(--g-text-dim);
+}
+
+.g-bk-remotes {
+  max-width: min(560px, 80vw);
+}
+
+.g-bk-remote {
+  display: flex;
+  gap: 8px;
+  margin: 3px 0;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.g-bk-remote b {
+  flex: none;
+}
+
+.g-bk-remote code {
+  overflow-wrap: anywhere;
 }
 
 .g-bk-gstat {

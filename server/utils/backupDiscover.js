@@ -39,9 +39,12 @@ const SKIP_EXT = new Set(['.log', '.swp', '.pyc', '.pid', '.sock'])
 /** 目录名像缓存的：仍然列出来（用户也许真想备份），但默认不勾 */
 const CACHE_RE = /(^|[-_.])(temp|tmp|cache|caches|puppeteer|screenshot|screenshots|thumb|thumbs)([-_.]|$)|cache|temp/i
 
-/** 默认勾选的体积 / 文件数上限 —— 超过就只列出不勾，让用户自己决定 */
+/** 默认勾选的体积 / 文件数上限 —— 通用兜底规则用，搬家推荐不受它限制 */
 const RECOMMEND_MAX_SIZE = 20 * 1024 * 1024
 const RECOMMEND_MAX_FILES = 2000
+
+/** Bot 搬家时完整带走的三个根目录。条目下钻后仍按第一段匹配，所以一个都不会漏 */
+const ROOT_RECOMMEND = new Set(['data', 'config', 'resources'])
 
 /** 条目超过这个体积就展开一层子项，让用户能按子目录挑（`data/` 3.3G 就靠这个拆开） */
 const DRILL_SIZE = 20 * 1024 * 1024
@@ -443,7 +446,7 @@ function buildEntries({dir, prefix, rel, marks, excludes, drilled = 0}) {
     size,
     files,
     truncated,
-    recommended: recommend({rel, size, files, truncated, kind}),
+    recommended: recommend({prefix, rel, size, files, truncated, kind}),
   }]
 }
 
@@ -476,15 +479,20 @@ function isCacheName(rel) {
 /**
  * 默认要不要勾。
  *
- * 只看体积 / 文件数 / 名字像不像缓存，不认插件名 —— 这样对没装过的插件一样适用。
- * 真改动的跟踪文件（过滤掉权限位噪声之后）体积必然很小，总是勾上。
+ * 「只选推荐」不是「所有看起来像用户资产的都选」，而是一套稳定的搬家清单：
+ *
+ * - Bot 本体只选 `data/`、`config/`、`resources/`，且完整选中。目录可能因太大被拆成
+ *   `data/PlayerData/...` 等叶条目，按第一段匹配就不会漏，也不受统计截断 / 体积上限影响。
+ * - 插件只选 `config/`。代码靠 `.git` 里的 remote 清单重新 clone；其它用户素材需要时手动勾。
+ * - 其它目标保留旧的体积规则作为兜底（目前 scan 只有 root / plugin 两类）。
  */
-function recommend({rel, size, files, truncated, kind}) {
+function recommend({prefix, rel, size, files, truncated, kind}) {
+  const top = rel.split('/')[0]
+  if (prefix === 'root') return ROOT_RECOMMEND.has(top)
+  if (String(prefix).startsWith('plugin:')) return top === 'config'
+
   if (kind === 'modified') return true
-  // 仓库自带、也没动过的：clone 就有，不默认勾 —— 但列出来了，想整个带走随时能勾
-  if (kind === 'tracked') return false
-  if (isCacheName(rel)) return false
-  if (truncated) return false
+  if (kind === 'tracked' || isCacheName(rel) || truncated) return false
   return size <= RECOMMEND_MAX_SIZE && files <= RECOMMEND_MAX_FILES
 }
 
@@ -496,19 +504,55 @@ export const DISCOVER_LIMITS = {
   STAT_MAX_BYTES,
 }
 
+/**
+ * 一个仓库里所有能交给当前还原器 clone 的 remote。
+ *
+ * 不直接读 `.git/config`：它可能是 worktree 指针，也可能含用户名/token。让 git 自己列 remote，
+ * 每条地址立刻过 {@link sanitizeRemote}，原始值绝不离开这个函数。当前还原只支持 HTTP(S)，
+ * `git@github.com:user/repo.git` 这类 SSH 地址在新机器还需要私钥，不能冒充「可克隆」。
+ *
+ * `origin` 排第一，其它 remote 按 git 配置里的顺序；相同 URL 去重。
+ */
+async function repoRemotes(dir) {
+  const namesRes = await git(dir, gitArgs('remote'))
+  if (!namesRes.ok) return []
+  const names = [...new Set(namesRes.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))]
+    .sort((a, b) => (a === 'origin' ? -1 : b === 'origin' ? 1 : 0))
+  const found = await Promise.all(names.map(async (name) => {
+    const res = await git(dir, gitArgs('remote', 'get-url', name))
+    if (!res.ok) return null
+    const url = sanitizeRemote(res.stdout)
+    if (!url || /[ -\s]/.test(url)) return null
+    try {
+      const parsed = new URL(url)
+      if (!['http:', 'https:'].includes(parsed.protocol)) return null
+    } catch {
+      return null
+    }
+    return {name, url}
+  }))
+  const seen = new Set()
+  return found.filter((it) => {
+    if (!it || seen.has(it.url)) return false
+    seen.add(it.url)
+    return true
+  })
+}
+
 /** 给 BackupService 用：仓库信息（还原时按这个 clone） */
 export async function repoInfo(dir) {
   if (!isGitRepo(dir)) return {git: false}
-  const [remote, branch, commit, status] = await Promise.all([
-    git(dir, gitArgs('remote', 'get-url', 'origin')),
+  const [remotes, branch, commit, status] = await Promise.all([
+    repoRemotes(dir),
     git(dir, gitArgs('rev-parse', '--abbrev-ref', 'HEAD')),
     git(dir, gitArgs('rev-parse', 'HEAD')),
     git(dir, gitArgs('status', '--porcelain')),
   ])
   return {
     git: true,
-    // 一定要过 sanitizeRemote：这个值会写进 manifest，也会显示在页面上
-    remote: remote.ok ? sanitizeRemote(remote.stdout) : '',
+    // remote 保留单值兼容旧前端 / manifest；remotes 给新版还原逐条 fallback
+    remote: remotes[0]?.url || '',
+    remotes,
     branch: branch.ok ? branch.stdout.trim() : '',
     commit: commit.ok ? commit.stdout.trim().slice(0, 12) : '',
     dirty: status.ok ? status.stdout.trim().length > 0 : false,
