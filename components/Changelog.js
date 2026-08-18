@@ -1,72 +1,88 @@
 import fs from 'fs'
 import path from 'path'
-import lodash from 'lodash'
-import {_paths} from '#guoba.platform'
+import {fileURLToPath} from 'url'
 
-const _logPath = path.join(_paths.pluginRoot, 'CHANGELOG.md')
+const COMPONENT_DIR = path.dirname(fileURLToPath(import.meta.url))
+const CHANGELOG_PATH = path.join(COMPONENT_DIR, '../CHANGELOG.md')
 
-let logs = {}
-let changelogs = []
-let currentVersion
-let versionCount = 4
-
-const getLine = function (line) {
-  line = line.replace(/(^\s*\*|\r)/g, '')
-  line = line.replace(/\s*`([^`]+`)/g, '<span class="cmd">$1')
-  line = line.replace(/`\s*/g, '</span>')
-  line = line.replace(/\s*\*\*([^\*]+\*\*)/g, '<span class="strong">$1')
-  line = line.replace(/\*\*\s*/g, '</span>')
-  line = line.replace(/ⁿᵉʷ/g, '<span class="new"></span>')
-  return line
+function cleanText(value = '') {
+  return value
+    .replace(/<[^>]+>/g, '')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1（$2）')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/[*_]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
-try {
-  if (fs.existsSync(_logPath)) {
-    logs = fs.readFileSync(_logPath, 'utf8') || ''
-    logs = logs.split('\n')
+function parseDate(value = '') {
+  const match = value.match(/(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}:\d{2}))?/)
+  if (!match) return ''
+  return match[2] ? `${match[1]} ${match[2]}` : match[1]
+}
 
-    let temp = {}
-    let lastLine = {}
-    lodash.forEach(logs, (line) => {
-      if (versionCount <= -1) {
-        return false
-      }
-      let versionRet = /^#\s*([0-9\\.~\s]+?)\s*$/.exec(line)
-      if (versionRet && versionRet[1]) {
-        let v = versionRet[1].trim()
-        if (!currentVersion) {
-          currentVersion = v
-        } else {
-          changelogs.push(temp)
-          if (/0\s*$/.test(v) && versionCount > 0) {
-            versionCount = 0
-          } else {
-            versionCount--
-          }
-        }
+/**
+ * 解析锅巴更新日志。每一个列表项都是一条可发送的更新记录，
+ * 标题中的日期会自动作为没有独立日期条目的列表项的日期。
+ */
+export function parseChangelog(markdown = '') {
+  const items = []
+  let section = ''
+  let current = null
 
-        temp = {
-          version: v,
-          logs: [],
-        }
-      } else {
-        if (!line.trim()) {
-          return
-        }
-        if (/^\*/.test(line)) {
-          lastLine = {
-            title: getLine(line),
-            logs: [],
-          }
-          temp.logs.push(lastLine)
-        } else if (/^\s{2,}\*/.test(line)) {
-          lastLine.logs.push(getLine(line))
-        }
-      }
-    })
+  for (const rawLine of String(markdown).replace(/\r/g, '').split('\n')) {
+    const line = rawLine.replace(/\t/g, '  ')
+    const heading = /^#{1,3}\s+(.+?)\s*$/.exec(line)
+    if (heading) {
+      section = cleanText(heading[1])
+      continue
+    }
+
+    const bullet = /^\s*[-*+]\s+(.+?)\s*$/.exec(line)
+    if (!bullet) continue
+
+    const text = cleanText(bullet[1])
+    if (!text) continue
+    const explicitDate = parseDate(text)
+    current = {
+      date: explicitDate || parseDate(section),
+      version: explicitDate ? '' : (/^(?:v?\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?)$/.test(section) ? section : ''),
+      message: text.replace(/^\[?\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}:\d{2})?\]?\s*/, ''),
+    }
+    items.push(current)
   }
-} catch (e) {
-  // do nth
+
+  return items
 }
 
-export {currentVersion, changelogs}
+/** 按需读取日志，确保 git 更新后不会被 ESM 模块缓存旧内容。 */
+export function loadChangelog() {
+  try {
+    if (!fs.existsSync(CHANGELOG_PATH)) return []
+    return parseChangelog(fs.readFileSync(CHANGELOG_PATH, 'utf8'))
+  } catch (error) {
+    if (typeof logger !== 'undefined' && logger.error) {
+      logger.error('[Guoba] 读取更新日志失败：', error)
+    }
+    return []
+  }
+}
+
+/** 将 git log --format="%aI%x09%s" 转成统一的更新记录。 */
+export function parseGitLog(raw = '') {
+  return String(raw).split(/\r?\n/).filter(Boolean).map(line => {
+    const tab = line.indexOf('\t')
+    const dateRaw = tab === -1 ? '' : line.slice(0, tab)
+    const message = cleanText(tab === -1 ? line : line.slice(tab + 1))
+    const date = dateRaw
+      ? dateRaw.replace('T', ' ').replace(/([+-]\d{2}:\d{2}|Z)$/, '').slice(0, 19)
+      : ''
+    return {date, version: '', message}
+  }).filter(item => item.message)
+}
+
+export {CHANGELOG_PATH, cleanText}

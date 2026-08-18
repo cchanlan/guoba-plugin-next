@@ -121,5 +121,8 @@ dist
 /lib/test.js
 /lib/v2-js/*
 /config/*
-/test/
+/test/*
+!/test/components/
+/test/components/*
+!/test/components/Changelog.test.js
 /server/static/preload

@@ -1,9 +1,10 @@
 import YAML from 'yaml'
 import fetch from 'node-fetch'
-import {exec} from 'child_process'
+import {exec, execSync} from 'child_process'
 import {cfg, _paths, _version, Constant} from '#guoba.platform'
-import {sendToMaster} from '#guoba.utils'
+import {makeForwardMsg, sendToMaster} from '#guoba.utils'
 import {compareVersions} from '#guoba.libs'
+import {loadChangelog, parseGitLog} from '../components/Changelog.js'
 
 const _STATUS = {
   FAIL: 'FAIL',
@@ -13,6 +14,9 @@ const _STATUS = {
   HAS_UPDATE: 'HAS_UPDATE',
   GIT_NO_UPDATE: 'GIT_NO_UPDATE',
 }
+
+const REPO_URL = 'https://github.com/cchanlan/guoba-plugin-next.git'
+const MAX_FORWARD_NODES = 100
 
 let isChecked = false
 
@@ -30,6 +34,10 @@ export class GuobaUpdate extends plugin {
         {
           reg: '^#锅巴版本$',
           fnc: 'getVersion',
+        },
+        {
+          reg: '^#锅巴更新日志$',
+          fnc: 'getChangelog',
         },
         {
           reg: '^#锅巴(强制)?(更新|升级|update)$',
@@ -60,6 +68,40 @@ export class GuobaUpdate extends plugin {
     return this.reply(`[Guoba] 当前版本：${_version}`)
   }
 
+  async getChangelog() {
+    const logs = loadChangelog()
+    if (logs.length === 0) {
+      return this.reply('[Guoba] 暂无可用的更新日志')
+    }
+    return this.sendChangelog(logs)
+  }
+
+  async sendChangelog(logs, title = 'Guoba-Plugin 更新日志') {
+    await this.reply(`${title}，共 ${logs.length} 条：`)
+    const nodes = logs.map(item => {
+      const prefix = item.date ? `[${item.date}] ` : ''
+      return `${prefix}${item.message}`
+    })
+    nodes.push(REPO_URL)
+
+    try {
+      for (let i = 0; i < nodes.length; i += MAX_FORWARD_NODES) {
+        const part = nodes.slice(i, i + MAX_FORWARD_NODES)
+        const desc = nodes.length > MAX_FORWARD_NODES
+          ? `${title} ${Math.floor(i / MAX_FORWARD_NODES) + 1}/${Math.ceil(nodes.length / MAX_FORWARD_NODES)}`
+          : title
+        await this.reply(await makeForwardMsg(this.e, part, desc))
+      }
+      return true
+    } catch (error) {
+      logger.error('[Guoba] 发送更新日志合并转发失败：', error)
+      for (let i = 0; i < nodes.length; i += 8) {
+        await this.reply(nodes.slice(i, i + 8).join('\n\n'))
+      }
+      return true
+    }
+  }
+
   async doUpdate() {
     let isForce = this.e.msg.includes('强制')
     let response = await this.doGitPull(isForce)
@@ -77,7 +119,13 @@ export class GuobaUpdate extends plugin {
     if (status === _STATUS.NO_UPDATE || status === _STATUS.GIT_NO_UPDATE) {
       return this.reply(`[Guoba] 已经是最新版本啦`)
     } else if (status === _STATUS.SUCCESS) {
-      return this.reply(`[Guoba] ${message}`)
+      await this.reply(`[Guoba] ${message}`)
+      if (response.updateLogs?.length > 0) {
+        await this.sendChangelog(response.updateLogs, 'Guoba-Plugin 本次更新日志')
+      } else if (response.logError) {
+        await this.reply('[Guoba] 更新成功，但未能读取本次更新日志')
+      }
+      return true
     } else {
       if (message) {
         return this.reply(`[Guoba] 更新失败！\n${message}`)
@@ -222,13 +270,20 @@ export class GuobaUpdate extends plugin {
    */
   doGitPull(isForce = false) {
     return new Promise((resolve) => {
+      let oldHead = ''
+      try {
+        oldHead = execSync('git rev-parse HEAD', {cwd: _paths.pluginRoot, encoding: 'utf8'}).trim()
+      } catch (error) {
+        logger.warn('[Guoba] 更新前读取 Git HEAD 失败：', error.message ?? error)
+      }
+
       // 普通更新：添加 --rebase 策略，防止高版本 Git 报错
       let command = 'git pull --rebase'
       if (isForce) {
         // 强制更新：获取远程最新记录，并将本地强制重置为远程上游分支，彻底丢弃本地所有更改和分叉
         command = 'git fetch --all && git reset --hard @{u}'
       }
-      exec(command, {cwd: _paths.pluginRoot}, function (error, stdout, stderr) {
+      exec(command, {cwd: _paths.pluginRoot}, function (error, stdout) {
         if (error) {
           let message = 'Error code: ' + error.code + '\n' + error.stack + '\n 请稍后重试。'
           resolve({status: _STATUS.FAIL, message})
@@ -238,11 +293,29 @@ export class GuobaUpdate extends plugin {
           resolve({status: _STATUS.GIT_NO_UPDATE})
           return
         }
+
+        let updateLogs = []
+        let logError = false
+        try {
+          const newHead = execSync('git rev-parse HEAD', {cwd: _paths.pluginRoot, encoding: 'utf8'}).trim()
+          if (oldHead && newHead && oldHead !== newHead) {
+            const raw = execSync(`git log --format=%aI%x09%s ${oldHead}..${newHead}`, {
+              cwd: _paths.pluginRoot,
+              encoding: 'utf8',
+            })
+            updateLogs = parseGitLog(raw)
+          }
+        } catch (logErr) {
+          logError = true
+          logger.error('[Guoba] 获取本次更新日志失败：', logErr)
+        }
+
         resolve({
           status: _STATUS.SUCCESS,
-          // message: '更新成功' + (isForce ? '，由于是强制更新，本次更新需要重启才能生效' : '')
-          message: '更新成功，请您手动重启以生效更新。'
-        });
+          message: '更新成功，请您手动重启以生效更新。',
+          updateLogs,
+          logError,
+        })
       })
     })
   }

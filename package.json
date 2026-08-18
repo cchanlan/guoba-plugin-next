@@ -5,7 +5,9 @@
   "type": "module",
   "module": "index.js",
   "main": "index.js",
-  "scripts": {},
+  "scripts": {
+    "test": "node --test test/components/Changelog.test.js"
+  },
   "imports": {
     "#guoba.platform": "./models/platform.js",
     "#guoba.utils": "./models/utils.js",

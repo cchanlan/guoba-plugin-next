@@ -390,20 +390,20 @@ export async function makeForwardMsg(e, msg = [], dec = '') {
     forwardMsg = await Bot.makeForwardMsg(forwardMsg)
   }
 
-  if (dec) {
-      /** 处理描述 */
-      if (typeof (forwardMsg.data) === 'object') {
-        let detail = forwardMsg.data?.meta?.detail
-        if (detail) {
-          detail.news = [{ text: dec }]
-        }
-      } else {
-        forwardMsg.data = forwardMsg.data
-          .replace(/\n/g, '')
-          .replace(/<title color="#777777" size="26">(.+?)<\/title>/g, '___')
-          .replace(/___+/, `<title color="#777777" size="26">${dec}</title>`)
+  if (dec && !Array.isArray(forwardMsg)) {
+    /** 处理描述 */
+    if (typeof forwardMsg.data === 'object' && forwardMsg.data !== null) {
+      let detail = forwardMsg.data?.meta?.detail
+      if (detail) {
+        detail.news = [{ text: dec }]
       }
+    } else if (typeof forwardMsg.data === 'string') {
+      forwardMsg.data = forwardMsg.data
+        .replace(/\n/g, '')
+        .replace(/<title color="#777777" size="26">(.+?)<\/title>/g, '___')
+        .replace(/___+/, `<title color="#777777" size="26">${dec}</title>`)
     }
+  }
 
   return forwardMsg
 }
