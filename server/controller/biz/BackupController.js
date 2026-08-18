@@ -81,9 +81,9 @@ export class BackupController extends ApiController {
 
   /** 还原，立刻返回任务初态 */
   async restore(req) {
-    const {file, keys, plugins, autoNpmInstall, autoRestart} = req.body ?? {}
+    const {file, keys, plugins, cloneRemotes, autoNpmInstall, autoRestart} = req.body ?? {}
     const task = await this.backupService.restore({
-      file, keys, plugins, autoNpmInstall, autoRestart,
+      file, keys, plugins, cloneRemotes, autoNpmInstall, autoRestart,
     })
     return Result.ok(task, '已开始还原')
   }

@@ -51,6 +51,7 @@ const restoreResult = computed(() => {
   if (!r || props.task?.type !== 'restore') return null
   return r as {
     cloned: string[]
+    cloneSources?: Record<string, { name: string; url: string }>
     copied: string[]
     skipped: Array<{ name: string; reason: string }>
     failed: Array<{ name: string; reason: string }>
@@ -72,6 +73,11 @@ const restoreResult = computed(() => {
 
 /** 依赖安装结果。没勾「还原后安装依赖」时是 null，卡片里那几段就整段不显示 */
 const deps = computed(() => restoreResult.value?.deps ?? null)
+
+function cloneLabel(name: string) {
+  const source = restoreResult.value?.cloneSources?.[name]
+  return source ? `${name}（${source.name || source.url}）` : name
+}
 
 const statusType = computed(() => {
   const t = props.task
@@ -146,7 +152,7 @@ watch(
           按文件直接还原（备份时明确勾选了插件全部条目，没走 clone）：{{ restoreResult.copied.join('、') }}
         </div>
         <div v-if="restoreResult.cloned.length">
-          clone 装上的：{{ restoreResult.cloned.join('、') }}
+          clone 装上的：{{ restoreResult.cloned.map(cloneLabel).join('、') }}
         </div>
         <div v-if="restoreResult.skipped.length">
           已存在跳过：{{ restoreResult.skipped.map((s) => s.name).join('、') }}

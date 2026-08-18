@@ -35,6 +35,8 @@ const info = ref<BackupInspect | null>(null)
 const loading = ref(false)
 const picked = ref<string[]>([])
 const pickedPlugins = ref<string[]>([])
+/** 插件名 → 手动指定的 clone URL；空串 / 不存在表示按清单自动尝试 */
+const cloneRemotes = ref<Record<string, string>>({})
 const autoNpmInstall = ref(true)
 const autoRestart = ref(false)
 const starting = ref(false)
@@ -106,7 +108,7 @@ async function loadPacks() {
 /** 装得上的：本地没装、地址也过得了白名单。「全选可装」按钮用这个 */
 function installableNames(list = manifest.value?.plugins ?? []) {
   return list
-    .filter((p) => !p.installed && p.allowed !== false && (p.remote || p.noGit))
+    .filter((p) => !p.installed && p.allowed !== false && (remotesOf(p).length || p.noGit))
     .map((p) => p.name)
 }
 
@@ -130,6 +132,8 @@ async function loadInfo() {
   try {
     const data = await apiBackupInspect(file.value)
     info.value = data
+    // 手选 URL 只属于当前包，重新读取 / 切包都回到安全的自动模式
+    cloneRemotes.value = {}
     // 默认全选条目：都选这个包了，多半是想整包还原
     picked.value = (data.manifest.entries ?? []).map((e) => e.key)
     pickedPlugins.value = defaultPluginNames(data.manifest.plugins ?? [])
@@ -153,6 +157,32 @@ function remotesOf(p: NonNullable<typeof manifest.value>['plugins'][number]) {
   return p.remote ? [{ name: 'origin', url: p.remote, allowed: p.allowed }] : []
 }
 
+function remoteHost(url: string) {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url
+  }
+}
+
+function remoteOptions(p: NonNullable<typeof manifest.value>['plugins'][number]) {
+  const list = remotesOf(p)
+  const names = list.map((r) => r.name || remoteHost(r.url)).join(' → ')
+  return [
+    {label: `自动尝试${names ? `（${names}）` : ''}`, value: ''},
+    ...list.map((r) => ({
+      label: `${r.name || 'remote'} · ${remoteHost(r.url)}${r.allowed === false ? '（不在白名单）' : ''}`,
+      value: r.url,
+      disabled: r.allowed === false,
+      title: r.url,
+    })),
+  ]
+}
+
+function canPickRemote(p: NonNullable<typeof manifest.value>['plugins'][number]) {
+  return !p.installed && pickedPlugins.value.includes(p.name) && remotesOf(p).length > 0
+}
+
 function confirmStart() {
   if (!file.value) {
     message.warning('先选一个备份包')
@@ -169,6 +199,9 @@ function confirmStart() {
       `将写入 ${picked.value.length} 个条目`
       + (pickedPlugins.value.length ? `，并安装 ${pickedPlugins.value.length} 个插件。` : '。'),
       '同名文件会被覆盖，覆盖前原文件会挪到 data/guoba/backups/.restore-bak-<时间戳>/。',
+      Object.values(cloneRemotes.value).filter(Boolean).length
+        ? `其中 ${Object.values(cloneRemotes.value).filter(Boolean).length} 个插件手动指定了仓库来源，失败后不会自动换源。`
+        : '',
       autoNpmInstall.value ? '之后会逐插件安全安装依赖，最后在 Yunzai 根执行 pnpm install，可能需要几分钟。' : '',
       autoRestart.value ? '完成后会重启 Bot，机器人会短暂离线。' : '部分配置需要手动重启 Bot 才生效。',
     ].filter(Boolean).join(' '),
@@ -186,6 +219,9 @@ async function start() {
       file: file.value,
       keys: picked.value,
       plugins: pickedPlugins.value,
+      cloneRemotes: Object.fromEntries(
+        Object.entries(cloneRemotes.value).filter(([name, url]) => pickedPlugins.value.includes(name) && url),
+      ),
       autoNpmInstall: autoNpmInstall.value,
       autoRestart: autoRestart.value,
     })
@@ -320,7 +356,7 @@ onMounted(async () => {
           <div v-for="p in manifest.plugins" :key="p.name" class="g-bk-plugin">
             <a-checkbox
               :checked="pickedPlugins.includes(p.name)"
-              :disabled="running || p.installed || p.allowed === false || (!p.remote && !p.noGit)"
+              :disabled="running || p.installed || p.allowed === false || (!remotesOf(p).length && !p.noGit)"
               @change="togglePlugin(p.name, ($event.target as HTMLInputElement).checked)"
             >
               <span class="g-bk-pname">{{ p.name }}</span>
@@ -339,6 +375,20 @@ onMounted(async () => {
             >
               {{ remotesOf(p).map((r) => r.url).join(' · ') || '（无可克隆地址）' }}
             </span>
+            <div v-if="canPickRemote(p)" class="g-bk-remote-picker">
+              <span class="g-bk-remote-label">克隆来源</span>
+              <a-select
+                v-model:value="cloneRemotes[p.name]"
+                size="small"
+                class="g-bk-remote-select"
+                :disabled="running"
+                :options="remoteOptions(p)"
+                option-label-prop="label"
+              />
+              <span v-if="cloneRemotes[p.name]" class="g-bk-remote-tip">
+                手动指定，失败后不自动换源
+              </span>
+            </div>
           </div>
         </div>
 
@@ -474,6 +524,33 @@ onMounted(async () => {
   text-overflow: ellipsis;
 }
 
+.g-bk-remote-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 100%;
+  min-width: 0;
+  padding-left: 24px;
+}
+
+.g-bk-remote-label,
+.g-bk-remote-tip {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--g-text-dim);
+}
+
+.g-bk-remote-select {
+  min-width: 220px;
+  max-width: 360px;
+}
+
+.g-bk-remote-tip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .g-bk-empty {
   font-size: 12px;
   color: var(--g-text-dim);
@@ -528,6 +605,17 @@ onMounted(async () => {
     flex: 0 0 100%;
     padding-left: 24px;
     overflow-wrap: anywhere;
+  }
+
+  .g-bk-remote-picker {
+    padding-left: 24px;
+    flex-wrap: wrap;
+  }
+
+  .g-bk-remote-select {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: none;
   }
 
   /* bordered 的 descriptions 在窄屏标签列会挤成一列字 */

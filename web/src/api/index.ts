@@ -1121,6 +1121,8 @@ export interface BackupTask {
     | {
         /** clone 装上的 */
         cloned: string[]
+        /** 每个 clone 成功的插件实际使用的 manifest remote */
+        cloneSources: Record<string, { name: string; url: string }>
         /** 包里就是整个插件，直接按文件还原、没走 clone 的 */
         copied: string[]
         skipped: Array<{ name: string; reason: string }>
@@ -1193,6 +1195,8 @@ export const apiBackupRestore = (body: {
   file: string
   keys: string[]
   plugins?: string[]
+  /** 插件名 → 用户手动指定的 manifest 候选 URL；缺省为自动 fallback */
+  cloneRemotes?: Record<string, string>
   autoNpmInstall?: boolean
   autoRestart?: boolean
 }) => post<{ task: BackupTask | null; logs: BackupLog[]; cursor: number }>('/backup/restore', body)

@@ -663,6 +663,33 @@ export default class BackupService extends Service {
     return [...new Set(keys.map((k) => String(k ?? '').trim()).filter(Boolean))]
   }
 
+  /**
+   * 还原请求里的逐插件手选 URL。这里只做形状 / 插件名过滤；URL 是否真属于该插件的 manifest
+   * 在读包后由 {@link #validateCloneRemotes} 校验，不能信任前端。
+   */
+  #normalizeCloneRemotes(value, plugins) {
+    const out = new Map()
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return out
+    const wanted = new Set(plugins)
+    for (const [name, raw] of Object.entries(value)) {
+      const url = sanitizeRemote(raw)
+      if (PLUGIN_NAME_RE.test(name) && wanted.has(name) && url) out.set(name, url)
+    }
+    return out
+  }
+
+  /** 手选 URL 必须是该插件清单内、且当前白名单允许的精确候选 */
+  #validateCloneRemotes(selected, byName) {
+    for (const [name, url] of selected) {
+      const candidates = this.#remoteCandidates(byName.get(name))
+      if (!candidates.some((it) => it.url === url)) {
+        throw new GuobaError(`${name}：手动指定的仓库地址不在备份清单里`)
+      }
+      const check = this.#remoteAllowed(url)
+      if (!check.ok) throw new GuobaError(`${name}：${check.reason}`)
+    }
+  }
+
   // ------------------------------------------------------------------ 还原
 
   /**
@@ -680,25 +707,31 @@ export default class BackupService extends Service {
    * @param {string} opts.file 备份包名
    * @param {string[]} opts.keys 要还原的条目 key
    * @param {string[]} [opts.plugins] 要 clone 的插件名（本地没装的那些）
+   * @param {Record<string, string>} [opts.cloneRemotes] 插件名 → 手动指定的 manifest 候选 URL
    * @param {boolean} [opts.autoNpmInstall] 还原完是否在 Yunzai 根跑一次 `pnpm install`
    * @param {boolean} [opts.autoRestart] 全部完成后是否重启 Bot（依赖没装上时会跳过）
    */
-  async restore({file, keys, plugins = [], autoNpmInstall = false, autoRestart = false} = {}) {
+  async restore({file, keys, plugins = [], cloneRemotes = {}, autoNpmInstall = false, autoRestart = false} = {}) {
     const abs = this.absOf(file)
     const picked = this.#normalizeKeys(keys)
     const wantPlugins = this.#normalizeKeys(plugins)
+    const selectedRemotes = this.#normalizeCloneRemotes(cloneRemotes, wantPlugins)
     if (!picked.length && !wantPlugins.length) throw new GuobaError('没有勾选任何要还原的内容')
     this.#startTask('restore')
     this.#task.file = path.basename(abs)
-    this.#runRestore({abs, keys: picked, plugins: wantPlugins, autoNpmInstall, autoRestart})
+    this.#runRestore({
+      abs, keys: picked, plugins: wantPlugins, cloneRemotes: selectedRemotes,
+      autoNpmInstall, autoRestart,
+    })
       .catch((err) => this.#failTask(err))
     return this.taskStatus()
   }
 
-  async #runRestore({abs, keys, plugins, autoNpmInstall, autoRestart}) {
+  async #runRestore({abs, keys, plugins, cloneRemotes, autoNpmInstall, autoRestart}) {
     const manifest = this.#readManifest(abs)
     const result = {
-      cloned: [], copied: [], skipped: [], failed: [], fileFailures: [], pending: [], restored: 0, backupDir: '',
+      cloned: [], cloneSources: {}, copied: [], skipped: [], failed: [], fileFailures: [],
+      pending: [], restored: 0, backupDir: '',
       /** @type {object|null} 阶段三的结果，见 {@link #installDeps} */
       deps: null,
       /** 每个插件 clone / 解文件后立刻执行的依赖安装结果 */
@@ -715,6 +748,7 @@ export default class BackupService extends Service {
 
     // ---- 阶段一 / 二 / 插件依赖：每个插件按 clone → 解文件 → 安装依赖顺序处理 ----
     const byName = new Map((manifest.plugins ?? []).map((p) => [p.name, p]))
+    this.#validateCloneRemotes(cloneRemotes, byName)
     const unavailable = new Set()
     const installedNow = this.#installedPlugins()
     const byFiles = new Set()
@@ -755,7 +789,11 @@ export default class BackupService extends Service {
     // 根配置 / 数据先落地，插件逐个处理时 package.json 才是包里的最终版本
     await this.#extractEntries(abs, rootTargets, bakDir, unavailable, result)
     const orderedPlugins = [...new Set([...plugins, ...pluginTargets.keys()])]
-    const cloneUrls = orderedPlugins.flatMap((n) => this.#remoteCandidates(byName.get(n)).map((it) => it.url))
+    // 只拿本次真会尝试的 URL 测速：手选一个就别拿其它候选干扰线路判断
+    const cloneUrls = orderedPlugins.flatMap((name) => {
+      const selected = cloneRemotes.get(name)
+      return selected ? [selected] : this.#remoteCandidates(byName.get(name)).map((it) => it.url)
+    })
     const proxy = await this.#pickProxy(cloneUrls)
     for (const name of orderedPlugins) {
       this.#throwIfCanceled()
@@ -768,10 +806,12 @@ export default class BackupService extends Service {
         result.copied.push(name)
       } else if (requestedPlugins.has(name)) {
         this.#task.phase = 'cloning'
-        const res = await this.#clonePlugin(name, info, proxy)
+        const selected = cloneRemotes.get(name) || ''
+        const res = await this.#clonePlugin(name, info, proxy, selected)
         if (res.ok) {
           available = true
           result.cloned.push(name)
+          if (res.source) result.cloneSources[name] = res.source
         } else if (res.skipped) {
           available = true
           result.skipped.push({name, reason: res.reason})
@@ -1137,21 +1177,31 @@ export default class BackupService extends Service {
 
   /**
    * clone 一个插件。一个仓库可能配了 origin / upstream / 镜像，按清单顺序逐个尝试；
-   * 某条不在白名单或 clone 失败就换下一条，全部失败才算安装失败。
+   * 用户手选时只尝试该地址，失败不偷偷换源。
    *
    * @param {string} name
    * @param {object} info 包里的插件清单
    * @param {string} [proxy] {@link #pickProxy} 选出来的反代前缀
-   * @return {Promise<{ok: boolean, skipped?: boolean, reason?: string}>}
+   * @param {string} [selectedUrl] 已通过清单校验的手选 URL
+   * @return {Promise<{ok: boolean, skipped?: boolean, reason?: string, source?: object}>}
    */
-  async #clonePlugin(name, info, proxy = '') {
+  async #clonePlugin(name, info, proxy = '', selectedUrl = '') {
     if (!PLUGIN_NAME_RE.test(name)) return {ok: false, reason: '插件名不合法'}
     if (!info) return {ok: false, reason: '备份包里没有这个插件'}
     const dir = path.join(this.root, 'plugins', name)
     if (fs.existsSync(dir)) {
       return {ok: false, skipped: true, reason: '已安装，跳过'}
     }
-    const candidates = this.#remoteCandidates(info)
+    let candidates = this.#remoteCandidates(info)
+    if (selectedUrl) {
+      const selected = candidates.find((it) => it.url === selectedUrl)
+      // 正常入口在 #normalizeCloneRemotes 已经验证过；这里再挡一层，防以后有别的调用绕过
+      if (!selected) return {ok: false, reason: '手动指定的仓库地址不在备份清单里'}
+      candidates = [selected]
+      this.#log(`${name}：使用手动指定的 ${selected.name || 'remote'} ${selected.url}`)
+    } else if (candidates.length > 1) {
+      this.#log(`${name}：按清单自动尝试 ${candidates.length} 个仓库地址`)
+    }
     if (!candidates.length) {
       // 非 git 插件没有 remote，包里的文件就是完整插件；git 仓库没地址则没法凭空安装
       if (!info.noGit) return {ok: false, reason: '备份里没记下可克隆的仓库地址，请手动安装'}
@@ -1178,11 +1228,13 @@ export default class BackupService extends Service {
       const res = await this.#spawnLogged('git', args, {cwd: this.root})
       if (res.code === 0) {
         this.#log(`${name}：安装成功`)
-        return {ok: true}
+        return {ok: true, source: {name: remote.name || '', url: remote.url}}
       }
       const reason = res.tail || `git clone 退出码 ${res.code}`
       reasons.push(`${remote.name || remote.url}：${reason}`)
-      this.#log(`${name}：这条地址失败，尝试下一个（${reason}）`, 'warn')
+      this.#log(selectedUrl
+        ? `${name}：指定地址失败，不自动换源（${reason}）`
+        : `${name}：这条地址失败，尝试下一个（${reason}）`, 'warn')
       // clone 失败会留下半个目录，不清掉的话下一条不能往同一个路径 clone
       fs.rmSync(dir, {recursive: true, force: true})
     }
