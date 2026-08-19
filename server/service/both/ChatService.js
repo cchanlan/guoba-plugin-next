@@ -444,6 +444,36 @@ export default class ChatService extends Service {
     return out
   }
 
+  /**
+   * 自己发一次取历史的请求。
+   *
+   * 跟适配器的 `getChatHistory` 的唯一区别：**取最新时不带 `message_seq`**。适配器那边写死了
+   * 要传（取最新时传 0），而有的协议端只处理了「不带」的情形，收到 0 就在自己那边炸
+   * —— 见 {@link getHistory} 里的说明。
+   *
+   * @return {Promise<object[]|null>}
+   */
+  async #historyViaApi({botId, type, id, count, seq}) {
+    const bot = this.#bot(botId)
+    if (typeof bot?.sendApi !== 'function') throw new GuobaError('当前适配器没有 sendApi')
+    const isGroup = type === 'group'
+    const params = isGroup
+      ? {group_id: Number(id) || id}
+      : {user_id: Number(id) || id}
+    params.count = count
+    params.reverseOrder = true
+    // 0 表示「取最新」，这种情况下把参数整个省掉
+    if (seq) params.message_seq = seq
+
+    const res = await bot.sendApi(isGroup ? 'get_group_msg_history' : 'get_friend_msg_history', params)
+    // sendApi 回来的是个 Proxy，messages 直接取得到；不同实现也可能直接给数组
+    const msgs = res?.messages ?? res?.data?.messages ?? res?.data ?? res
+    if (!Array.isArray(msgs)) throw new GuobaError('协议端没有返回 messages 数组')
+    // 适配器会用 parseMsg 把 `{type, data}` 扁平化，自己发请求就得自己来一遍，
+    // 否则下游拿到的段结构跟实时消息不一致
+    return msgs.map((it) => (it?.message ? {...it, message: flattenOneBot(it.message)} : it))
+  }
+
   /** 按 bot_id 取账号，不传就用默认的那个 */
   #bot(botId) {
     const uin = Number(botId) || botId
@@ -767,26 +797,31 @@ export default class ChatService extends Service {
     const num = Math.min(Math.max(Number(count) || HISTORY_COUNT, 1), MAX_HISTORY_COUNT)
     // message_seq 是数字或字符串，视实现而定，能转数字就转
     const from = seq === 0 || seq === '' || seq == null ? 0 : (Number(seq) || seq)
+    const api = type === 'group' ? 'get_group_msg_history' : 'get_friend_msg_history'
     let raw
     try {
       raw = await target.getChatHistory(from, num)
     } catch (err) {
-      const api = type === 'group' ? 'get_group_msg_history' : 'get_friend_msg_history'
-      logger.error(`[Guoba][消息记录] 拉取历史消息失败（${type} ${id}）：${err?.stack ?? err}`)
+      logger.error(`[Guoba][消息记录] ${api} 失败（${type} ${id}）：${err?.stack ?? err}`)
       /**
-       * `reading 'start'` 是个假线索。
+       * 适配器**总会**带上 `message_seq`，取最新时那个值是 0 —— 而有的协议端只处理了「不带这个
+       * 参数」的情形，收到 0 就在自己那边炸。实测 LLOneBot v8.1.8 会抛
+       * `Cannot read properties of undefined (reading 'start')`（它的
+       * `onebot11/action/llbot/msg/GetFriendMsgHistory.ts:75`），那个属性名跟历史消息毫无关系，
+       * 光看云崽这边的堆栈只会以为是 `Bot.makeError` 出了问题 —— 其实它只是在转述协议端的报错。
        *
-       * 协议端返回非 0 retcode 时，适配器走的是 `throw Bot.makeError(data.msg || data.wording, …)`
-       * （plugins/adapter/OneBotv11.js），而 `makeError` 自己在构造错误对象时炸了 ——
-       * 于是协议端真正的报错（那句 msg）被吞掉，只剩一个跟历史消息毫无关系的属性名。
-       * 实测 LLOneBot + TRSS 3.1.3 就是这样。这里把话说明白，别让人对着 'start' 查半天。
+       * 所以这里自己再发一次，取最新时干脆不传 message_seq。
        */
-      const opaque = /reading '(start|stack)'/.test(String(err?.message ?? ''))
-      throw new GuobaError(opaque
-        ? `协议端拒绝了 ${api}，且适配器在转述错误时自己出错了（${err.message}），`
-          + '真正的原因被吞掉了 —— 去协议端（LLOneBot / NapCat）的日志里看这次请求。'
-          + '这一项要协议端支持该接口，不支持的话只能看面板运行期间收到的消息。'
-        : `拉取历史消息失败：${err?.message ?? err}（详细堆栈见运行日志，这一项要协议端支持 ${api}）`)
+      try {
+        raw = await this.#historyViaApi({botId, type, id, count: num, seq: from})
+        logger.mark(`[Guoba][消息记录] ${api} 改为不带 message_seq 重试后成功（${type} ${id}）`)
+      } catch (retryErr) {
+        logger.debug(`[Guoba][消息记录] 不带 message_seq 重试也失败：${retryErr?.message ?? retryErr}`)
+        throw new GuobaError(`拉取历史消息失败：${err?.message ?? err}\n`
+          + `这句报错来自协议端内部（不是锅巴、也不是云崽），去协议端的日志里找这次 ${api} 请求。`
+          + '实测 LLOneBot 在「和机器人自己私聊」这种会话上取历史会抛这个错。'
+          + '协议端不支持的话，只能看面板运行期间收到的消息。')
+      }
     }
 
     const list = (Array.isArray(raw) ? raw : [raw]).filter((it) => it && typeof it === 'object')
