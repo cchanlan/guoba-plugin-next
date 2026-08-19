@@ -771,15 +771,22 @@ export default class ChatService extends Service {
     try {
       raw = await target.getChatHistory(from, num)
     } catch (err) {
-      /**
-       * 这里的报错多半来自适配器内部，光一句 message 看不出是谁的问题
-       * （实测 LLOneBot 上会冒出 `Cannot read properties of undefined (reading 'start')`
-       * 这种跟历史消息毫无关系的话），堆栈得留到日志里才排查得动。
-       */
+      const api = type === 'group' ? 'get_group_msg_history' : 'get_friend_msg_history'
       logger.error(`[Guoba][消息记录] 拉取历史消息失败（${type} ${id}）：${err?.stack ?? err}`)
-      throw new GuobaError(`拉取历史消息失败：${err?.message ?? err}`
-        + '（详细堆栈见运行日志。这一项要协议端支持 '
-        + `${type === 'group' ? 'get_group_msg_history' : 'get_friend_msg_history'}）`)
+      /**
+       * `reading 'start'` 是个假线索。
+       *
+       * 协议端返回非 0 retcode 时，适配器走的是 `throw Bot.makeError(data.msg || data.wording, …)`
+       * （plugins/adapter/OneBotv11.js），而 `makeError` 自己在构造错误对象时炸了 ——
+       * 于是协议端真正的报错（那句 msg）被吞掉，只剩一个跟历史消息毫无关系的属性名。
+       * 实测 LLOneBot + TRSS 3.1.3 就是这样。这里把话说明白，别让人对着 'start' 查半天。
+       */
+      const opaque = /reading '(start|stack)'/.test(String(err?.message ?? ''))
+      throw new GuobaError(opaque
+        ? `协议端拒绝了 ${api}，且适配器在转述错误时自己出错了（${err.message}），`
+          + '真正的原因被吞掉了 —— 去协议端（LLOneBot / NapCat）的日志里看这次请求。'
+          + '这一项要协议端支持该接口，不支持的话只能看面板运行期间收到的消息。'
+        : `拉取历史消息失败：${err?.message ?? err}（详细堆栈见运行日志，这一项要协议端支持 ${api}）`)
     }
 
     const list = (Array.isArray(raw) ? raw : [raw]).filter((it) => it && typeof it === 'object')

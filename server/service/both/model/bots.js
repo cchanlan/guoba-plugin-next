@@ -87,24 +87,39 @@ function describe(res, arr) {
   return `${typeof raw} ${JSON.stringify(raw ?? null)?.slice(0, 40)}`
 }
 
-/** 把列表合并进缓存，返回新增条数 */
+/**
+ * 把列表合并进缓存。
+ *
+ * @return {{added: number, matched: number, ids: Array, sampleKeys: string[]}}
+ *   `matched` 是认出号码的项数 —— **判成功要看它，不是 added**。协议端给的人本来就都在缓存里
+ *   （机器人常常只加了主人一个好友）时 added 是 0，那也是「拿到了」，不是「取不到」。
+ *   `sampleKeys` 只在认不出号码时填，用来告诉用户字段究竟叫什么。
+ */
 function mergeInto(bot, isGroup, arr) {
   const cache = isGroup ? bot.gl : bot.fl
-  if (!(cache instanceof Map)) return 0
+  if (!(cache instanceof Map)) return {added: 0, matched: 0, ids: [], sampleKeys: []}
   const idKeys = isGroup ? GROUP_ID_KEYS : FRIEND_ID_KEYS
   const idField = isGroup ? 'group_id' : 'user_id'
   let added = 0
+  let matched = 0
+  const ids = []
+  const sampleKeys = []
   for (const it of arr) {
     if (!it || typeof it !== 'object') continue
     const found = idKeys.map((k) => it[k]).find((v) => v != null && v !== '')
-    if (found == null) continue
+    if (found == null) {
+      if (!sampleKeys.length) sampleKeys.push(...Object.keys(it).slice(0, 8))
+      continue
+    }
+    matched++
     // 缓存的 key 用数字，跟适配器和 lib/bot.js 的取法保持一致
     const key = Number(found) || found
+    if (ids.length < 5) ids.push(key)
     if (!cache.has(key)) added++
     // 补齐标准字段名，前端和 lib/bot.js 都按它取
     cache.set(key, {...it, [idField]: key})
   }
-  return added
+  return {added, matched, ids, sampleKeys}
 }
 
 /**
@@ -117,7 +132,7 @@ function mergeInto(bot, isGroup, arr) {
  *
  * 所以这里自己来一遍：接口逐个试、字段名多认几个、写入用**合并**而不是替换。
  *
- * @return {Promise<{added: number, tried: string[]}|null>}
+ * @return {Promise<{added: number, matched: number, tried: string[]}|null>}
  *   null 表示这个账号压根没法调接口（比如 stdin 这种伪账号），跟「调了但是空」不是一回事
  */
 async function loadViaApi(bot, isGroup) {
@@ -125,19 +140,28 @@ async function loadViaApi(bot, isGroup) {
   const tried = []
   for (const api of isGroup ? GROUP_APIS : FRIEND_APIS) {
     let arr = []
+    let res
     try {
-      const res = await bot.sendApi(api)
+      res = await bot.sendApi(api)
       arr = pickList(res)
-      tried.push(`${api}: ${describe(res, arr)}`)
     } catch (err) {
       tried.push(`${api}: 抛错 ${err?.message ?? err}`)
       continue
     }
-    if (!arr.length) continue
-    const added = mergeInto(bot, isGroup, arr)
-    if (added) return {added, tried}
+    if (!arr.length) {
+      tried.push(`${api}: ${describe(res, arr)}`)
+      continue
+    }
+    const {added, matched, ids, sampleKeys} = mergeInto(bot, isGroup, arr)
+    if (matched) {
+      // 把号码列出来 —— 「1 项」到底是主人还是机器人自己，只有这样才看得出来
+      tried.push(`${api}: ${describe(res, arr)}，取到 ${matched} 个 [${ids.join(', ')}]（新增 ${added}）`)
+      return {added, matched, ids, tried}
+    }
+    // 认不出号码：把实际的键名报出来，才知道该往 ID_KEYS 里补什么
+    tried.push(`${api}: ${describe(res, arr)}，认不出号码字段，键有 {${sampleKeys.join(', ')}}`)
   }
-  return {added: 0, tried}
+  return {added: 0, matched: 0, ids: [], tried}
 }
 
 /**
@@ -207,9 +231,18 @@ export async function ensureContacts(kind = 'friend', botId = '') {
             if (failed) nextTry.set(key, Date.now() + RETRY_TTL)
             return
           }
-          if (result.added) {
-            // 说清是谁救回来的，不然用户只觉得「时好时坏」
-            logger?.mark?.(`[Guoba] 适配器没拉到${name}列表，已自行取回 ${result.added} 个（${uin}）`)
+          if (result.matched) {
+            /**
+             * 判成功看 matched 而不是 added。机器人常常只加了主人一个好友，协议端给的那个人
+             * 早就在缓存里了 —— added 是 0，但列表确实是拿到了的，这时候警告纯属误报。
+             */
+            if (result.added) {
+              // 带上号码：只取回一两个时，得看得出到底是主人还是机器人自己
+              logger?.mark?.(`[Guoba] 适配器没拉到${name}列表，已自行取回 ${result.added} 个`
+                + ` [${result.ids.join(', ')}]（${uin}）`)
+            } else {
+              logger?.debug?.(`[Guoba] ${name}列表已是协议端给的全部（${uin}）：${result.tried.join('；')}`)
+            }
             return
           }
           // 报错过就早点再试；干净地返回了空（新号、只进群不加好友）就按长间隔来
