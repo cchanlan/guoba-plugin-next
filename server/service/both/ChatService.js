@@ -4,7 +4,7 @@ import {lookup as dnsLookup} from 'node:dns/promises'
 import {GuobaError, Service} from '#guoba.framework'
 import {AssetStore, flattenOneBot, normalizeMsg, toBase64File} from './model/msgSegment.js'
 import {groupAvatarUrl, userAvatarUrl} from './model/avatar.js'
-import {listBots} from './model/bots.js'
+import {listBots, ensureContacts} from './model/bots.js'
 import {packetSupport} from './model/packetSupport.js'
 
 /**
@@ -699,8 +699,10 @@ export default class ChatService extends Service {
    *
    * @param type 'group' | 'friend'
    */
-  listSessions({type = 'group', botId = '', keyword = '', pageNo = 1, pageSize = 30} = {}) {
+  async listSessions({type = 'group', botId = '', keyword = '', pageNo = 1, pageSize = 30} = {}) {
     const isGroup = type !== 'friend'
+    // 适配器连接时那次拉取可能没成功，缓存空着就先补一次，见 ensureContacts
+    await ensureContacts(isGroup ? 'group' : 'friend', botId)
     const map = (isGroup ? Bot.getGroupMap?.() : Bot.getFriendMap?.()) ?? new Map()
     const kw = String(keyword ?? '').trim().toLowerCase()
     const wantBot = String(botId ?? '').trim()

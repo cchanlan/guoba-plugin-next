@@ -40,7 +40,7 @@ export class ChatController extends ApiController {
   /** 会话列表（群 / 好友），带最后一条摘要与未读数 */
   async sessions(req) {
     const {type, botId, keyword, pageNo, pageSize} = req.query ?? {}
-    return Result.ok(this.chatService.listSessions({type, botId, keyword, pageNo, pageSize}))
+    return Result.ok(await this.chatService.listSessions({type, botId, keyword, pageNo, pageSize}))
   }
 
   /** 拉历史消息，seq 为向上翻页的游标 */

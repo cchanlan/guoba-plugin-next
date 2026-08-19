@@ -1,5 +1,6 @@
 import {GuobaError, Service} from '#guoba.framework';
 import {toPairsMap} from '#guoba.utils'
+import {ensureContacts} from './model/bots.js'
 
 /** 单次群发的目标数上限，再多就该用插件自己写定时任务了 */
 const MAX_TARGETS = 500
@@ -128,19 +129,29 @@ export class OicqService extends Service {
     return {groupId: Number(groupId) || groupId, isDismiss: !!isDismiss}
   }
 
-  getFriendList() {
+  /**
+   * 好友 / 群列表与计数。
+   *
+   * 都先过一遍 {@link ensureContacts}：适配器只在连接时拉过一次列表，那次失败或没跑完的话
+   * 缓存就是空的，页面上会显示成「好友 0 个」或只剩机器人自己一条。
+   */
+  async getFriendList() {
+    await ensureContacts('friend')
     return toPairsMap(Bot.getFriendMap?.() || Bot.getFriendList())
   }
 
-  getFriendCount() {
+  async getFriendCount() {
+    await ensureContacts('friend')
     return (Bot.getFriendMap?.() || Bot.getFriendList()).size
   }
 
-  getGroupList() {
+  async getGroupList() {
+    await ensureContacts('group')
     return toPairsMap(Bot.getGroupMap?.() || Bot.getGroupList())
   }
 
-  getGroupCount() {
+  async getGroupCount() {
+    await ensureContacts('group')
     return (Bot.getGroupMap?.() || Bot.getGroupList()).size
   }
 

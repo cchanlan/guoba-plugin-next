@@ -1,6 +1,7 @@
 import {autowired, Pager, Result} from '#guoba.framework'
 import {ApiController} from '#guoba.platform'
 import {groupAvatarUrl, userAvatarUrl} from '../../service/both/model/avatar.js'
+import {ensureContacts} from '../../service/both/model/bots.js'
 
 /** QQ相关操作 */
 export class OicqController extends ApiController {
@@ -26,7 +27,7 @@ export class OicqController extends ApiController {
 
     // 列表里每项都带算好的 avatar（QQBot 的 openid 前端拼不出来）
     this.get('/friend/list', this.queryFriendList)
-    this.get('/friend/count', () => Result.ok(this.oicqService.getFriendCount()))
+    this.get('/friend/count', async () => Result.ok(await this.oicqService.getFriendCount()))
 
     this.get('/group/list', this.queryGroupList)
   }
@@ -98,6 +99,8 @@ export class OicqController extends ApiController {
     pageNo = !pageNo ? 1 : Number.parseInt(pageNo)
     pageSize = !pageSize ? 10 : Number.parseInt(pageSize)
 
+    // 缓存空着先补一次，否则协议端刚起来时列表是空的（见 ensureContacts）
+    await ensureContacts('group')
     let groupList = Bot.getGroupMap?.() || Bot.getGroupList()
     let list = []
     let filter = (_) => true
@@ -143,6 +146,7 @@ export class OicqController extends ApiController {
     pageNo = !pageNo ? 1 : Number.parseInt(pageNo)
     pageSize = !pageSize ? 10 : Number.parseInt(pageSize)
 
+    await ensureContacts('friend')
     let friendList = Bot.getFriendMap?.() || Bot.getFriendList()
     let list = []
     let filter = (_) => true
