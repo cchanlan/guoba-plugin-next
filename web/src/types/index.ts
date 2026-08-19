@@ -140,6 +140,17 @@ export interface UsageItem {
   percent: number
 }
 
+export interface DiskItem {
+  /** 挂载点或盘符 */
+  name: string
+  /** 文件系统类型，取不到时为空串 */
+  fs: string
+  total: number
+  used: number
+  free: number
+  percent: number
+}
+
 export interface SystemStatus {
   load: {
     avg1: number
@@ -153,11 +164,40 @@ export interface SystemStatus {
   cpu: {
     percent: number
     count: number
+    /** 物理核心数，0 表示没读到 */
+    physicalCores?: number
     model: string
+    /** 厂商，如 Intel */
+    manufacturer?: string
+    /** 主频 GHz，0 表示没读到 */
+    speed?: number
+    /** 温度 ℃，0 表示没读到（虚拟机通常读不到） */
+    temp?: number
   }
-  memory: UsageItem
-  /** 取不到磁盘信息时为 null */
+  memory: UsageItem & {
+    /** 缓冲/缓存，Linux 上不算进已用 */
+    buffcache?: number
+  }
+  /** 内存条频率 MHz，0 表示没读到 */
+  memClock?: number
+  /** 内存代际，如 DDR4 */
+  memType?: string
+  /** 没开 swap 时为 null */
+  swap?: (UsageItem & { free: number }) | null
+  /** 没有独显时为 null；核显只有 model/vendor，percent 为 null */
+  gpu?: {
+    model: string
+    vendor: string
+    percent: number | null
+    memUsed?: number
+    memTotal?: number
+    /** 温度 ℃ */
+    temp?: number
+  } | null
+  /** 取不到磁盘信息时为 null。占用最高/根分区那一块，兼容旧字段 */
   disk: (UsageItem & { name: string }) | null
+  /** 全部磁盘 */
+  disks?: DiskItem[]
   /** 单位：秒 */
   uptime: {
     process: number
@@ -166,6 +206,8 @@ export interface SystemStatus {
   platform: string
   arch: string
   nodeVersion: string
+  /** 装了 systeminformation 才有 CPU 型号 / 频率 / SWAP / GPU / 温度 */
+  extended?: boolean
 }
 
 export interface MsgTrendItem {

@@ -11,11 +11,13 @@ import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { init, use } from 'echarts/core'
 import type { ECharts } from 'echarts/core'
 import { LineChart, PieChart } from 'echarts/charts'
-import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
+import { GridComponent, LegendComponent, TitleComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { useAppStore } from '@/stores/app'
 
-use([PieChart, LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
+// TitleComponent 别漏：环形图靠 title 在圆心写百分比，不注册的话 ECharts 会静默不画它 ——
+// 环画出来了、中间是空的，看着像后端没给数据
+use([PieChart, LineChart, GridComponent, TitleComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const props = withDefaults(
   defineProps<{

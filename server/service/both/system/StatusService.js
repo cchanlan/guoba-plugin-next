@@ -2,6 +2,7 @@ import os from 'os'
 import moment from 'moment'
 import {Service} from '#guoba.framework'
 import {diskInfo} from '#guoba.libs'
+import {collect as collectHardware, warmup as warmupHardware} from './hardware.js'
 
 /** 采样两次 /proc 计算 CPU 占用的间隔 */
 const CPU_SAMPLE_INTERVAL = 200
@@ -25,6 +26,8 @@ export class StatusService extends Service {
 
   constructor(app) {
     super(app)
+    // 预热硬件静态信息（CPU 型号、内存条频率），别让第一次打开首页等在这儿
+    warmupHardware().catch(() => {})
   }
 
   /** 上次为磁盘失败打日志的时刻，见 {@link DISK_WARN_INTERVAL} */
@@ -60,8 +63,33 @@ export class StatusService extends Service {
     return Math.min(100, Math.max(0, ((totalDiff - idleDiff) / totalDiff) * 100))
   }
 
-  /** 根分区（Windows 下取占用最高的盘）使用情况 */
-  async getDiskUsage() {
+  /**
+   * 全部磁盘。si 不可用时的退路 —— 锅巴自带的 diskinfo 走 `df` / PowerShell CIM，
+   * 拿到的盘列表跟 si 是一回事，只是没有文件系统类型。
+   */
+  async #getDisksFallback() {
+    const drives = await this.#getDrives()
+    if (!drives) return []
+    const out = []
+    for (const d of drives) {
+      if (!d.filesystem || IGNORE_FS.test(d.filesystem)) continue
+      const total = Number(d.blocks) * 1024
+      const used = Number(d.used) * 1024
+      if (!total) continue
+      out.push({
+        name: d.mounted || d.filesystem,
+        fs: '',
+        total,
+        used,
+        free: Math.max(0, total - used),
+        percent: (used / total) * 100,
+      })
+    }
+    return out
+  }
+
+  /** 读一次盘列表，失败时按 {@link DISK_WARN_INTERVAL} 节流告警 */
+  async #getDrives() {
     let drives
     try {
       drives = await diskInfo.getDrives()
@@ -74,45 +102,39 @@ export class StatusService extends Service {
       }
       return null
     }
-    if (!Array.isArray(drives) || drives.length === 0) {
-      return null
-    }
-    const real = drives.filter(d => d.filesystem && !IGNORE_FS.test(d.filesystem))
-    if (real.length === 0) {
-      return null
-    }
-    // 优先根分区；Windows 没有 `/`，退化为空间最大的那块盘
-    let target = real.find(d => d.mounted === '/')
-    if (!target) {
-      target = real.reduce((a, b) => (Number(b.blocks) > Number(a.blocks) ? b : a))
-    }
-    // df 输出单位是 1K block
-    const total = Number(target.blocks) * 1024
-    const used = Number(target.used) * 1024
-    if (!total) {
-      return null
-    }
-    return {
-      name: target.mounted || target.filesystem,
-      total,
-      used,
-      percent: (used / total) * 100,
-    }
+    return Array.isArray(drives) && drives.length ? drives : null
   }
 
-  /** 系统状态：负载、CPU、内存、磁盘 */
+  /**
+   * 系统状态：负载、CPU、内存、SWAP、GPU、磁盘。
+   *
+   * 优先用 {@link collectHardware}（systeminformation）—— 它能给出 `os` 拿不到的 CPU 型号、
+   * 内存频率、SWAP、显卡占用和温度。装不上就整块降级回 `os`，少几项但不会崩。
+   */
   async getSystemStatus() {
-    const totalMem = os.totalmem()
-    const freeMem = os.freemem()
-    const usedMem = totalMem - freeMem
     const cpuCount = os.cpus().length || 1
     // Windows 上 loadavg 恒为 [0,0,0]，前端据此隐藏该项
     const [load1, load5, load15] = os.loadavg()
 
-    const [cpuUsage, disk] = await Promise.all([
-      this.getCpuUsage(),
-      this.getDiskUsage(),
-    ])
+    const hw = await collectHardware().catch(() => null)
+
+    // CPU 占用：si 没给就自己采样两次算
+    const cpuPercent = typeof hw?.cpu?.percent === 'number'
+      ? hw.cpu.percent
+      : await this.getCpuUsage()
+
+    // 内存：si 的 active 比 os.freemem() 准（Linux 上 free 不含可回收的 buff/cache）
+    let memory = hw?.memory
+    if (!memory) {
+      const totalMem = os.totalmem()
+      const usedMem = totalMem - os.freemem()
+      memory = {total: totalMem, used: usedMem, percent: (usedMem / totalMem) * 100, buffcache: 0}
+    }
+
+    const disks = hw?.disks?.length ? hw.disks : await this.#getDisksFallback()
+    // 保留单值 disk 字段：老前端和外部调用方还在读它
+    const disk = disks.find((d) => d.name === '/')
+      ?? disks.reduce((a, b) => (!a || b.total > a.total ? b : a), null)
 
     return {
       load: {
@@ -125,16 +147,27 @@ export class StatusService extends Service {
         supported: os.platform() !== 'win32',
       },
       cpu: {
-        percent: cpuUsage,
-        count: cpuCount,
-        model: os.cpus()[0]?.model?.trim() ?? '',
+        percent: cpuPercent,
+        count: hw?.cpu?.cores || cpuCount,
+        physicalCores: hw?.cpu?.physicalCores ?? 0,
+        model: hw?.cpu?.model || os.cpus()[0]?.model?.trim() || '',
+        manufacturer: hw?.cpu?.manufacturer ?? '',
+        /** GHz，0 表示没读到 */
+        speed: hw?.cpu?.speed ?? 0,
+        /** ℃，0 表示没读到（虚拟机通常读不到） */
+        temp: hw?.cpu?.temp ?? 0,
       },
-      memory: {
-        total: totalMem,
-        used: usedMem,
-        percent: (usedMem / totalMem) * 100,
-      },
+      memory,
+      /** 内存条频率 MHz / 代际，0 和空串表示没读到 */
+      memClock: hw?.memClock ?? 0,
+      memType: hw?.memType ?? '',
+      /** 没开 swap 时为 null */
+      swap: hw?.swap ?? null,
+      /** 没有独显、或读不到占用时为 null */
+      gpu: hw?.gpu ?? null,
       disk,
+      /** 全部磁盘，前端列表用 */
+      disks,
       // 进程与主机各自的运行时长，单位秒
       uptime: {
         process: process.uptime(),
@@ -143,6 +176,8 @@ export class StatusService extends Service {
       platform: `${os.type()} ${os.release()}`,
       arch: os.arch(),
       nodeVersion: process.version,
+      /** 有没有 systeminformation：没有的话前端不必留出扩展项的位置 */
+      extended: !!hw,
     }
   }
 
