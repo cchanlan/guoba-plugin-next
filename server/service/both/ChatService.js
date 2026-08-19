@@ -5,6 +5,7 @@ import {GuobaError, Service} from '#guoba.framework'
 import {AssetStore, flattenOneBot, normalizeMsg, toBase64File} from './model/msgSegment.js'
 import {groupAvatarUrl, userAvatarUrl} from './model/avatar.js'
 import {listBots} from './model/bots.js'
+import {packetSupport} from './model/packetSupport.js'
 
 /**
  * 实时缓冲最多留多少条。
@@ -415,6 +416,8 @@ export default class ChatService extends Service {
 
     const bot = this.#bot(botId)
     let realSeq = null
+    /** get_msg 成功返回了、但里面没有 real_seq —— 跟「get_msg 整个失败」是两码事，见 #getPb */
+    let seqMissing = false
     if (typeof bot?.sendApi === 'function') {
       try {
         const res = await bot.sendApi('get_msg', {message_id: mid})
@@ -425,6 +428,7 @@ export default class ChatService extends Service {
           if (data.message != null) out.array = this.#dump(data.message)
           out.found = true
           realSeq = data.real_seq ?? null
+          seqMissing = realSeq == null
         }
       } catch (err) {
         // 消息太旧、实现没这接口都会失败，缓冲里那份还在，继续
@@ -432,7 +436,7 @@ export default class ChatService extends Service {
       }
     }
 
-    const pb = await this.#getPb({bot, type, id, messageId: mid, realSeq})
+    const pb = await this.#getPb({bot, type, id, messageId: mid, realSeq, seqMissing})
     out.pbNote = pb.pbNote ?? ''
     // 上报里自带 pb 字段的适配器（icqq 那类）留在缓冲里，协议现取到的优先
     out.pbElem = pb.pbElem || out.pbElem
@@ -449,10 +453,10 @@ export default class ChatService extends Service {
   /**
    * 取 protobuf 那两档。
    *
-   * 依赖两样东西，缺哪样都如实说明而不是留白：Packet-plugin（提供 pb 编解码）、
-   * 协议端支持 `send_packet`（NapCat 要开 packet 模式）。
+   * 依赖三样东西，缺哪样都如实说明而不是留白：群消息、Packet-plugin（提供 pb 编解码）、
+   * 协议端支持 `send_packet` —— 那是 NapCat 的 packet 模式扩展，别家协议端没有这个接口。
    */
-  async #getPb({bot, type, id, messageId, realSeq}) {
+  async #getPb({bot, type, id, messageId, realSeq, seqMissing}) {
     if (typeof bot?.sendApi !== 'function') {
       return {pbNote: '当前适配器没有 sendApi，取不了 protobuf。'}
     }
@@ -464,11 +468,22 @@ export default class ChatService extends Service {
       return {pbNote: '没找到 Packet-plugin。protobuf 的编解码由它提供，装上并让协议端开启 packet 模式（NapCat）后这两档才有内容。'}
     }
 
+    const support = this.#packetSupport(bot)
+    // get_msg 明明成功了却没有 real_seq，说明这个协议端不给这个字段。Packet-plugin 内部
+    // 也只会拿同一个接口再问一遍，白跑一趟还会抛「请尝试更新 napcat」误导人，直接说清楚
+    if (realSeq == null && seqMissing) {
+      return {pbNote: support.unsupported
+        ? support.note
+        : `协议端没有在 get_msg 里返回 real_seq，取不到 SsoGetGroupMsg 需要的消息序号。${support.note}`}
+    }
+
     try {
       // helper 只用到 e.bot 与 e.group_id，给个最小的假 e 就行
       const fakeEvent = {bot, group_id: Number(id) || id}
       const data = await helper.getMsg(fakeEvent, realSeq ?? messageId, realSeq != null)
-      if (!data) return {pbNote: '协议端没有返回 protobuf 数据，检查 NapCat 的 packet 模式是否开着。'}
+      if (!data) {
+        return {pbNote: support.unsupported ? support.note : `协议端没有返回 protobuf 数据。${support.note}`}
+      }
       let elems = PB_ELEM_PATH.reduce((cur, key) => cur?.[key], data)
       elems = Array.isArray(elems)
         ? elems.filter((item) => !PB_ELEM_DROP.includes(Object.keys(item ?? {})[0]))
@@ -480,8 +495,21 @@ export default class ChatService extends Service {
         pbNote: elems.length ? '' : '这条消息在 pb 里没有 elem 元素（滤掉杂项后是空的），pb raw 档还是完整的。',
       }
     } catch (err) {
-      return {pbNote: `取 protobuf 失败：${err?.message ?? err}`}
+      // 不支持的协议端上，Packet-plugin 抛的原文（「请尝试更新 napcat」之类）只会让人白折腾，
+      // 留给日志，界面上给准确的那句
+      if (support.unsupported) {
+        logger.debug(`[Guoba][消息记录] 取 protobuf 失败（${support.label}）：${err?.message ?? err}`)
+        return {pbNote: support.note}
+      }
+      return {pbNote: `取 protobuf 失败：${err?.message ?? err}\n${support.note}`}
     }
+  }
+
+  /**
+   * 当前协议端支不支持取 pb，以及取不到时该说什么。见 {@link packetSupport}。
+   */
+  #packetSupport(bot) {
+    return packetSupport(bot)
   }
 
   /** Packet-plugin 是可选依赖，动态 import 一次，成功与失败都记下来不重复试 */

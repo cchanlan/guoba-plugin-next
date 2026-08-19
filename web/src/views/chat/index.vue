@@ -1143,6 +1143,8 @@ const dateFlags = computed(() => {
   color: var(--g-text-sub);
   font-size: 12px;
   line-height: 1.7;
+  /* pbNote 里会带换行分隔「报错原文」和「该怎么办」，别被折成一整段 */
+  white-space: pre-line;
 }
 
 /* 窄屏两栏各占一屏（谁显示由 narrow + current 决定，见模板），都铺满可视高度 */
