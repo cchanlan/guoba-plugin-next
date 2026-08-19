@@ -180,6 +180,8 @@ export default class ChatService extends Service {
   #raws = new Map()
   /** Packet-plugin 的 helper：undefined 是还没试过，null 是没装 */
   #packet = undefined
+  /** `botId:type:id` —— 这些会话上「不带 message_seq 重试」试过也没用，见 {@link getHistory} */
+  #noRetryHistory = new Set()
   #handler = null
   #attached = false
 
@@ -804,23 +806,34 @@ export default class ChatService extends Service {
     } catch (err) {
       logger.error(`[Guoba][消息记录] ${api} 失败（${type} ${id}）：${err?.stack ?? err}`)
       /**
-       * 适配器**总会**带上 `message_seq`，取最新时那个值是 0 —— 而有的协议端只处理了「不带这个
-       * 参数」的情形，收到 0 就在自己那边炸。实测 LLOneBot v8.1.8 会抛
-       * `Cannot read properties of undefined (reading 'start')`（它的
-       * `onebot11/action/llbot/msg/GetFriendMsgHistory.ts:75`），那个属性名跟历史消息毫无关系，
-       * 光看云崽这边的堆栈只会以为是 `Bot.makeError` 出了问题 —— 其实它只是在转述协议端的报错。
+       * 按「不支持」返回，而不是抛出去。
        *
-       * 所以这里自己再发一次，取最新时干脆不传 message_seq。
+       * 协议端这个接口用不了是它的能力问题，不是用户操作失败 —— 抛出去会在页面上弹一个红色
+       * 报错，而走这条路前端会显示既有的那句说明，并自动拿实时缓冲里的消息填上（见
+       * `fillFromBuffer`），至少还看得到面板运行期间的消息。
+       */
+      const note = `协议端取不到这个会话的历史消息（${api} 内部报错：${err?.message ?? err}）。`
+        + '这是协议端自己的问题，锅巴和云崽都改不了；下面显示的是面板运行期间收到的消息。'
+      const fail = {supported: false, messages: [], hasMore: false, cursor, note}
+      const retryKey = `${botId}:${type}:${id}`
+      // 试过一次不带 message_seq 也没用的会话，别每次打开都再白发一遍请求
+      if (this.#noRetryHistory.has(retryKey)) return fail
+      /**
+       * 适配器**总会**带上 `message_seq`，取最新时那个值是 0 —— 而有的协议端只处理了「不带这个
+       * 参数」的情形。所以自己再发一次，取最新时把这个参数整个省掉。
+       *
+       * 实测对 LLOneBot v8.1.8 没用：它在
+       * `onebot11/action/llbot/msg/GetFriendMsgHistory.ts:75` 抛
+       * `Cannot read properties of undefined (reading 'start')`，带不带 message_seq 都一样，
+       * 所以那不是参数的问题。留着这一手是给别的协议端用的。
        */
       try {
         raw = await this.#historyViaApi({botId, type, id, count: num, seq: from})
         logger.mark(`[Guoba][消息记录] ${api} 改为不带 message_seq 重试后成功（${type} ${id}）`)
       } catch (retryErr) {
+        this.#noRetryHistory.add(retryKey)
         logger.debug(`[Guoba][消息记录] 不带 message_seq 重试也失败：${retryErr?.message ?? retryErr}`)
-        throw new GuobaError(`拉取历史消息失败：${err?.message ?? err}\n`
-          + `这句报错来自协议端内部（不是锅巴、也不是云崽），去协议端的日志里找这次 ${api} 请求。`
-          + '实测 LLOneBot 在「和机器人自己私聊」这种会话上取历史会抛这个错。'
-          + '协议端不支持的话，只能看面板运行期间收到的消息。')
+        return fail
       }
     }
 

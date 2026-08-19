@@ -770,6 +770,8 @@ export const apiChatHistory = (params: {
     messages: ChatMsg[]
     hasMore: boolean
     cursor: number
+    /** supported 为 false 时的具体原因（协议端报了什么），没有则用通用文案 */
+    note?: string
   }>('/chat/history', params)
 
 /** 实时增量，轮询调用，失败不弹提示 */

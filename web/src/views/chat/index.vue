@@ -119,6 +119,8 @@ const narrow = ref(narrowMq.matches)
 const messages = ref<ChatMsg[]>([])
 /** 适配器能不能拉历史，不能就只有面板运行期间的消息 */
 const historySupported = ref(true)
+/** 协议端取不到历史时的具体原因，空则用通用文案 */
+const historyNote = ref('')
 const hasMore = ref(false)
 const loadingHistory = ref(false)
 const sending = ref(false)
@@ -237,6 +239,7 @@ async function openSession(session: ChatSession) {
   missed.value = false
   hasMore.value = false
   historySupported.value = true
+  historyNote.value = ''
   follow.value = true
   newTip.value = false
   errMsg.value = ''
@@ -291,6 +294,7 @@ async function loadHistory(first = false) {
     // 期间可能已经切走了，别把结果盖到新会话上
     if (current.value?.key !== session.key) return
     historySupported.value = data.supported
+    historyNote.value = data.note ?? ''
 
     if (first) {
       cursor = data.cursor
@@ -810,7 +814,7 @@ const dateFlags = computed(() => {
           </div>
 
           <div v-if="!historySupported" class="g-chat-note">
-            当前适配器不支持拉取历史消息，只能看到面板运行期间收到的消息。
+            {{ historyNote || '当前适配器不支持拉取历史消息，只能看到面板运行期间收到的消息。' }}
           </div>
           <div v-if="missed" class="g-chat-note is-warn">
             有消息因内存缓冲上限被丢弃，中间可能不连续。
