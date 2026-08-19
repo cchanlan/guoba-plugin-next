@@ -495,12 +495,19 @@ onMounted(async () => {
 
 .g-bk-plugins {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  /* 一行要塞「勾选 + 状态 + 分支 + 地址」，列再窄就只能靠换行硬撑了 */
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 2px 16px;
 }
 
 .g-bk-plugin {
   display: flex;
+  /**
+   * 必须能换行。`.g-bk-remote-picker` 靠 `flex-basis: 100%` 独占第二行，容器 nowrap 时
+   * 它既占满宽度又不许收缩（`flex-shrink: 0`），会把同一行的插件名挤成竖排、把地址和
+   * 下拉框顶到隔壁列上去 —— 之前只在窄屏媒体查询里开了 wrap，桌面端就是这个样子。
+   */
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 3px 0;
@@ -509,6 +516,8 @@ onMounted(async () => {
 
 .g-bk-pname {
   font-weight: 500;
+  /* 名字本身别被拆成一列字 */
+  white-space: nowrap;
 }
 
 .g-bk-pbranch {
@@ -544,7 +553,9 @@ onMounted(async () => {
 }
 
 .g-bk-remote-select {
-  min-width: 220px;
+  /* 跟着列宽走。写死 min-width 会在窄列里把这一行顶出去 */
+  flex: 1 1 180px;
+  min-width: 0;
   max-width: 360px;
 }
 
@@ -599,11 +610,7 @@ onMounted(async () => {
     grid-template-columns: 1fr;
   }
 
-  /* 一行放不下「勾选 + 状态 + 分支 + 地址」，让地址换到第二行去 */
-  .g-bk-plugin {
-    flex-wrap: wrap;
-  }
-
+  /* 窄屏连地址都放不进第一行，让它也整行换下去 */
   .g-bk-premote {
     flex: 0 0 100%;
     padding-left: 24px;
