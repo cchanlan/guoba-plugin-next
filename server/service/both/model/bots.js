@@ -40,6 +40,55 @@ function looksEmpty(cache, uin) {
   return cache.has(Number(uin)) || cache.has(String(uin))
 }
 
+/** 各家实现里，好友 / 群号可能叫的名字 */
+const FRIEND_ID_KEYS = ['user_id', 'uin', 'qq', 'id']
+const GROUP_ID_KEYS = ['group_id', 'gid', 'id']
+/** 列表可能直接是数组，也可能包在这些字段下 */
+const LIST_WRAP_KEYS = ['friends', 'groups', 'list', 'data']
+/** 兜底也失败时，只警告一次，别每次刷新都刷一行 */
+const warned = new Set()
+
+/**
+ * 自己调一次 OneBot 的标准接口，把列表合并进缓存。
+ *
+ * 适配器那套（`plugins/adapter/OneBotv11.js` 的 `getFriendMap`）有两个前提：返回的一定是
+ * 数组、每项的号码一定叫 `user_id`。任一条不成立就会拿到一个空 Map，而它是
+ * `data.bot.fl = map` **整体替换** —— 连之前 `getFriendInfo` 写进去的条目都一起清掉，
+ * 于是页面上就只剩机器人自己（面板 pick 过它，那是替换之后才写回去的）。
+ *
+ * 所以这里自己来一遍：字段名多认几个，写入用**合并**而不是替换。
+ *
+ * @return {Promise<number>} 新写进缓存的条数
+ */
+async function loadViaApi(bot, isGroup) {
+  if (typeof bot?.sendApi !== 'function') return 0
+  const res = await bot.sendApi(isGroup ? 'get_group_list' : 'get_friend_list')
+  // sendApi 回来的是个 Proxy，data 里的字段直接取得到
+  const raw = res?.data ?? res
+  let arr = raw
+  if (!Array.isArray(arr)) {
+    arr = LIST_WRAP_KEYS.map((k) => raw?.[k]).find(Array.isArray) ?? []
+  }
+  if (!arr.length) return 0
+
+  const cache = isGroup ? bot.gl : bot.fl
+  if (!(cache instanceof Map)) return 0
+  const idKeys = isGroup ? GROUP_ID_KEYS : FRIEND_ID_KEYS
+  const idField = isGroup ? 'group_id' : 'user_id'
+  let added = 0
+  for (const it of arr) {
+    if (!it || typeof it !== 'object') continue
+    const found = idKeys.map((k) => it[k]).find((v) => v != null && v !== '')
+    if (found == null) continue
+    // 缓存的 key 用数字，跟适配器和 lib/bot.js 的取法保持一致
+    const key = Number(found) || found
+    if (!cache.has(key)) added++
+    // 补齐标准字段名，前端和 lib/bot.js 都按它取
+    cache.set(key, {...it, [idField]: key})
+  }
+  return added
+}
+
 /**
  * 确保好友 / 群列表已经加载过。
  *
@@ -49,7 +98,8 @@ function looksEmpty(cache, uin) {
  * 那一次要是失败了或还没跑完 —— QQ 刚启动、协议端还没就绪时很常见 —— `bot.fl` 就一直是
  * 初始化时那个空 Map，面板上于是「好友 0 个」「私聊列表只有机器人自己」。
  *
- * 所以读列表之前自己兜一次：缓存空着就让适配器重新拉一遍（它会回填 `bot.fl` / `bot.gl`）。
+ * 两级兜底：先让适配器重新拉一遍（它会回填 `bot.fl` / `bot.gl`），还是空就自己调标准接口，
+ * 见 {@link loadViaApi}。
  *
  * @param {'friend'|'group'} kind
  * @param {string} [botId] 只管这一个账号，缺省管所有在线账号
@@ -72,19 +122,53 @@ export async function ensureContacts(kind = 'friend', botId = '') {
 
       // 账号级的那个才会真的请求协议端；全局 Bot 上的同名方法只读缓存
       const load = isGroup ? bot.getGroupMap : bot.getFriendMap
-      if (typeof load !== 'function') return
+      const name = isGroup ? '群' : '好友'
+      const api = isGroup ? 'get_group_list' : 'get_friend_list'
 
       // 先占住，别让同一时刻涌进来的请求各发一遍（pending 要等下面 task 建好才生效）
       nextTry.set(key, Date.now() + RELOAD_TTL)
       const task = (async () => {
         try {
-          await load.call(bot)
+          /** 有任何一层是「抛错」而不是「干净地返回空」—— 多半是协议端还没就绪，值得早点重试 */
+          let failed = false
+          if (typeof load === 'function') {
+            try {
+              await load.call(bot)
+            } catch (err) {
+              // 适配器认死 user_id 字段、返回的不是数组就会在这儿炸，下面还有一层兜底
+              failed = true
+              logger?.debug?.(`[Guoba] 适配器拉取${name}列表失败（${uin}）：${err?.message ?? err}`)
+            }
+          }
+          // 适配器那套拿到空数组还会把缓存整个替换掉，所以拉完得再看一眼
+          if (!looksEmpty(isGroup ? bot.gl : bot.fl, uin)) return
+
+          let added = 0
+          try {
+            added = await loadViaApi(bot, isGroup)
+          } catch (err) {
+            failed = true
+            logger?.debug?.(`[Guoba] 直接调 ${api} 失败（${uin}）：${err?.message ?? err}`)
+          }
+
+          if (added) {
+            // 说清是谁救回来的，不然用户只觉得「时好时坏」
+            logger?.mark?.(`[Guoba] 适配器没拉到${name}列表，已自行取回 ${added} 个（${uin}）`)
+            return
+          }
+          // 报错过就早点再试；干净地返回了空（新号、只进群不加好友）就按长间隔来
+          if (failed) nextTry.set(key, Date.now() + RETRY_TTL)
+          if (!warned.has(key)) {
+            // 只提醒一次：面板每次刷新都会走到这儿
+            warned.add(key)
+            logger?.warn?.(`[Guoba] 取不到${name}列表（${uin}）：协议端的 ${api} 没有返回可用数据，`
+              + '面板上这一项会是空的')
+          }
         } catch (err) {
           // 顺序要紧：先放开重试窗口再打日志。日志本身要是出了岔子（logger 还没就位之类），
           // 重试时机不能跟着一起丢 —— 那会让这个账号在整个长间隔里都不再尝试
           nextTry.set(key, Date.now() + RETRY_TTL)
-          // 协议端不支持或还没准备好，列表就先是空的，不影响页面其它部分
-          logger?.debug?.(`[Guoba] 重新拉取${isGroup ? '群' : '好友'}列表失败（${uin}）：${err?.message ?? err}`)
+          logger?.debug?.(`[Guoba] 重新拉取${name}列表失败（${uin}）：${err?.message ?? err}`)
         }
       })()
       pending.set(key, task)

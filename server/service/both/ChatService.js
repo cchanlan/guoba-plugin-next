@@ -771,7 +771,15 @@ export default class ChatService extends Service {
     try {
       raw = await target.getChatHistory(from, num)
     } catch (err) {
-      throw new GuobaError(`拉取历史消息失败：${err?.message ?? err}`)
+      /**
+       * 这里的报错多半来自适配器内部，光一句 message 看不出是谁的问题
+       * （实测 LLOneBot 上会冒出 `Cannot read properties of undefined (reading 'start')`
+       * 这种跟历史消息毫无关系的话），堆栈得留到日志里才排查得动。
+       */
+      logger.error(`[Guoba][消息记录] 拉取历史消息失败（${type} ${id}）：${err?.stack ?? err}`)
+      throw new GuobaError(`拉取历史消息失败：${err?.message ?? err}`
+        + '（详细堆栈见运行日志。这一项要协议端支持 '
+        + `${type === 'group' ? 'get_group_msg_history' : 'get_friend_msg_history'}）`)
     }
 
     const list = (Array.isArray(raw) ? raw : [raw]).filter((it) => it && typeof it === 'object')
