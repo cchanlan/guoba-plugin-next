@@ -6,9 +6,8 @@
  * SWAP、显卡和温度（`status.extended`）；没有的话这些项自动不出现，剩下的照常显示。
  */
 import { computed } from 'vue'
-import { Card, Col, Row, Skeleton, Tooltip } from 'ant-design-vue'
+import { Card, Skeleton, Tooltip } from 'ant-design-vue'
 import GChart from '@/components/GChart.vue'
-import { useAppStore } from '@/stores/app'
 import { formatBytes, formatDuration, formatPercent } from '@/utils/format'
 import type { SystemStatus } from '@/types'
 
@@ -16,11 +15,6 @@ const props = defineProps<{
   status: SystemStatus | null
   loading: boolean
 }>()
-
-const appStore = useAppStore()
-
-// canvas 里画的文字拿不到 CSS 变量，只能按主题给死值
-const textColor = computed(() => (appStore.isDark ? 'rgba(255,255,255,0.88)' : 'rgba(0,0,0,0.85)'))
 
 /** 占用越高越警示：正常金色 → 偏高橙 → 危险红 */
 function colorOf(percent: number) {
@@ -66,8 +60,10 @@ const rings = computed<RingItem[]>(() => {
     title: 'CPU',
     percent: s.cpu.percent,
     caption: cpuBits.join(' '),
+    // 型号可能很长（`12th Gen Intel(R) Core(TM) i5-12600KF`），放第三行让它有整行宽度
     detail: [s.cpu.model, s.cpu.temp ? `${s.cpu.temp}℃` : ''].filter(Boolean).join(' · '),
-    tip: s.cpu.model || undefined,
+    tip: [s.cpu.model, s.cpu.physicalCores ? `${s.cpu.physicalCores} 物理核心` : '']
+      .filter(Boolean).join(' · ') || undefined,
   })
 
   items.push({
@@ -115,34 +111,30 @@ const rings = computed<RingItem[]>(() => {
 /** 磁盘：一块盘一条横向进度条。只有一块时也列出来，跟环形图区分开 */
 const disks = computed(() => props.status?.disks ?? [])
 
-/** 环形图：一段占用 + 一段留白，中心用 title 显示百分比 */
+/**
+ * 环形图：一段占用 + 一段留白。
+ *
+ * 中间那个百分比不画在 canvas 里 —— 62px 的画布上 echarts 算出来的 title 位置会明显偏左，
+ * 而且 canvas 里的文字取不到 CSS 变量、换主题得自己给死值。用一层绝对定位的 HTML 更准。
+ */
 function ringOption(item: RingItem) {
   const percent = Math.min(100, Math.max(0, item.percent))
   const color = colorOf(percent)
   return {
     animationDuration: 300,
-    title: {
-      // 环只有 92px 高，`100.00%` 会顶到两边的圆弧上，整数够用了
-      text: `${formatPercent(percent, 0)}%`,
-      left: 'center',
-      top: '38%',
-      textStyle: {
-        fontSize: 15,
-        fontWeight: 600,
-        color: textColor.value,
-      },
-    },
     series: [
       {
         type: 'pie',
-        radius: ['72%', '90%'],
+        // 环细一点，62px 的圆里才留得下中间那个百分比
+        radius: ['76%', '92%'],
         center: ['50%', '50%'],
         silent: true,
         label: { show: false },
         labelLine: { show: false },
         data: [
           { value: percent, itemStyle: { color, borderRadius: 6 } },
-          { value: 100 - percent, itemStyle: { color: 'rgba(128,138,160,0.18)' } },
+          // 0.18 那档在暗色卡片上几乎融进背景，占用低时环看着像个残缺的月牙
+          { value: 100 - percent, itemStyle: { color: 'rgba(128,138,160,0.3)' } },
         ],
       },
     ],
@@ -175,33 +167,40 @@ const envText = computed(() => {
 
     <Skeleton v-if="loading && !status" :paragraph="{ rows: 3 }" active />
     <template v-else>
-      <Row :gutter="[8, 16]">
-        <Col v-for="item in rings" :key="item.key" :xs="12" :sm="8" :md="6" :xl="4">
-          <Tooltip :title="item.tip">
-            <div class="g-ring">
-              <GChart :option="ringOption(item)" :height="92" />
-              <div class="g-ring-name">{{ item.title }}</div>
-              <div class="g-ring-caption">{{ item.caption }}</div>
-              <div v-if="item.detail" class="g-ring-detail">{{ item.detail }}</div>
+      <div class="g-metrics">
+        <Tooltip v-for="item in rings" :key="item.key" :title="item.tip">
+          <div class="g-metric">
+            <div class="g-metric-ring">
+              <GChart :option="ringOption(item)" :height="62" />
+              <span class="g-metric-pct">{{ formatPercent(item.percent, 0) }}%</span>
             </div>
-          </Tooltip>
-        </Col>
-      </Row>
+            <div class="g-metric-body">
+              <div class="g-metric-name">{{ item.title }}</div>
+              <div class="g-metric-value">{{ item.caption }}</div>
+              <div v-if="item.detail" class="g-metric-detail">{{ item.detail }}</div>
+            </div>
+          </div>
+        </Tooltip>
+      </div>
 
       <div v-if="disks.length" class="g-disks">
         <div v-for="d in disks" :key="d.name" class="g-disk">
-          <span class="g-disk-name" :title="d.name">{{ d.name }}</span>
+          <div class="g-disk-head">
+            <span class="g-disk-name" :title="d.name">{{ d.name }}</span>
+            <span class="g-disk-num" :style="{ color: colorOf(d.percent) }">
+              {{ formatPercent(d.percent, 0) }}%
+            </span>
+          </div>
           <span class="g-disk-bar">
             <span
               class="g-disk-fill"
               :style="{ width: `${Math.min(100, d.percent)}%`, background: colorOf(d.percent) }"
             />
           </span>
-          <span class="g-disk-num">{{ formatPercent(d.percent, 0) }}%</span>
-          <span class="g-disk-size">
-            {{ formatBytes(d.used) }} / {{ formatBytes(d.total) }}
-            <template v-if="d.fs"> · {{ d.fs }}</template>
-          </span>
+          <div class="g-disk-foot">
+            <span class="g-disk-size">{{ formatBytes(d.used) }} / {{ formatBytes(d.total) }}</span>
+            <span v-if="d.fs" class="g-disk-fs">{{ d.fs }}</span>
+          </div>
         </div>
       </div>
     </template>
@@ -223,68 +222,126 @@ const envText = computed(() => {
   color: var(--g-text-dim);
 }
 
-.g-ring {
-  text-align: center;
+/**
+ * 指标卡：环在左、文字在右。
+ *
+ * 之前是环在上、文字竖着排在下面 —— 宽屏上每项只占窄窄一列，右边空一大片，而
+ * `Celeron® N5105 · 48℃` 这种型号又比环宽、只能截断。横过来两边都解决了。
+ */
+.g-metrics,
+.g-disks {
+  display: grid;
+  gap: 10px;
 }
 
-.g-ring-name {
-  margin-top: 2px;
+.g-metrics {
+  /* auto-fit + 1fr：几项都能把整行铺满，不会在右边留空 */
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.g-metric {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--g-bg-soft);
+  min-width: 0;
+}
+
+.g-metric-ring {
+  position: relative;
+  flex: 0 0 62px;
+  width: 62px;
+}
+
+/* 压在环中心的百分比，见 ringOption 的说明 */
+.g-metric-pct {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 13px;
+  font-weight: 600;
+  color: var(--g-text);
+  pointer-events: none;
+}
+
+.g-metric-body {
+  /* min-width: 0 —— 少了它，长型号会把 flex 容器撑破而不是省略 */
+  min-width: 0;
+  line-height: 1.45;
+}
+
+.g-metric-name {
+  font-size: 13px;
+  font-weight: 500;
   color: var(--g-text);
 }
 
-.g-ring-caption,
-.g-ring-detail {
-  margin-top: 2px;
+.g-metric-value,
+.g-metric-detail {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.g-ring-caption {
+.g-metric-value {
   font-size: 12px;
-  color: var(--g-text-dim);
+  color: var(--g-text-sub);
 }
 
-.g-ring-detail {
+.g-metric-detail {
   font-size: 11px;
   color: var(--g-text-dim);
-  opacity: 0.75;
 }
 
 .g-disks {
+  /* 跟指标卡同一套卡片样式，靠一条分隔线区分，不然两组方块连成一片分不清 */
   margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--g-border, rgba(128, 138, 160, 0.18));
-  display: grid;
-  /* 一行放不下「盘名 + 进度条 + 百分比 + 容量」就换列 */
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 6px 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--g-border);
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
 }
 
 .g-disk {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--g-bg-soft);
+  min-width: 0;
+}
+
+.g-disk-head,
+.g-disk-foot {
   display: flex;
-  align-items: center;
+  align-items: baseline;
+  justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  font-size: 12px;
 }
 
 .g-disk-name {
-  flex: 0 0 auto;
-  max-width: 120px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--g-text);
 }
 
+.g-disk-num {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .g-disk-bar {
-  flex: 1 1 60px;
-  min-width: 40px;
+  display: block;
+  margin: 6px 0 5px;
   height: 6px;
   border-radius: 3px;
-  background: rgba(128, 138, 160, 0.18);
+  background: rgba(128, 138, 160, 0.3);
   overflow: hidden;
 }
 
@@ -295,21 +352,20 @@ const envText = computed(() => {
   transition: width 0.3s;
 }
 
-.g-disk-num {
-  flex: 0 0 auto;
-  min-width: 30px;
-  text-align: right;
-  color: var(--g-text);
+.g-disk-size,
+.g-disk-fs {
+  font-size: 11px;
+  color: var(--g-text-dim);
 }
 
 .g-disk-size {
-  /* 这行最长，列窄时先压它并省略，别把整行顶出去 */
-  flex: 0 1 auto;
-  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  color: var(--g-text-dim);
+}
+
+.g-disk-fs {
+  flex: 0 0 auto;
 }
 
 @media (max-width: 768px) {
@@ -318,18 +374,16 @@ const envText = computed(() => {
     display: none;
   }
 
+  .g-metrics,
   .g-disks {
-    grid-template-columns: 1fr;
+    /* 手机上一行两个仍看得清，环 62px + 两行小字塞得下 */
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px;
   }
 
-  /* 容量文字最长，窄屏让它整行换下去，进度条才有地方 */
-  .g-disk {
-    flex-wrap: wrap;
-  }
-
-  .g-disk-size {
-    flex: 0 0 100%;
-    padding-left: 0;
+  .g-metric {
+    padding: 8px;
+    gap: 8px;
   }
 }
 </style>
