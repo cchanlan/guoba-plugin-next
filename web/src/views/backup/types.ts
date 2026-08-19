@@ -61,6 +61,7 @@ export const KIND_TEXT: Record<string, string> = {
   mixed: '混合',
   plain: '整目录',
   tracked: '仓库自带',
+  gitdir: 'Git 仓库',
 }
 
 /** 来源标记 → 标签颜色 */
@@ -71,6 +72,8 @@ export const KIND_COLOR: Record<string, string> = {
   mixed: 'purple',
   plain: 'default',
   tracked: 'default',
+  // 醒目一点：勾不勾它决定还原后的插件还能不能更新
+  gitdir: 'red',
 }
 
 /** 任务阶段 → 中文 */

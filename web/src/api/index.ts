@@ -1131,6 +1131,11 @@ export interface BackupTask {
         fileFailures: Array<{ name: string; reason: string }>
         pending: string[]
         restored: number
+        /**
+         * 还原完仍然没有 `.git` 的 git 插件：它们看着装好了，但没法 git 更新
+         * （更新命令会误伤云崽本体的仓库，锅巴已在更新入口挡住）
+         */
+        noGit?: string[]
         /** 被覆盖的原文件挪去了哪儿（相对 Yunzai 根），空串表示没覆盖任何文件 */
         backupDir: string
         /** 没勾「还原后安装依赖」时是 null */

@@ -6,7 +6,7 @@
   "module": "index.js",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test/components/Changelog.test.js"
+    "test": "node --test \"test/**/*.test.js\""
   },
   "imports": {
     "#guoba.platform": "./models/platform.js",

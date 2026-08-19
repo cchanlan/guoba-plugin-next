@@ -8,7 +8,7 @@ import {ZipWriter, readEntries, readEntryBuffer, extractEntry, safeJoin} from '.
 import {parseReadmeInstall} from '../../utils/readmeInstall.js'
 import {
   discoverTarget, discoverPlain, repoInfo, sanitizeRemote, shouldSkipName,
-  gitArgs, DISCOVER_LIMITS,
+  gitArgs, DISCOVER_LIMITS, GIT_DIR_REL, GIT_SKIP_RE, sanitizeGitConfig,
 } from '../../utils/backupDiscover.js'
 
 /** 备份包放这儿（Yunzai 根的相对路径） */
@@ -37,6 +37,14 @@ const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
 const PACK_NAME_RE = /^[\w.-]+\.zip$/i
 /** 插件目录名规则：不许有分隔符和相对路径 */
 const PLUGIN_NAME_RE = /^[\w.-]+$/
+/**
+ * `.git` 里存 remote 地址（也就是可能存凭证）的文件名。
+ *
+ * 除了 `.git/config` 本身，子模块的 `.git/modules/<名字>/config` 和多 worktree 的
+ * `config.worktree` 也是同一种文件。宁可多过一遍 —— {@link sanitizeGitConfig} 只动
+ * `url = ` 行，对不含这种行的文件是空操作。
+ */
+const GIT_CONFIG_NAME_RE = /^config(?:\.worktree)?$/
 /**
  * npm 包名规则（普通包 / @scope/pkg）。
  *
@@ -241,7 +249,7 @@ export default class BackupService extends Service {
           // 镜像会成为首选；全部都不允许则按无地址处理，避免还原时才发现。
           const remotes = (info.remotes ?? []).filter((it) => this.#remoteAllowed(it.url).ok)
           const entries = info.git
-            ? (await discoverTarget(dir, {prefix, excludes: this.excludes})).entries
+            ? (await discoverTarget(dir, {prefix, excludes: this.excludes, includeGitDir: true})).entries
             : discoverPlain(dir, {prefix, excludes: this.excludes})
           out.push({
             name, ...info, remote: remotes[0]?.url || '', remotes, noGit: !info.git, entries,
@@ -467,7 +475,8 @@ export default class BackupService extends Service {
       for (const rel of item.paths) {
         const abs = path.join(this.root, item.base, rel)
         const entryBase = item.base ? `${item.base}/${rel}` : rel
-        for (const f of this.#walk(abs, entryBase)) {
+        // `.git` 是唯一走 raw 的条目：通用黑名单会把它挖残，见 #walk
+        for (const f of this.#walk(abs, entryBase, {raw: rel === GIT_DIR_REL})) {
           if (seenNames.has(f.entryName)) continue
           seenNames.add(f.entryName)
           files.push(f)
@@ -513,7 +522,12 @@ export default class BackupService extends Service {
           await zip.addDirectory(FILES_PREFIX + f.entryName)
         } else {
           try {
-            await zip.addFile(FILES_PREFIX + f.entryName, f.abs, {stat: f.stat})
+            if (f.sanitize === 'git-config') {
+              await zip.addBuffer(FILES_PREFIX + f.entryName, this.#gitConfigBuffer(f.abs),
+                {mtime: f.stat?.mtime, mode: 0o644})
+            } else {
+              await zip.addFile(FILES_PREFIX + f.entryName, f.abs, {stat: f.stat})
+            }
           } catch (err) {
             failedFiles.push({name: f.entryName, reason: err.message})
             this.#log(`打包 ${f.entryName} 失败：${err.message}`, 'error')
@@ -596,6 +610,13 @@ export default class BackupService extends Service {
         keys,
         // 必须明确记账，不能靠包里出现 package.json 猜：用户完全可以只手动勾这一个文件
         whole: p.entries.length > 0 && keys.length === p.entries.length,
+        /**
+         * 包里带着这个插件的 `.git` 吗。
+         *
+         * 还原侧靠它决定「能不能跳过 clone」：没有 `.git` 的整份还原会铺出一个不是仓库的
+         * 插件目录，git 命令会往上找到云崽本体 —— 更新插件变成更新云崽。见 #runRestore。
+         */
+        hasGitDir: keys.includes(`plugin:${p.name}|${GIT_DIR_REL}`),
       }
     })
     return {items, plugins}
@@ -626,8 +647,15 @@ export default class BackupService extends Service {
    *
    * 黑名单和 excludes 跟扫描时用的是同一套（`node_modules` / `logs` / 备份目录自己），
    * 不然勾了 `plugins/example` 就会把它 56 M 的 node_modules 一起打进去。
+   *
+   * @param {string} abs 绝对路径
+   * @param {string} entryName 包内路径（不含 {@link FILES_PREFIX}）
+   * @param {object} [opts]
+   * @param {boolean} [opts.raw] `.git` 专用：不套通用黑名单，换成 {@link GIT_SKIP_RE}。
+   *   通用黑名单会挖掉 `.git/logs/`（`logs` 在 SKIP_NAMES 里）和 `.git/**\/*.pid`
+   *   （`.pid` 在 SKIP_EXT 里），残缺的仓库还原出来是坏的
    */
-  * #walk(abs, entryName) {
+  * #walk(abs, entryName, {raw = false} = {}) {
     let st
     try {
       st = fs.lstatSync(abs)
@@ -637,7 +665,10 @@ export default class BackupService extends Service {
     if (st.isSymbolicLink()) return
     if (this.excludes.has(abs)) return
     if (st.isFile()) {
-      yield {abs, entryName, size: st.size, stat: st, isDir: false}
+      // git 的 config 文件里存着明文凭证，不能原样进包。`.git/modules/<子模块>/config`
+      // 也是同一种文件，同样要过一遍，见 #gitConfigBuffer
+      const sanitize = raw && GIT_CONFIG_NAME_RE.test(path.basename(entryName)) ? 'git-config' : ''
+      yield {abs, entryName, size: st.size, stat: st, isDir: false, sanitize}
       return
     }
     if (!st.isDirectory()) return
@@ -653,9 +684,18 @@ export default class BackupService extends Service {
       return
     }
     for (const it of items) {
-      if (shouldSkipName(it.name)) continue
-      yield * this.#walk(path.join(abs, it.name), `${entryName}/${it.name}`)
+      if (raw ? GIT_SKIP_RE.test(it.name) : shouldSkipName(it.name)) continue
+      yield * this.#walk(path.join(abs, it.name), `${entryName}/${it.name}`, {raw})
     }
+  }
+
+  /**
+   * `.git/config` 的脱敏版本，见 {@link sanitizeGitConfig}。
+   *
+   * 备份包会被下载、可能转发给别人，仓库 config 里的 `user:token@` 绝不能跟着走出去。
+   */
+  #gitConfigBuffer(abs) {
+    return sanitizeGitConfig(fs.readFileSync(abs, 'utf8'))
   }
 
   #normalizeKeys(keys) {
@@ -732,6 +772,8 @@ export default class BackupService extends Service {
     const result = {
       cloned: [], cloneSources: {}, copied: [], skipped: [], failed: [], fileFailures: [],
       pending: [], restored: 0, backupDir: '',
+      /** @type {string[]} 还原完仍然没有 `.git` 的 git 插件 —— 它们更新不了，见 #runRestore 末尾 */
+      noGit: [],
       /** @type {object|null} 阶段三的结果，见 {@link #installDeps} */
       deps: null,
       /** 每个插件 clone / 解文件后立刻执行的依赖安装结果 */
@@ -751,7 +793,13 @@ export default class BackupService extends Service {
     this.#validateCloneRemotes(cloneRemotes, byName)
     const unavailable = new Set()
     const installedNow = this.#installedPlugins()
+    /** 包里够完整、可以直接按文件还原、不用 clone 的插件 */
     const byFiles = new Set()
+    /**
+     * 文件够完整但缺 `.git` 的插件：先试 clone（为了拿回仓库），clone 不通就退回按文件还原。
+     * 全是改动前的旧包会落到这里 —— 离线环境下不能因为「拿不到 .git」就干脆不装。
+     */
+    const fileFallback = new Set()
     const requestedPlugins = new Set(plugins)
     const pluginTargets = new Map()
     const rootTargets = []
@@ -773,8 +821,18 @@ export default class BackupService extends Service {
       const info = byName.get(name)
       // 包里完整还不够：本次还原也得把备份时的全部插件条目都勾上。否则用户只还原 config，
       // 却因 manifest.whole 跳过 clone，最终仍会得到残缺插件
-      if (info?.whole === true && Array.isArray(info.keys) && info.keys.length
-        && info.keys.every((key) => selectedKeys.has(key))) byFiles.add(name)
+      if (info?.whole !== true || !Array.isArray(info.keys) || !info.keys.length) continue
+      if (!info.keys.every((key) => selectedKeys.has(key))) continue
+      // 「文件齐全」不等于「能当仓库用」：git 插件还得带着 `.git`。少了它，铺出来的目录不是
+      // 仓库，git 会一路往上找到云崽本体 —— 更新插件就变成了更新云崽。
+      // 这种包（含所有改动前生成的旧包，`.git` 压根不进包）先去 clone 把仓库拿回来，clone
+      // 不通再退回按文件还原 —— 离线搬家至少还能把插件装上，见 fileFallback。
+      if (info.git === true && info.hasGitDir !== true) {
+        this.#log(`${name}：包里没有 .git，先尝试 clone 把仓库拿回来（否则插件没法更新）`, 'warn')
+        fileFallback.add(name)
+        continue
+      }
+      byFiles.add(name)
     }
 
     this.#task.phase = 'extracting'
@@ -808,7 +866,7 @@ export default class BackupService extends Service {
         if (requestedPlugins.has(name)) result.skipped.push({name, reason: '已安装，跳过 clone'})
       } else if (byFiles.has(name)) {
         available = true
-        this.#log(`${name}：备份时明确勾选了全部条目，按文件还原，不 clone`)
+        this.#log(`${name}：备份时明确勾选了全部条目（含 .git），按文件还原，不 clone`)
         result.copied.push(name)
       } else if (requestedPlugins.has(name)) {
         this.#task.phase = 'cloning'
@@ -821,6 +879,16 @@ export default class BackupService extends Service {
         } else if (res.skipped) {
           available = true
           result.skipped.push({name, reason: res.reason})
+        } else if (fileFallback.has(name)) {
+          // 包里的文件是整份的，clone 只是为了把 .git 拿回来。拿不到就先让插件能用 ——
+          // 但必须说清代价：目录里没有仓库，它更新不了，得手动 clone 一份或重新备份。
+          available = true
+          result.copied.push(name)
+          result.skipped.push({
+            name,
+            reason: `clone 失败（${res.reason}），已按包内文件还原；目录里没有 .git，该插件无法 git 更新`,
+          })
+          this.#log(`${name}：clone 失败，退回按文件还原 —— 没有 .git，这个插件更新不了`, 'warn')
         } else {
           result.failed.push({name, reason: res.reason})
           unavailable.add(name)
@@ -844,6 +912,17 @@ export default class BackupService extends Service {
       this.#log(
         `${[...unavailable].join('、')} 没能装上，它们的文件暂存在 ${BACKUP_DIR}/${PENDING_DIR}/，`
         + '装好插件后再还原一次即可', 'warn')
+    }
+    // 不管走的哪条路，最后再照一遍：备份包里记着是 git 仓库、现在目录里却没有 `.git` 的
+    // 插件必须点名。它们看着装好了，实际一更新就会去动云崽本体的仓库。
+    result.noGit = orderedPlugins.filter((name) => byName.get(name)?.git === true
+      && !unavailable.has(name)
+      && fs.existsSync(path.join(this.root, 'plugins', name))
+      && !fs.existsSync(path.join(this.root, 'plugins', name, GIT_DIR_REL)))
+    if (result.noGit.length) {
+      this.#log(
+        `${result.noGit.join('、')} 目录里没有 .git，这些插件无法 git 更新（更新命令会误伤云崽本体，`
+        + '锅巴已在更新入口挡住）。请手动 clone 一份，或备份时把插件的 .git 条目一起勾上', 'warn')
     }
     if (fs.existsSync(bakDir)) {
       this.#log(`被覆盖的原文件已存进 ${result.backupDir}`)

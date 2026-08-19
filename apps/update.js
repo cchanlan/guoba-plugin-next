@@ -1,3 +1,4 @@
+import path from 'path'
 import YAML from 'yaml'
 import fetch from 'node-fetch'
 import {exec, execSync} from 'child_process'
@@ -264,12 +265,50 @@ export class GuobaUpdate extends plugin {
   }
 
   /**
+   * 锅巴目录必须是**它自己**的 git 仓库根。
+   *
+   * git 在没有 `.git` 的目录里会一路往上找父仓库 —— 锅巴装在 `Yunzai/plugins/Guoba-Plugin`，
+   * 找到的就是云崽本体。于是 `git pull` 拉的是云崽，`git reset --hard @{u}`（强制更新）
+   * 直接把云崽连用户的本地修改一起重置，`git rev-parse HEAD` 读到的也是云崽的提交。
+   *
+   * 备份还原过的锅巴就可能是这种状态：备份包不含 `.git`，整份按文件还原后目录里没有仓库。
+   *
+   * @return {string} 空串表示校验通过，否则是给用户看的原因
+   */
+  checkRepoRoot() {
+    let top
+    try {
+      top = execSync('git rev-parse --show-toplevel', {
+        cwd: _paths.pluginRoot,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim()
+    } catch {
+      // 压根不在任何仓库里（云崽本体也不是 git 装的），同样没法更新
+      return '锅巴目录不是 git 仓库，无法通过 git 更新。请重新 clone 锅巴，或从备份里还原 .git 目录。'
+    }
+    if (!top || path.resolve(top) !== path.resolve(_paths.pluginRoot)) {
+      return '锅巴目录缺少 .git，git 会往上找到云崽本体的仓库 —— 已中止更新，'
+        + `否则会把云崽（${top || '父目录仓库'}）连你的本地修改一起更新掉。\n`
+        + '请重新 clone 锅巴，或从备份里还原 .git 目录。'
+    }
+    return ''
+  }
+
+  /**
    * 执行git pull更新
    * @param isForce 是否强制更新
    * @return {Promise<{status: number, message: string}>}
    */
   doGitPull(isForce = false) {
     return new Promise((resolve) => {
+      // 必须在跑任何 git 命令之前挡住，见 checkRepoRoot
+      const repoError = this.checkRepoRoot()
+      if (repoError) {
+        resolve({status: _STATUS.FAIL, message: repoError})
+        return
+      }
+
       let oldHead = ''
       try {
         oldHead = execSync('git rev-parse HEAD', {cwd: _paths.pluginRoot, encoding: 'utf8'}).trim()

@@ -3,8 +3,9 @@
  * 新建备份。
  *
  * 「只选推荐」按搬家策略选择 Bot 根的 data/config/resources，以及每个插件的 config。
- * 仓库自带的代码和 `.git` 都不打包；插件的 clone 地址从 `.git` 读取并脱敏后写进清单，
- * 还原时按候选地址重新 clone。其它条目仍可手动勾选。
+ * 仓库自带的代码默认不打包；插件的 clone 地址从 `.git` 读取并脱敏后写进清单，还原时按候选
+ * 地址重新 clone。`.git` 自己是一条独立条目（默认不勾）—— 想离线整份搬走就得勾上它，
+ * 否则还原出来的插件目录不是仓库，更新功能对它失效。
  */
 import { computed, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
@@ -118,11 +119,17 @@ onMounted(async () => {
       </p>
       <p>
         插件代码默认不进包：扫描会从每个 <code>.git</code> 读取并脱敏全部 HTTP(S) remote，
-        还原时逐个尝试 clone，再盖上配置。想离线搬家仍可手动把插件整组勾满。
+        还原时逐个尝试 clone，再盖上配置。
       </p>
       <p>
-        <code>.git</code>、<code>node_modules</code>、<code>logs</code>、<code>temp</code>
-        一律不进包；其它文件也都保留在列表中，可按需手动选择。备份包存在服务器
+        想离线搬家就把插件整组勾满，其中 <b><code>.git</code> 这一条必须勾上</b>：少了它，
+        还原出来的目录只有代码不是仓库，插件再也没法更新。它的体积不小（大插件的
+        <code>.git</code> 能有几百 MB），所以默认不勾，勾之前先看一眼列表里的数字。
+        <code>.git/config</code> 里的账号密码会在打包时自动摘掉，还原后 push 需要重新填凭证。
+      </p>
+      <p>
+        <code>node_modules</code>、<code>logs</code>、<code>temp</code>
+        一律不进包；其它文件都保留在列表中，可按需手动选择。备份包存在服务器
         <code>data/guoba/backups/</code>。
       </p>
     </div>

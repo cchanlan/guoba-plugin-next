@@ -58,6 +58,7 @@ const restoreResult = computed(() => {
     fileFailures: Array<{ name: string; reason: string }>
     pending: string[]
     restored: number
+    noGit?: string[]
     backupDir: string
     deps: BackupDepsResult | null
     pluginDeps?: Array<{
@@ -149,7 +150,7 @@ watch(
       <template #message>还原完成：写入 {{ restoreResult.restored }} 个文件</template>
       <template #description>
         <div v-if="restoreResult.copied?.length">
-          按文件直接还原（备份时明确勾选了插件全部条目，没走 clone）：{{ restoreResult.copied.join('、') }}
+          按文件直接还原（备份时勾满了插件条目，包里带着 .git，不用 clone）：{{ restoreResult.copied.join('、') }}
         </div>
         <div v-if="restoreResult.cloned.length">
           clone 装上的：{{ restoreResult.cloned.map(cloneLabel).join('、') }}
@@ -168,6 +169,11 @@ watch(
         <div v-if="restoreResult.pending.length" class="is-warn">
           {{ restoreResult.pending.join('、') }} 的文件暂存在
           <code>data/guoba/backups/.pending-restore/</code>，装好插件后再还原一次即可
+        </div>
+        <!-- 没有 .git 的插件看着装好了，一执行更新 git 就会往上找到云崽本体的仓库 -->
+        <div v-if="restoreResult.noGit?.length" class="is-warn">
+          {{ restoreResult.noGit.join('、') }} 目录里没有 <code>.git</code>，这些插件无法 git 更新。
+          请手动 clone 一份放回去，或下次备份时把插件的 <code>.git</code> 条目一起勾上。
         </div>
         <div v-if="restoreResult.backupDir">
           被覆盖的原文件已存进 <code>{{ restoreResult.backupDir }}</code>

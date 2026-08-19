@@ -9,8 +9,9 @@ import {execFile} from 'node:child_process'
  *
  * 1. **能勾什么 = 目录里有什么**。每个目标（Yunzai 根 / 每个插件）下的所有顶层目录和文件
  *    都会列出来，仓库自带的也列（标 `tracked`）—— 想整个带走就整个勾，这是用户的决定，
- *    不是 git 的。只有三类东西不列：`node_modules`（重装即得）、`logs`/`temp` 之类的
- *    缓存垃圾、`.git`（1.9 G 且清单里已记了 remote+commit，还原时 clone 回来）。
+ *    不是 git 的。只有两类东西不列：`node_modules`（重装即得）、`logs`/`temp` 之类的
+ *    缓存垃圾。插件的 `.git` 单独列一条（{@link gitDirEntry}），默认不勾 —— 平时靠清单里
+ *    记的 remote+commit 还原时 clone 回来，但想离线整份搬走就必须勾上它。
  * 2. **默认勾什么 = git 说了算**。用户的配置、数据、自备素材一律落在 `.gitignore` 里
  *    （实测 miao-plugin 的 `/config/cfg/`、xhh-TL 的 `config/config.yaml`、Yunzai 根的
  *    `/config/*` `/resources` 全都是），跑一遍 `git status --porcelain --ignored` 就能
@@ -71,6 +72,57 @@ const PROXY_PREFIX_RE = /^https?:\/\/[^/]+\/(?=https?:\/\/)/i
 /** 体积统计的上限：到这就停下并标 truncated，不然 `resources/bf`（3.3G）能把 scan 拖死 */
 const STAT_MAX_FILES = 5000
 const STAT_MAX_BYTES = 200 * 1024 * 1024
+
+/**
+ * `.git` 条目的相对路径。
+ *
+ * 它是唯一一个**不受 {@link SKIP_NAMES} 管**的条目：整份搬走插件时必须把仓库一起带上，
+ * 否则还原出来的目录只有代码没有 `.git`，git 命令会一路往上找到云崽本体的仓库
+ * —— 「更新插件」就变成了「更新云崽」。见 {@link gitDirEntry}。
+ */
+export const GIT_DIR_REL = '.git'
+
+/**
+ * `.git` 的统计上限放得很宽：本机 26 个仓库合计 1.77 G，`miao-plugin` 一个就 305 M，
+ * 用默认的 200 M 上限全都会显示成「> 200 MB」，用户没法判断包会有多大。
+ * 实测全量 stat 这 26 个 `.git`（6583 个文件）串行只要 122 ms，放开不影响扫描速度。
+ */
+const GIT_DIR_LIMITS = {maxFiles: 200000, maxBytes: 8 * 1024 * 1024 * 1024}
+
+/**
+ * 打包 `.git` 时要跳过的名字。
+ *
+ * `.git` 不能套通用黑名单（{@link SKIP_NAMES} 里的 `logs` 会挖掉 `.git/logs/`，
+ * {@link SKIP_EXT} 里的 `.pid` 会挖掉进程文件），所以单独一张表：
+ *
+ * - **`*.lock` 必须挡**。`index.lock` 进了包，还原后 git 的任何写操作都会报
+ *   `Unable to create '.../index.lock': File exists`，插件彻底没法更新 —— 修一个 bug
+ *   换来一个更难查的。`config.lock`、`refs/**\/*.lock` 同理。
+ * - `FETCH_HEAD`：内容是 remote 地址，可能带凭证；下次 fetch 就重写，没有备份价值。
+ * - `gc.pid`、`objects/tmp_*`、`objects/incoming-*`：打包那一刻正好有 git 在跑才会出现。
+ */
+export const GIT_SKIP_RE = /\.lock$|^FETCH_HEAD$|^gc\.pid$|^(?:tmp_|incoming-)/
+
+/** `.git/config` 里 URL 上的 `user:token@`，见 {@link sanitizeGitConfig} */
+const GIT_CONFIG_CREDENTIAL_RE = /([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/gi
+
+/**
+ * 脱敏 `.git/config`。
+ *
+ * 仓库的 config 里存的是**原始** remote 地址，带 `https://user:token@host/...` 的凭证。
+ * 备份包会被下载、可能转发给别人，{@link sanitizeRemote} 那套防线在 `.git` 进包时也得守住。
+ *
+ * 跟 {@link sanitizeRemote} 的区别：**只摘凭证，不剥反代前缀**。这是原样搬走的仓库，本机
+ * 能用的线路换台机器大概也能用；剥掉反而让 remote 指向一个连不上的直连地址。也因此正则
+ * 不锚定行首 —— 要够到 `https://api.fate.vip/https://user:tok@github.com/...` 里层的凭证。
+ *
+ * 已知副作用（可接受）：还原后带 token 的 remote 需要重新提供凭证才能 push。
+ */
+export function sanitizeGitConfig(text) {
+  return String(text).replace(
+    /^(\s*url\s*=\s*)(\S+)$/gim,
+    (_, head, url) => head + url.replace(GIT_CONFIG_CREDENTIAL_RE, '$1'))
+}
 
 /** git 命令超时，仓库再大也该够了 */
 const GIT_TIMEOUT = 60 * 1000
@@ -144,6 +196,45 @@ export function sanitizeRemote(url) {
   }
 }
 
+/**
+ * `.git` 目录本身的条目。
+ *
+ * 为什么要有这一条：备份包不含 `.git` 时，「整份勾满」的插件在还原时会走「按文件还原、
+ * 跳过 clone」，铺出来的目录没有仓库 —— 插件再也更新不了，更糟的是 git 会往上找到云崽
+ * 本体的 `.git`，`#锅巴更新` 变成 pull 云崽、强制更新变成 reset 云崽。
+ *
+ * 做成可勾条目（而不是隐式附带）有两个好处：体积在页面上看得见（`miao-plugin` 一个
+ * `.git` 就 305 M），而且「勾满 = 含 `.git`」让 manifest 的 `whole` 自动成为
+ * 「这份包足够离线还原」的可靠信号，还原侧不用再猜。
+ *
+ * 默认不勾：{@link recommend} 里插件只推荐 `config`，搬家包不会凭空暴涨。
+ *
+ * `.git` 是**文件**时（worktree / submodule 的指针，内容是 `gitdir: /源机器/绝对/路径`）
+ * 不列这一条 —— 那个路径在新机器上不存在，搬过去就是个坏仓库。让这种插件走 clone。
+ */
+export function gitDirEntry(dir, prefix) {
+  const abs = path.join(dir, GIT_DIR_REL)
+  let st
+  try {
+    st = fs.statSync(abs)
+  } catch {
+    return null
+  }
+  if (!st.isDirectory()) return null
+  // raw：`SKIP_NAMES` 里有 `logs`，不放开就会漏掉 `.git/logs/`，量出来的和打进包的不一致
+  const {size, files, truncated} = measure(abs, new Set(), {raw: true, ...GIT_DIR_LIMITS})
+  return {
+    key: `${prefix}|${GIT_DIR_REL}`,
+    rel: GIT_DIR_REL,
+    paths: [GIT_DIR_REL],
+    kind: 'gitdir',
+    size,
+    files,
+    truncated,
+    recommended: false,
+  }
+}
+
 /** 是不是 git 仓库 */
 export function isGitRepo(dir) {
   return fs.existsSync(path.join(dir, '.git'))
@@ -177,9 +268,16 @@ export function shouldSkipName(name) {
  *
  * @param {string} abs 目标绝对路径
  * @param {Set<string>} [excludes] 要跳过的绝对路径
+ * @param {object} [opts]
+ * @param {boolean} [opts.raw] 不套黑名单。只给 `.git` 用：`SKIP_NAMES` 里有 `logs`，
+ *   套上就会漏掉 `.git/logs/`，量出来的体积跟实际打进包的对不上
+ * @param {number} [opts.maxFiles] 覆盖文件数上限
+ * @param {number} [opts.maxBytes] 覆盖字节数上限
  * @return {{size: number, files: number, truncated: boolean}}
  */
-export function measure(abs, excludes = new Set()) {
+export function measure(abs, excludes = new Set(), {
+  raw = false, maxFiles = STAT_MAX_FILES, maxBytes = STAT_MAX_BYTES,
+} = {}) {
   let size = 0
   let files = 0
   let truncated = false
@@ -195,7 +293,7 @@ export function measure(abs, excludes = new Set()) {
 
   const stack = [abs]
   while (stack.length) {
-    if (files >= STAT_MAX_FILES || size >= STAT_MAX_BYTES) {
+    if (files >= maxFiles || size >= maxBytes) {
       truncated = true
       break
     }
@@ -209,7 +307,7 @@ export function measure(abs, excludes = new Set()) {
     for (const it of items) {
       const child = path.join(dir, it.name)
       if (excludes.has(child)) continue
-      if (shouldSkipName(it.name)) continue
+      if (!raw && shouldSkipName(it.name)) continue
       // symlink 不跟随，免得转圈
       if (it.isSymbolicLink()) continue
       if (it.isDirectory()) {
@@ -357,14 +455,24 @@ function markOf(rel, marks, isDir) {
  * @param {string} opts.prefix key 前缀，`root` 或 `plugin:<name>`
  * @param {Set<string>} [opts.excludes] 要跳过的绝对路径
  * @param {boolean} [opts.splitPlugins] 根目录用：把 `plugins/<name>` 挑出来交给插件流程
+ * @param {boolean} [opts.includeGitDir] 额外列出 `.git` 条目，见 {@link gitDirEntry}。
+ *   只有插件需要：Bot 本体的代码本来就不进包（只备份 `data`/`config`/`resources`），
+ *   带上根仓库那个 `.git` 只会让包白涨几百 M
  * @return {Promise<{isRepo: boolean, entries: object[], pluginDirs: string[], deleted: string[]}>}
  */
-export async function discoverTarget(dir, {prefix, excludes = new Set(), splitPlugins = false} = {}) {
+export async function discoverTarget(dir, {
+  prefix, excludes = new Set(), splitPlugins = false, includeGitDir = false,
+} = {}) {
   const isRepo = isGitRepo(dir)
   const {ok, marks, deleted} = isRepo ? await gitMarks(dir) : {ok: false, marks: new Map(), deleted: []}
   const entries = []
   const pluginDirs = []
   const ctx = {dir, prefix, marks, excludes}
+
+  if (includeGitDir && isRepo) {
+    const gitEntry = gitDirEntry(dir, prefix)
+    if (gitEntry) entries.push(gitEntry)
+  }
 
   for (const name of listChildren(dir, excludes)) {
     if (splitPlugins && name === 'plugins' && isDirectory(path.join(dir, 'plugins'))) {
@@ -537,7 +645,7 @@ async function repoRemotes(dir) {
     const res = await git(dir, gitArgs('remote', 'get-url', name))
     if (!res.ok) return null
     const url = sanitizeRemote(res.stdout)
-    if (!url || /[ -\s]/.test(url)) return null
+    if (!url || /[\u0000-\u001f\u007f\s]/.test(url)) return null
     try {
       const parsed = new URL(url)
       if (!['http:', 'https:'].includes(parsed.protocol)) return null
