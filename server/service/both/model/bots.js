@@ -45,32 +45,50 @@ const FRIEND_ID_KEYS = ['user_id', 'uin', 'qq', 'id']
 const GROUP_ID_KEYS = ['group_id', 'gid', 'id']
 /** 列表可能直接是数组，也可能包在这些字段下 */
 const LIST_WRAP_KEYS = ['friends', 'groups', 'list', 'data']
+/**
+ * 逐个尝试的接口。
+ *
+ * `get_friends_with_category` 是 LLOneBot 的扩展，按好友分组返回
+ * （`[{categoryName, buddyList: [...]}]`）。标准的 `get_friend_list` 在有些版本上会给个
+ * 空数组，那就换它试试。
+ */
+const FRIEND_APIS = ['get_friend_list', 'get_friends_with_category']
+const GROUP_APIS = ['get_group_list']
 /** 兜底也失败时，只警告一次，别每次刷新都刷一行 */
 const warned = new Set()
 
-/**
- * 自己调一次 OneBot 的标准接口，把列表合并进缓存。
- *
- * 适配器那套（`plugins/adapter/OneBotv11.js` 的 `getFriendMap`）有两个前提：返回的一定是
- * 数组、每项的号码一定叫 `user_id`。任一条不成立就会拿到一个空 Map，而它是
- * `data.bot.fl = map` **整体替换** —— 连之前 `getFriendInfo` 写进去的条目都一起清掉，
- * 于是页面上就只剩机器人自己（面板 pick 过它，那是替换之后才写回去的）。
- *
- * 所以这里自己来一遍：字段名多认几个，写入用**合并**而不是替换。
- *
- * @return {Promise<number>} 新写进缓存的条数
- */
-async function loadViaApi(bot, isGroup) {
-  if (typeof bot?.sendApi !== 'function') return 0
-  const res = await bot.sendApi(isGroup ? 'get_group_list' : 'get_friend_list')
+/** 把响应里的列表挖出来，顺带展平「按分组」那种结构 */
+function pickList(res) {
   // sendApi 回来的是个 Proxy，data 里的字段直接取得到
   const raw = res?.data ?? res
-  let arr = raw
-  if (!Array.isArray(arr)) {
-    arr = LIST_WRAP_KEYS.map((k) => raw?.[k]).find(Array.isArray) ?? []
+  if (Array.isArray(raw)) {
+    // 分组结构：每组一个 buddyList
+    if (raw.some((it) => Array.isArray(it?.buddyList))) {
+      return raw.flatMap((it) => (Array.isArray(it?.buddyList) ? it.buddyList : []))
+    }
+    return raw
   }
-  if (!arr.length) return 0
+  return LIST_WRAP_KEYS.map((k) => raw?.[k]).find(Array.isArray) ?? []
+}
 
+/**
+ * 一句话描述协议端到底回了什么。
+ *
+ * 「没有返回可用数据」这种话对排查毫无帮助 —— 得说清是抛错了、给了空数组、还是结构没认出来。
+ */
+function describe(res, arr) {
+  const raw = res?.data ?? res
+  if (Array.isArray(raw)) {
+    return raw.length === arr.length ? `数组 ${raw.length} 项` : `数组 ${raw.length} 项 → 可用 ${arr.length}`
+  }
+  if (raw && typeof raw === 'object') {
+    return `对象 {${Object.keys(raw).slice(0, 6).join(', ')}} → 可用 ${arr.length}`
+  }
+  return `${typeof raw} ${JSON.stringify(raw ?? null)?.slice(0, 40)}`
+}
+
+/** 把列表合并进缓存，返回新增条数 */
+function mergeInto(bot, isGroup, arr) {
   const cache = isGroup ? bot.gl : bot.fl
   if (!(cache instanceof Map)) return 0
   const idKeys = isGroup ? GROUP_ID_KEYS : FRIEND_ID_KEYS
@@ -87,6 +105,39 @@ async function loadViaApi(bot, isGroup) {
     cache.set(key, {...it, [idField]: key})
   }
   return added
+}
+
+/**
+ * 自己调 OneBot 的接口，把列表合并进缓存。
+ *
+ * 适配器那套（`plugins/adapter/OneBotv11.js` 的 `getFriendMap`）有两个前提：返回的一定是
+ * 数组、每项的号码一定叫 `user_id`。任一条不成立就会拿到一个空 Map，而它是
+ * `data.bot.fl = map` **整体替换** —— 连之前 `getFriendInfo` 写进去的条目都一起清掉，
+ * 于是页面上就只剩机器人自己（面板 pick 过它，那是替换之后才写回去的）。
+ *
+ * 所以这里自己来一遍：接口逐个试、字段名多认几个、写入用**合并**而不是替换。
+ *
+ * @return {Promise<{added: number, tried: string[]}|null>}
+ *   null 表示这个账号压根没法调接口（比如 stdin 这种伪账号），跟「调了但是空」不是一回事
+ */
+async function loadViaApi(bot, isGroup) {
+  if (typeof bot?.sendApi !== 'function') return null
+  const tried = []
+  for (const api of isGroup ? GROUP_APIS : FRIEND_APIS) {
+    let arr = []
+    try {
+      const res = await bot.sendApi(api)
+      arr = pickList(res)
+      tried.push(`${api}: ${describe(res, arr)}`)
+    } catch (err) {
+      tried.push(`${api}: 抛错 ${err?.message ?? err}`)
+      continue
+    }
+    if (!arr.length) continue
+    const added = mergeInto(bot, isGroup, arr)
+    if (added) return {added, tried}
+  }
+  return {added: 0, tried}
 }
 
 /**
@@ -123,7 +174,6 @@ export async function ensureContacts(kind = 'friend', botId = '') {
       // 账号级的那个才会真的请求协议端；全局 Bot 上的同名方法只读缓存
       const load = isGroup ? bot.getGroupMap : bot.getFriendMap
       const name = isGroup ? '群' : '好友'
-      const api = isGroup ? 'get_group_list' : 'get_friend_list'
 
       // 先占住，别让同一时刻涌进来的请求各发一遍（pending 要等下面 task 建好才生效）
       nextTry.set(key, Date.now() + RELOAD_TTL)
@@ -143,17 +193,23 @@ export async function ensureContacts(kind = 'friend', botId = '') {
           // 适配器那套拿到空数组还会把缓存整个替换掉，所以拉完得再看一眼
           if (!looksEmpty(isGroup ? bot.gl : bot.fl, uin)) return
 
-          let added = 0
+          let result = null
           try {
-            added = await loadViaApi(bot, isGroup)
+            result = await loadViaApi(bot, isGroup)
           } catch (err) {
             failed = true
-            logger?.debug?.(`[Guoba] 直接调 ${api} 失败（${uin}）：${err?.message ?? err}`)
+            logger?.debug?.(`[Guoba] 自行拉取${name}列表失败（${uin}）：${err?.message ?? err}`)
           }
 
-          if (added) {
+          // null：这个账号压根没法调接口（stdin 这类伪账号，它的 fl 里天生就只有自己一条）。
+          // 那不是「取不到」，不该拿它去警告用户 —— 但适配器那步要是抛过错，仍算失败
+          if (!result) {
+            if (failed) nextTry.set(key, Date.now() + RETRY_TTL)
+            return
+          }
+          if (result.added) {
             // 说清是谁救回来的，不然用户只觉得「时好时坏」
-            logger?.mark?.(`[Guoba] 适配器没拉到${name}列表，已自行取回 ${added} 个（${uin}）`)
+            logger?.mark?.(`[Guoba] 适配器没拉到${name}列表，已自行取回 ${result.added} 个（${uin}）`)
             return
           }
           // 报错过就早点再试；干净地返回了空（新号、只进群不加好友）就按长间隔来
@@ -161,8 +217,8 @@ export async function ensureContacts(kind = 'friend', botId = '') {
           if (!warned.has(key)) {
             // 只提醒一次：面板每次刷新都会走到这儿
             warned.add(key)
-            logger?.warn?.(`[Guoba] 取不到${name}列表（${uin}）：协议端的 ${api} 没有返回可用数据，`
-              + '面板上这一项会是空的')
+            // 把每个接口实际回了什么都列出来 —— 只说「没有可用数据」根本没法查
+            logger?.warn?.(`[Guoba] 取不到${name}列表（${uin}）：${result.tried.join('；')}`)
           }
         } catch (err) {
           // 顺序要紧：先放开重试窗口再打日志。日志本身要是出了岔子（logger 还没就位之类），
