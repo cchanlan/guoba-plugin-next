@@ -1,7 +1,7 @@
 import path from "path";
 import {GuobaApplication} from "#guoba.framework";
 import {_paths, cfg, GuobaSupportMap, PluginsMap} from '#guoba.platform';
-import {isTRSS, isV3, isV4} from '#guoba.adapter'
+import {hostName, isTRSS, isV3, isV4} from '#guoba.adapter'
 import {getWebAddress} from '#guoba.utils'
 import {listen} from './helper/listen.js'
 import chalk from 'chalk'
@@ -26,7 +26,8 @@ export async function createServer({isInit}) {
   if (isTRSS && cfg.get('server.helloTRSS') && Bot.express) {
     args.app = Bot.express
     args.server = Bot.server
-    logger.mark(`[Guoba] 当前运行在TRSS环境，已共享端口号`)
+    // 宿主可能是 TRSS-Yunzai 本身，也可能是它的 fork（Orangezai 等），名字照实说
+    logger.mark(`[Guoba] 当前运行在 ${hostName || 'TRSS'} 环境，已共享端口号`)
     const urls = []
     urls.push(_paths.server.realMountPrefix)
     if (mountRoot !== '/') {

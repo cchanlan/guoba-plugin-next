@@ -19,6 +19,28 @@ const addGroupPromptProps = CfgAdapter['addGroupPromptProps']
 const hasDbConfig = fs.existsSync(path.join(_paths.root, '/config/config/db.yaml'))
 
 /**
+ * 服务器配置放在哪个文件里。
+ *
+ * TRSS-Yunzai 单独有 `server.yaml`；早期版本和 Orangezai 这类 fork 把 url / port /
+ * redirect 直接写在 `bot.yaml` 里，没有 server.yaml —— 那种情况下卡片得指到 bot.yaml，
+ * 不然打开「基础配置」就是一个 ENOENT。
+ */
+const hasServerConfig = fs.existsSync(path.join(_paths.root, '/config/config/server.yaml'))
+const serverConfigFile = hasServerConfig ? '/config/config/server.yaml' : '/config/config/bot.yaml'
+/** 服务器配置并进 bot.yaml 的宿主只有这几项，鉴权 / https 是 TRSS 独有的 */
+const MERGED_SERVER_FIELDS = new Set(['url', 'port', 'redirect'])
+
+/** 服务器配置卡片：并进 bot.yaml 时只留宿主真的支持的字段 */
+function serverCards() {
+  const cards = CfgAdapter['baseConfig'].server ?? []
+  if (hasServerConfig) return cards
+  return cards.map((card) => ({
+    ...card,
+    schemas: (card.schemas ?? []).filter((s) => MERGED_SERVER_FIELDS.has(s.field)),
+  }))
+}
+
+/**
  * 数据库（Sequelize）配置，对应 config/config/db.yaml。
  * 该配置由 `new Sequelize(cfg.db)` 直接消费（见 plugins/genshin/model/db/BaseModel.js），
  * 所以字段名必须与 Sequelize 的构造参数保持一致。
@@ -189,7 +211,7 @@ const baseConfig = {
       ],
 
     },
-    ...(CfgAdapter['baseConfig'].server ?? []),
+    ...serverCards(),
     {
       key: 'system.redis',
       title: 'Redis配置',
@@ -539,7 +561,7 @@ export const configFile = {
   'system.group': '/config/config/group.yaml',
   'system.redis': '/config/config/redis.yaml',
   'system.other': '/config/config/other.yaml',
-  'system.server': '/config/config/server.yaml',
+  'system.server': serverConfigFile,
   'system.db': '/config/config/db.yaml',
 
   'genshin.gacha': '/plugins/genshin/config/gacha.set.yaml',

@@ -49,6 +49,23 @@ function handleAuth(action, field, value) {
 }
 
 /**
+ * 取群名，只为了在配置项旁边显示「群名 (群号)」。
+ *
+ * 必须走 strict 模式：不加它的话，框架在群不存在时会「随机选择 Bot」，而那条路径写的是
+ * `this.bots[this.uin].pickGroup()` —— 没有账号在线时 `this.uin` 是空数组，取出来是
+ * undefined，直接 TypeError 把整个配置页打成 500。群名取不到就不显示，不该影响读配置。
+ */
+function pickGroupName(groupId) {
+  try {
+    const group = Bot.pickGroup(groupId, true)
+    if (!group) return ''
+    return group.group_name || group.name || ''
+  } catch {
+    return ''
+  }
+}
+
+/**
  * 处理 group 配置
  */
 export function handleGroupConfig(action, data) {
@@ -73,7 +90,7 @@ export function handleGroupConfig(action, data) {
         continue
       }
       groupId = Number(groupId) || String(groupId)
-      const groupName = Bot.pickGroup(groupId)?.group_name
+      const groupName = pickGroupName(groupId)
       if (!groupName) {
         continue
       }

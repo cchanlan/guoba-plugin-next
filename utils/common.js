@@ -157,11 +157,15 @@ export async function getAllWebAddress() {
   port = port === 80 ? null : port
   let custom = []
   if (isTRSS && helloTRSS) {
-    const server = (await import('../../../lib/config/config.js')).default.server
+    // 宿主自己配的对外地址。TRSS 在 server.yaml，Orangezai 这类 fork 在 bot.yaml
+    const hostCfg = (await import('../../../lib/config/config.js')).default
+    const server = hostCfg.server ?? {}
     if (server.url)
       custom.push(server.url)
     if (server.https?.url)
       custom.push(server.https.url)
+    if (!custom.length && hostCfg.bot?.url)
+      custom.push(hostCfg.bot.url)
   }
   let local = getAutoIps(port, true)
   let remote = await getRemoteIps()

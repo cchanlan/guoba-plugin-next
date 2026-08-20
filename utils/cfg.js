@@ -90,7 +90,10 @@ class GuobaConfig {
   get serverPort() {
     const {port, helloTRSS} = this.get('server')
     if (isTRSS && helloTRSS) {
-      return this.trssCfg.server.port
+      // 共享宿主端口。TRSS 把它放 server.yaml，早期版本和 Orangezai 这类 fork 放 bot.yaml
+      const hostPort = this.trssCfg?.server?.port ?? this.trssCfg?.bot?.port
+      if (hostPort) return hostPort
+      logger.warn('[Guoba] 没能从宿主配置里读到 HTTP 端口，改用锅巴自己的端口')
     }
     return port
   }

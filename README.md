@@ -10,6 +10,10 @@
 > 本 Fork 重写了整套前端，并新增了若干功能，详见下方「相对原版的改动」。
 
 管理面板仅支持 V3 版本的 Yunzai；V2 版本仅支持迁移至 V3 功能。
+
+已适配的宿主：**Miao-Yunzai**、**TRSS-Yunzai** 及其 fork（如 [Orangezai](https://github.com/zhiyu1998/Orangezai)）。
+TRSS 系宿主靠能力而不是名字识别（自带 HTTP 服务、主人配置是「Bot账号:主人」映射），
+所以换个名字的 fork 也会自动共享端口、挂在 `/guoba` 路径下，不用改代码。
 具体功能可在安装插件后，通过发送 `#锅巴帮助` 查看。
 
 ---

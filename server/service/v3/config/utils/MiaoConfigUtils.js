@@ -21,7 +21,13 @@ export function handleGroupConfig(action, data) {
         }
       }
       groupId = Number(groupId) || String(groupId)
-      const groupName = Bot.pickGroup(groupId)?.info?.group_name
+      // 取不到群名就不显示提示文本，别让它把整个配置页打成 500（同 TRSSConfigUtils）
+      let groupName = ''
+      try {
+        groupName = Bot.pickGroup(groupId)?.info?.group_name ?? ''
+      } catch {
+        groupName = ''
+      }
       if (!groupName) {
         continue
       }
