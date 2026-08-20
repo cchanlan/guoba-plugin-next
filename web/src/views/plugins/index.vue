@@ -38,7 +38,7 @@ const loading = ref(true)
 const refreshing = ref(false)
 const plugins = ref<PluginItem[]>([])
 const keyword = ref('')
-const filter = ref<'all' | 'installed' | 'uninstalled' | 'configurable'>('all')
+const filter = ref<'all' | 'installed' | 'uninstalled' | 'configurable' | 'updatable'>('all')
 
 const installOpen = ref(false)
 const installLink = ref('')
@@ -51,6 +51,7 @@ const filterOptions = [
   { label: '已安装', value: 'installed' },
   { label: '未安装', value: 'uninstalled' },
   { label: '可配置', value: 'configurable' },
+  { label: '可更新', value: 'updatable' },
 ]
 
 const counts = computed(() => ({
@@ -71,6 +72,16 @@ const rollbacking = ref('')
 
 /** 有更新的插件（按上次检查的结果算） */
 const updatable = computed(() => Object.values(gitMap.value).filter((it) => it.behind > 0))
+
+/**
+ * 列表空的时候说点有用的。「可更新」筛不出东西通常不是真没更新，
+ * 而是还没检查过（落后数是上次 fetch 的结果）。
+ */
+const emptyText = computed(() => {
+  if (filter.value !== 'updatable') return '没有匹配的插件'
+  const checked = Object.values(gitMap.value).some((it) => it.lastFetchAt > 0)
+  return checked ? '没有待更新的插件' : '还没检查过，点右上角「检查更新」'
+})
 
 function gitOf(p: PluginItem): PluginGitInfo | undefined {
   return gitMap.value[String(p.name).toLowerCase()]
@@ -123,6 +134,8 @@ const list = computed(() => {
     if (filter.value === 'installed' && !p.installed) return false
     if (filter.value === 'uninstalled' && p.installed) return false
     if (filter.value === 'configurable' && !p.hasConfig) return false
+    // 「可更新」按上次检查的结果筛，没检查过就是空的（空状态里会提示去检查）
+    if (filter.value === 'updatable' && !gitOf(p)?.behind) return false
     if (!kw) return true
     return [p.name, p.title, p.description, authorText(p)]
       .filter(Boolean)
@@ -213,7 +226,7 @@ onMounted(() => {
     <div class="g-page-head">
       <h2 class="g-page-title">插件管理</h2>
       <p class="g-page-desc">
-        共 {{ counts.all }} 个插件，已安装 {{ counts.installed }} 个，其中 {{ counts.configurable }} 个支持锅巴配置。
+        共 {{ counts.all }} 个插件，已安装 {{ counts.installed }} 个，其中 {{ counts.configurable }} 个支持锅巴配置<template v-if="updatable.length">，{{ updatable.length }} 个有更新</template>。
       </p>
     </div>
 
@@ -260,7 +273,7 @@ onMounted(() => {
       </Col>
     </Row>
 
-    <Empty v-else-if="!list.length" description="没有匹配的插件" />
+    <Empty v-else-if="!list.length" :description="emptyText" />
 
     <Row v-else :gutter="[16, 16]">
       <Col v-for="p in list" :key="p.name" :xs="24" :sm="12" :lg="8" :xxl="6">
