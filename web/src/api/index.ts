@@ -913,6 +913,23 @@ export function fileDownloadUrl(path: string, token: string) {
   return `${API_BASE}/file/download?${q.toString()}`
 }
 
+/** 文件夹占用。partial = 撞上了后端的条目 / 时间上限，数字只是「至少这么多」 */
+export interface FsDirSize {
+  size: number
+  files: number
+  dirs: number
+  partial: boolean
+}
+
+/** 算文件夹占用：要走完整棵子树，大目录会慢，所以只在用户点的时候调 */
+export const apiFileDirSize = (path: string) => get<FsDirSize>('/file/dir-size', { path })
+
+/** 文件夹打包 zip 下载的地址，同样把 token 放 query */
+export function fileDownloadDirUrl(path: string, token: string) {
+  const q = new URLSearchParams({ path, token })
+  return `${API_BASE}/file/download-dir?${q.toString()}`
+}
+
 /* ---------------- 终端 ---------------- */
 
 /** 一行输出。type: cmd = 输入的命令行，out = stdout，err = stderr */

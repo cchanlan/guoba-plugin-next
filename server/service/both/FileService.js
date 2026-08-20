@@ -2,6 +2,8 @@ import path from 'node:path'
 import fs from 'node:fs'
 import {GuobaError, Service} from '#guoba.framework'
 import {_paths} from '#guoba.platform'
+import {dirStats, walkDir} from '../../utils/fsWalk.js'
+import {createZipStream} from '../../utils/zip.js'
 
 /** 文本文件超过这个大小就不在页面里编辑，提示用下载 */
 const MAX_TEXT_SIZE = 2 * 1024 * 1024
@@ -185,5 +187,39 @@ export default class FileService extends Service {
     const abs = this.#resolve(rel)
     if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) throw new GuobaError('文件不存在')
     return abs
+  }
+
+  /**
+   * 算文件夹占用。列目录时不做这件事 —— `node_modules` 之类一层就得走十万个 inode，
+   * 每次进目录都算一遍页面就废了，所以做成用户点一下才算的接口。
+   *
+   * 撞上条目数 / 时间上限会带 `partial: true` 返回已经数到的部分，让页面标出「≥」，
+   * 而不是干等到超时或者报个错。
+   */
+  async dirSize(rel = '') {
+    const abs = this.#resolve(rel)
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) throw new GuobaError('目录不存在')
+    return dirStats(abs)
+  }
+
+  /**
+   * 打包文件夹下载：返回 {name, stream}，stream 由 controller 直接 pipe 给响应。
+   *
+   * 全程流式，不落临时文件（见 createZipStream）。包内会多一层跟文件夹同名的目录，
+   * 解出来就是一个完整文件夹，不会把几万个文件散在下载目录里。
+   */
+  zipDir(rel = '') {
+    const abs = this.#resolve(rel)
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) throw new GuobaError('目录不存在')
+    // 根目录没有 basename，用 Yunzai 兜底
+    const base = abs === this.root ? 'Yunzai' : path.basename(abs)
+    const entries = (async function* () {
+      // 顶层目录自己也要有条目，不然包里只有它的子项
+      yield {name: base, isDir: true, size: 0, mtimeMs: Date.now(), mode: 0o755}
+      for await (const entry of walkDir(abs)) {
+        yield {...entry, name: `${base}/${entry.rel}`}
+      }
+    })()
+    return {name: `${base}.zip`, stream: createZipStream(entries)}
   }
 }

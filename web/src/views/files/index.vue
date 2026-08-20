@@ -5,6 +5,9 @@
  * 浏览 / 编辑 Yunzai 根目录下的文件：面包屑 + 列表，文件夹点击进入；单击文本 / 图片
  * 直接预览（代码块按内容宽度居中展示，不占满全宽）；支持上传、新建、重命名、删除。
  * 改动直接落盘。
+ *
+ * 文件夹的大小和下载都要走完整棵子树，所以都是**点了才做**：列目录时不顺手算大小
+ * （`node_modules` 一层就十万个 inode，进目录就卡死），下载则由后端边打包边发。
  */
 import { computed, onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
@@ -12,12 +15,14 @@ import GIcon from '@/components/GIcon.vue'
 import {
   apiFileCreate,
   apiFileDelete,
+  apiFileDirSize,
   apiFileList,
   apiFileMkdir,
   apiFileRead,
   apiFileRename,
   apiFileSave,
   apiFileUpload,
+  fileDownloadDirUrl,
   fileDownloadUrl,
   type FsFile,
 } from '@/api'
@@ -53,9 +58,21 @@ const renameName = ref('')
 const uploadEl = ref<HTMLInputElement | null>(null)
 const uploading = ref(false)
 
+/** 已算出的文件夹占用，key 是相对路径；loading 表示正在算 */
+interface DirSize {
+  loading: boolean
+  size?: number
+  files?: number
+  dirs?: number
+  partial?: boolean
+}
+const dirSizes = ref<Record<string, DirSize>>({})
+/** 「算全部」正在跑 */
+const calcAllRunning = ref(false)
+
 const columns = [
   { title: '名称', dataIndex: 'name', key: 'name' },
-  { title: '大小', key: 'size', width: 100 },
+  { title: '大小', key: 'size', width: 120 },
   { title: '修改时间', key: 'mtime', width: 180 },
   { title: '操作', key: 'op', width: 240 },
 ]
@@ -296,7 +313,85 @@ async function uploadFiles(files: File[]) {
 }
 
 function downloadUrl(f: FsFile) {
-  return fileDownloadUrl(joinPath(f.name), auth.token)
+  return f.isDir
+    ? fileDownloadDirUrl(joinPath(f.name), auth.token)
+    : fileDownloadUrl(joinPath(f.name), auth.token)
+}
+
+/** 当前目录整个打包下载（根目录也能下，包名会是 Yunzai.zip） */
+const currentZipUrl = computed(() => fileDownloadDirUrl(currentPath.value, auth.token))
+
+/** 用一个临时 <a> 触发下载：确认之后才走，不能事先写死在 href 上 */
+function triggerDownload(url: string) {
+  const a = document.createElement('a')
+  a.href = url
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+/**
+ * 下载当前整个目录。这个按钮离「刷新」很近，在根目录上点下去就是十几 G，
+ * 所以先问一句。行内那个文件夹的下载是用户指着某个目录点的，不用再确认。
+ */
+function downloadCurrent() {
+  Modal.confirm({
+    title: `打包下载「${currentPath.value || 'Yunzai 根目录'}」？`,
+    content: '会把这个目录下的所有文件打成一个 zip 边打边传，目录很大时要传很久，浏览器里可以随时取消。',
+    okText: '开始下载',
+    cancelText: '取消',
+    onOk() {
+      triggerDownload(currentZipUrl.value)
+    },
+  })
+}
+
+/* ---------------- 文件夹大小 ---------------- */
+
+/** 算一个文件夹：结果按相对路径缓存，重复点不重复算 */
+async function calcSize(f: FsFile) {
+  const rel = joinPath(f.name)
+  if (dirSizes.value[rel]?.loading) return
+  dirSizes.value[rel] = { loading: true }
+  try {
+    const d = await apiFileDirSize(rel)
+    dirSizes.value[rel] = { loading: false, ...d }
+  } catch {
+    // 错误已由请求层弹出，清掉 loading 让用户能重试
+    delete dirSizes.value[rel]
+  }
+}
+
+/** 算当前目录下所有文件夹。同时开 3 个，一个个出结果，不用等全部算完 */
+async function calcAllSizes() {
+  if (calcAllRunning.value) return
+  const queue = list.value.filter((f) => f.isDir && !dirSizes.value[joinPath(f.name)])
+  if (!queue.length) return
+  calcAllRunning.value = true
+  try {
+    await Promise.all(
+      Array.from({ length: Math.min(3, queue.length) }, async () => {
+        for (let f = queue.shift(); f; f = queue.shift()) await calcSize(f)
+      }),
+    )
+  } finally {
+    calcAllRunning.value = false
+  }
+}
+
+/** 大小列的文字：撞上后端上限时标「≥」，别让不完整的数字冒充准数 */
+function dirSizeText(f: FsFile) {
+  const d = dirSizes.value[joinPath(f.name)]
+  if (!d || d.loading || d.size === undefined) return ''
+  return `${d.partial ? '≥ ' : ''}${fmtSize(d.size)}`
+}
+
+function dirSizeTitle(f: FsFile) {
+  const d = dirSizes.value[joinPath(f.name)]
+  if (!d || d.loading || d.size === undefined) return '算这个文件夹占多大'
+  const base = `${d.files} 个文件、${d.dirs} 个子文件夹`
+  return d.partial ? `${base}（目录太大只数了一部分，实际更多）` : base
 }
 
 onMounted(load)
@@ -309,6 +404,7 @@ onMounted(load)
       <p class="g-page-desc">
         浏览 / 编辑 <b>Yunzai 根目录</b>下的文件，改动直接写到磁盘，请小心操作。
         单击文件可预览，文本编辑限 2MB，二进制文件只能下载。
+        文件夹的大小要点「计算」才算，下载文件夹会打包成 zip。
       </p>
     </div>
 
@@ -325,6 +421,14 @@ onMounted(load)
         <a-button size="small" :loading="loading" @click="load">
           <GIcon icon="ant-design:reload-outlined" :size="13" />
           刷新
+        </a-button>
+        <a-button size="small" :loading="calcAllRunning" @click="calcAllSizes">
+          <GIcon icon="ant-design:calculator-outlined" :size="13" />
+          算全部大小
+        </a-button>
+        <a-button size="small" title="把当前目录整个打包成 zip 下载" @click="downloadCurrent">
+          <GIcon icon="ant-design:file-zip-outlined" :size="13" />
+          下载当前目录
         </a-button>
         <a-button size="small" :loading="uploading" @click="uploadEl?.click()">
           <GIcon icon="ant-design:upload-outlined" :size="13" />
@@ -364,7 +468,19 @@ onMounted(load)
         </template>
 
         <template v-else-if="column.key === 'size'">
-          {{ record.isDir ? '—' : fmtSize(record.size) }}
+          <template v-if="!record.isDir">{{ fmtSize(record.size) }}</template>
+          <!-- 文件夹：算过就显示结果（可点重算），没算过给个「计算」 -->
+          <a-button
+            v-else
+            size="small"
+            type="text"
+            class="g-files-size-btn"
+            :loading="dirSizes[joinPath(record.name)]?.loading"
+            :title="dirSizeTitle(record)"
+            @click="calcSize(record)"
+          >
+            {{ dirSizeText(record) || '计算' }}
+          </a-button>
         </template>
 
         <template v-else-if="column.key === 'mtime'">
@@ -383,8 +499,15 @@ onMounted(load)
             <GIcon icon="ant-design:edit-outlined" :size="13" />
             编辑
           </a-button>
-          <a class="g-files-op" :href="downloadUrl(record)">
-            <GIcon icon="ant-design:cloud-download-outlined" :size="13" />
+          <a
+            class="g-files-op"
+            :href="downloadUrl(record)"
+            :title="record.isDir ? '打包成 zip 下载' : '下载'"
+          >
+            <GIcon
+              :icon="record.isDir ? 'ant-design:file-zip-outlined' : 'ant-design:cloud-download-outlined'"
+              :size="13"
+            />
             下载
           </a>
           <a-button size="small" type="text" @click="openRename(record)">改名</a-button>
@@ -549,6 +672,18 @@ onMounted(load)
 }
 
 .g-files-op:hover {
+  color: var(--g-brand);
+}
+
+/* 大小列的「计算」/ 结果按钮：跟文件的纯文本大小视觉重量接近，别抢眼 */
+.g-files-size-btn {
+  padding: 0 4px;
+  height: auto;
+  color: var(--g-text-sub);
+  font-size: 12px;
+}
+
+.g-files-size-btn:hover {
   color: var(--g-brand);
 }
 

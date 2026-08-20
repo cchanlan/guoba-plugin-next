@@ -1,4 +1,5 @@
 import path from 'node:path'
+import {pipeline} from 'node:stream/promises'
 import {autowired, Result} from '#guoba.framework'
 import {ApiController} from '#guoba.platform'
 
@@ -26,6 +27,8 @@ export class FileController extends ApiController {
     this.post('/delete', this.remove)
     this.post('/upload', this.upload)
     this.get('/download', this.download)
+    this.get('/dir-size', this.dirSize)
+    this.get('/download-dir', this.downloadDir)
   }
 
   /** 列目录 */
@@ -78,6 +81,33 @@ export class FileController extends ApiController {
   async download(req, res) {
     const abs = this.fileService.downloadAbs(req.query?.path)
     res.download(abs, path.basename(abs))
+    return Result.VOID
+  }
+
+  /** 算文件夹占用（页面上点一下才算，慢是正常的） */
+  async dirSize(req) {
+    return Result.ok(await this.fileService.dirSize(req.query?.path))
+  }
+
+  /**
+   * 打包下载文件夹。
+   *
+   * zip 是边遍历边生成的，长度事先不知道，所以没有 Content-Length，靠 chunked 传输；
+   * 也正因为头一发出去就没法改，出错只能掐断连接 —— 浏览器那边表现为下载失败。
+   */
+  async downloadDir(req, res) {
+    const {name, stream} = this.fileService.zipDir(req.query?.path)
+    // attachment 会顺带按扩展名把 Content-Type 设成 application/zip，中文包名也编码好
+    res.attachment(name)
+    try {
+      await pipeline(stream, res)
+    } catch (err) {
+      // 客户端中途取消（ERR_STREAM_PREMATURE_CLOSE）是常事，不用当错误报
+      if (err?.code !== 'ERR_STREAM_PREMATURE_CLOSE') {
+        logger.error(`[Guoba] 打包下载失败：${err?.stack ?? err}`)
+      }
+      res.destroy()
+    }
     return Result.VOID
   }
 
