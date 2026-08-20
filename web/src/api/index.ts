@@ -174,14 +174,6 @@ export const apiPickUser = (qq: string | number) => get<any>('/oicq/pick/user', 
 export const apiPickGroup = (groupId: string | number) =>
   get<any>('/oicq/pick/group', { groupId })
 
-/** 主动给好友或群发消息，botId 用于指定发信账号 */
-export const apiSendMsg = (body: {
-  type: 'friend' | 'group'
-  id: string | number
-  msg: string
-  botId?: string | number
-}) => post<{ id: number; type: string; messageId: string | null }>('/oicq/send-msg', body)
-
 /** 删除好友，不可逆 */
 export const apiDeleteFriend = (body: { userId: string | number; botId?: string | number }) =>
   del<{ userId: number }>('/oicq/friend', body, { showSuccess: true })

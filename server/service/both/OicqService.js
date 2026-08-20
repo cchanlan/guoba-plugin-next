@@ -46,37 +46,6 @@ export class OicqService extends Service {
   }
 
   /**
-   * 主动发消息。
-   *
-   * @param type 'friend' | 'group'
-   * @param id   好友 QQ 号 / 群号
-   * @param msg  消息内容（纯文本）
-   * @param botId 指定用哪个账号发，多账号环境下必填才能保证发信人正确
-   */
-  async sendMsg(type, id, msg, botId) {
-    if (type !== 'friend' && type !== 'group') {
-      throw new GuobaError(`不支持的发送类型：${type}`)
-    }
-    msg = typeof msg === 'string' ? msg.trim() : ''
-    if (!msg) {
-      throw new GuobaError('消息内容不能为空')
-    }
-    id = Number(id) || id
-    const target = this.#pick(type, id, botId)
-    if (!target?.sendMsg) {
-      throw new GuobaError(`未找到可用的发送对象：${id}`)
-    }
-    const res = await target.sendMsg(msg)
-    // 各适配器返回结构不一，只把能用的字段透出去
-    return {
-      id,
-      type,
-      messageId: res?.message_id ?? null,
-      time: res?.time ?? null,
-    }
-  }
-
-  /**
    * 按 bot_id 取到操作对象。
    *
    * 多账号（TRSS）下同一个号只挂在其中一个账号的列表里，指定了 bot_id 就直接用它，

@@ -16,7 +16,6 @@ export class OicqController extends ApiController {
     this.get('/pick/user', this.pickUser)
     this.get('/pick/group', this.pickGroup)
 
-    this.post('/send-msg', this.sendMsg)
     // 群发是后台任务，起任务后靠轮询查进度，可中途叫停
     this.post('/broadcast', this.startBroadcast)
     this.get('/broadcast/:taskId', this.getBroadcast)
@@ -40,16 +39,6 @@ export class OicqController extends ApiController {
     }
     let user = await this.oicqService.pickUser(qq)
     return Result.ok(user)
-  }
-
-  /** 给好友或群发消息 */
-  async sendMsg(req) {
-    let {type, id, msg, botId} = req.body ?? {}
-    if (!id) {
-      return Result.error(`参数 id 不能为空`)
-    }
-    let data = await this.oicqService.sendMsg(type, id, msg, botId)
-    return Result.ok(data, '发送成功')
   }
 
   /** 删除好友（不可逆） */

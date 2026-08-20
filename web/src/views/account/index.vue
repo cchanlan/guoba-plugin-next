@@ -29,7 +29,6 @@ import {
   apiQueryFriendList,
   apiQueryGroupList,
   apiQuitGroup,
-  apiSendMsg,
   apiStartBroadcast,
   type BroadcastTarget,
   type BroadcastTask,
@@ -150,65 +149,6 @@ function searchFriends() {
 function searchGroups() {
   group.pageNo = 1
   loadGroups()
-}
-
-/* ---------------- 发消息 ---------------- */
-
-interface SendTarget {
-  type: 'friend' | 'group'
-  id: number | string
-  name: string
-  avatar: string
-  botId?: number | string
-}
-
-const sendOpen = ref(false)
-const sending = ref(false)
-const sendMsgText = ref('')
-const sendTarget = ref<SendTarget | null>(null)
-
-const sendTitle = computed(() =>
-  sendTarget.value?.type === 'group' ? '发送群消息' : '发送私聊消息',
-)
-
-function openSend(type: 'friend' | 'group', record: any) {
-  sendTarget.value =
-    type === 'group'
-      ? {
-          type,
-          id: record.group_id,
-          name: record.group_name || '未知群名',
-          avatar: groupRowAvatar(record),
-          botId: record.bot_id,
-        }
-      : {
-          type,
-          id: record.user_id,
-          name: record.remark || record.nickname || '未知昵称',
-          avatar: friendAvatar(record),
-          botId: record.bot_id,
-        }
-  sendMsgText.value = ''
-  sendOpen.value = true
-}
-
-async function confirmSend() {
-  const target = sendTarget.value
-  const msg = sendMsgText.value.trim()
-  if (!target) return
-  if (!msg) {
-    message.warning('消息内容不能为空')
-    return
-  }
-  sending.value = true
-  try {
-    await apiSendMsg({ type: target.type, id: target.id, msg, botId: target.botId })
-    message.success('消息已发送')
-    sendOpen.value = false
-    sendMsgText.value = ''
-  } finally {
-    sending.value = false
-  }
 }
 
 /* ---------------- 群发 ---------------- */
@@ -564,11 +504,7 @@ onMounted(() => {
 
               <template v-else-if="column.key === 'user_id'">
                 <div class="g-acc-id">
-                  <Tooltip title="点击发私聊消息">
-                    <span class="g-acc-link" @click="openSend('friend', record)">
-                      {{ record.user_id }}
-                    </span>
-                  </Tooltip>
+                  <span>{{ record.user_id }}</span>
                   <Tooltip title="复制">
                     <span class="g-acc-copy" @click="copy(record.user_id)">
                       <GIcon icon="ant-design:copy-outlined" :size="13" />
@@ -651,11 +587,7 @@ onMounted(() => {
 
               <template v-else-if="column.key === 'group_id'">
                 <div class="g-acc-id">
-                  <Tooltip title="点击发群消息">
-                    <span class="g-acc-link" @click="openSend('group', record)">
-                      {{ record.group_id }}
-                    </span>
-                  </Tooltip>
+                  <span>{{ record.group_id }}</span>
                   <Tooltip title="复制">
                     <span class="g-acc-copy" @click="copy(record.group_id)">
                       <GIcon icon="ant-design:copy-outlined" :size="13" />
@@ -685,43 +617,6 @@ onMounted(() => {
         </TabPane>
       </Tabs>
     </Card>
-
-    <Modal
-      v-model:open="sendOpen"
-      :title="sendTitle"
-      ok-text="发送"
-      cancel-text="取消"
-      :confirm-loading="sending"
-      @ok="confirmSend"
-    >
-      <div v-if="sendTarget" class="g-send-target">
-        <Avatar
-          :src="sendTarget.avatar"
-          :size="38"
-          :shape="sendTarget.type === 'group' ? 'square' : 'circle'"
-        >
-          {{ sendTarget.name.slice(0, 1) }}
-        </Avatar>
-        <div class="g-send-meta">
-          <div class="g-send-name">{{ sendTarget.name }}</div>
-          <div class="g-acc-dim">
-            {{ sendTarget.type === 'group' ? '群号' : 'QQ' }} {{ sendTarget.id }}
-            <template v-if="sendTarget.botId">· 由 {{ sendTarget.botId }} 发出</template>
-          </div>
-        </div>
-      </div>
-
-      <Textarea
-        v-model:value="sendMsgText"
-        placeholder="输入要发送的内容，Ctrl + Enter 发送"
-        :rows="4"
-        :maxlength="1000"
-        show-count
-        class="g-send-input"
-        @keydown.ctrl.enter="confirmSend"
-      />
-      <p class="g-send-tip">消息以 Bot 身份直接发出，仅支持纯文本。</p>
-    </Modal>
 
     <Modal
       v-model:open="castOpen"
@@ -998,17 +893,7 @@ onMounted(() => {
   gap: 8px;
 }
 
-/* 号码本身是发消息入口，复制退居为旁边的小图标 */
-.g-acc-link {
-  cursor: pointer;
-  color: var(--g-brand);
-  border-bottom: 1px dashed currentColor;
-}
-
-.g-acc-link:hover {
-  border-bottom-style: solid;
-}
-
+/* 号码是纯文本，复制退居为旁边的小图标 */
 .g-acc-copy {
   display: inline-flex;
   cursor: pointer;
