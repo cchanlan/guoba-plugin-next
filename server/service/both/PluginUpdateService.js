@@ -22,8 +22,13 @@ import {installPluginDeps, PLUGIN_NAME_RE} from '../../utils/pluginDeps.js'
  *   因为面板上点了个更新就断一下。
  */
 
-/** Yunzai 自带的目录，不算插件 */
-const BUILTIN = new Set(['example', 'genshin', 'other', 'system'])
+/**
+ * `plugins/` 下不是插件的目录。
+ *
+ * 前四个是 Miao-Yunzai 自带的功能目录，后两个是 TRSS-Yunzai 的适配器与可执行文件目录
+ * —— 实测环境里它们都会被列出来，而它们既不是 git 仓库也没有更新的概念。
+ */
+const BUILTIN = new Set(['example', 'genshin', 'other', 'system', 'adapter', 'bin'])
 
 /** 检查更新时并发 fetch 几个仓库。再多容易被 GitHub 限流，也把带宽吃满 */
 const FETCH_CONCURRENCY = 3
