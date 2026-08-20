@@ -21,7 +21,15 @@ import {
 } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
 import PluginIcon from './components/PluginIcon.vue'
-import { apiGetPlugins, apiInstallPlugin, apiUninstallPlugin } from '@/api'
+import UpdatePanel from './components/UpdatePanel.vue'
+import {
+  apiGetPlugins,
+  apiInstallPlugin,
+  apiPluginGitList,
+  apiPluginUpdateRollback,
+  apiUninstallPlugin,
+  type PluginGitInfo,
+} from '@/api'
 import type { PluginItem } from '@/types'
 
 const router = useRouter()
@@ -50,6 +58,64 @@ const counts = computed(() => ({
   installed: plugins.value.filter((p) => p.installed).length,
   configurable: plugins.value.filter((p) => p.hasConfig).length,
 }))
+
+/* ---------------- 更新 ---------------- */
+
+const updatePanel = ref<InstanceType<typeof UpdatePanel> | null>(null)
+/**
+ * 插件目录的 git 状态，key 是小写目录名 —— 插件列表里的 name 被统一转成了小写
+ * （见 IPluginService.readLocalPlugins），而 git 那边用的是真实目录名，只能这样对上。
+ */
+const gitMap = ref<Record<string, PluginGitInfo>>({})
+const rollbacking = ref('')
+
+/** 有更新的插件（按上次检查的结果算） */
+const updatable = computed(() => Object.values(gitMap.value).filter((it) => it.behind > 0))
+
+function gitOf(p: PluginItem): PluginGitInfo | undefined {
+  return gitMap.value[String(p.name).toLowerCase()]
+}
+
+async function loadGit() {
+  try {
+    const items = await apiPluginGitList()
+    gitMap.value = Object.fromEntries(items.map((it) => [it.name.toLowerCase(), it]))
+  } catch {
+    // 读不到就当没有，卡片上不显示 git 信息
+    gitMap.value = {}
+  }
+}
+
+/** 相对时间，用来显示「上次检查」 */
+function sinceText(ms: number) {
+  if (!ms) return '从未检查'
+  const diff = Date.now() - ms
+  if (diff < 60_000) return '刚刚检查过'
+  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前检查`
+  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)} 小时前检查`
+  return `${Math.floor(diff / 86400_000)} 天前检查`
+}
+
+function confirmRollback(p: PluginItem) {
+  const info = gitOf(p)
+  if (!info) return
+  Modal.confirm({
+    title: `把 ${p.title || p.name} 回滚到更新前？`,
+    content: '会把这个插件的代码 reset 回更新之前那个提交，装上的依赖不动。重启后生效。',
+    okText: '回滚',
+    okType: 'danger',
+    cancelText: '取消',
+    async onOk() {
+      rollbacking.value = info.name
+      try {
+        await apiPluginUpdateRollback(info.name)
+        await loadGit()
+      } finally {
+        rollbacking.value = ''
+      }
+    },
+  })
+}
 
 const list = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
@@ -136,7 +202,10 @@ function installFromCard(p: PluginItem) {
   installOpen.value = true
 }
 
-onMounted(() => load(false))
+onMounted(() => {
+  load(false)
+  loadGit()
+})
 </script>
 
 <template>
@@ -168,6 +237,16 @@ onMounted(() => load(false))
             <GIcon icon="ant-design:reload-outlined" :size="13" />
           </Button>
         </Tooltip>
+        <Tooltip title="逐个 git fetch，看每个插件落后几个提交">
+          <Button @click="updatePanel?.startCheck()">
+            <GIcon icon="ant-design:sync-outlined" :size="13" />
+            <span class="g-btn-text">检查更新</span>
+          </Button>
+        </Tooltip>
+        <Button v-if="updatable.length" type="primary" @click="updatePanel?.openUpdate()">
+          <GIcon icon="ant-design:cloud-sync-outlined" :size="14" />
+          <span class="g-btn-text">更新 {{ updatable.length }} 个插件</span>
+        </Button>
         <Button type="primary" @click="installOpen = true">
           <GIcon icon="ant-design:cloud-download-outlined" :size="14" />
           <span class="g-btn-text">安装插件</span>
@@ -204,6 +283,26 @@ onMounted(() => load(false))
             <Tag v-else>未安装</Tag>
             <Tag v-if="p.hasConfig" color="gold">可配置</Tag>
             <Tag v-if="p.isDeleted" color="red">已废弃</Tag>
+            <Tag v-if="gitOf(p)?.behind" color="orange">可更新 {{ gitOf(p)!.behind }}</Tag>
+            <Tooltip v-if="gitOf(p)?.dirty" :title="gitOf(p)!.changed.map((c) => c.file).join('、')">
+              <Tag color="red">本地有改动</Tag>
+            </Tooltip>
+          </div>
+
+          <!-- git 信息：分支 / 当前提交 / 上次检查时间，非 git 仓库说明原因 -->
+          <div v-if="p.installed && gitOf(p)" class="g-plugin-git">
+            <template v-if="gitOf(p)!.updatable">
+              <GIcon icon="ant-design:branches-outlined" :size="12" />
+              <span>{{ gitOf(p)!.branch }}</span>
+              <code>{{ gitOf(p)!.shortCommit }}</code>
+              <span class="g-plugin-git-dim">{{ sinceText(gitOf(p)!.lastFetchAt) }}</span>
+            </template>
+            <Tooltip v-else :title="gitOf(p)!.reason">
+              <span class="g-plugin-git-dim">
+                <GIcon icon="ant-design:info-circle-outlined" :size="12" />
+                不能自动更新
+              </span>
+            </Tooltip>
           </div>
 
           <div class="g-plugin-actions">
@@ -223,6 +322,23 @@ onMounted(() => load(false))
                 @click="installFromCard(p)"
               >
                 安装
+              </Button>
+              <Button
+                v-if="gitOf(p)?.behind"
+                size="small"
+                type="primary"
+                ghost
+                @click="updatePanel?.openUpdate([gitOf(p)!.name])"
+              >
+                更新
+              </Button>
+              <Button
+                v-if="gitOf(p)?.canRollback"
+                size="small"
+                :loading="rollbacking === gitOf(p)!.name"
+                @click="confirmRollback(p)"
+              >
+                回滚
               </Button>
               <Button
                 v-if="p.installed && p.name !== 'miao-plugin'"
@@ -266,10 +382,36 @@ onMounted(() => load(false))
         <Checkbox v-model:checked="autoRestart">安装完成后重启 Bot</Checkbox>
       </div>
     </Modal>
+
+    <!-- 检查更新 / 更新的弹窗，进度和结果都在里面 -->
+    <UpdatePanel ref="updatePanel" :items="Object.values(gitMap)" @refresh="loadGit" />
   </div>
 </template>
 
 <style scoped>
+/* git 信息条：分支 + 短 hash + 上次检查时间，字号压小，不跟标签抢注意力 */
+.g-plugin-git {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--g-text-sub);
+}
+
+.g-plugin-git code {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--g-bg-soft);
+}
+
+.g-plugin-git-dim {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--g-text-dim);
+}
 .g-page-head {
   margin-bottom: 14px;
 }

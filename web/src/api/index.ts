@@ -123,6 +123,111 @@ export const apiInstallPlugin = (body: {
 export const apiUninstallPlugin = (body: { name: string; autoRestart?: boolean }) =>
   put<any>('/plugin/uninstall', body, { showSuccess: true })
 
+/* ---------------- 插件更新 ---------------- */
+
+/** git log 里的一条提交 */
+export interface GitCommit {
+  hash: string
+  author: string
+  date: string
+  subject: string
+}
+
+/**
+ * 一个插件的 git 状态。
+ * behind 是**上次 fetch 时**的数据，所以页面上要连 lastFetchAt 一起看。
+ */
+export interface PluginGitInfo {
+  name: string
+  isRepo: boolean
+  branch: string
+  detached: boolean
+  commit: string
+  shortCommit: string
+  upstream: string
+  remote: string
+  remoteUrl: string
+  ahead: number
+  behind: number
+  dirty: boolean
+  changed: { code: string; file: string }[]
+  untracked: string[]
+  /** false 时看 reason，里面写了为什么不能更新 */
+  updatable: boolean
+  reason: string
+  /** 上次 fetch 的时间戳（毫秒），0 = 从没检查过 */
+  lastFetchAt: number
+  canRollback: boolean
+  /** 检查更新后才有：落后的那些提交 */
+  commits?: GitCommit[]
+  checked?: boolean
+  error?: string
+}
+
+/** 更新单个插件的结果 */
+export interface PluginUpdateResult {
+  name: string
+  status: 'updated' | 'up-to-date' | 'skipped' | 'failed'
+  reason: string
+  from: string
+  to: string
+  commits: GitCommit[]
+  deps: { ran: boolean; ok: boolean; reason: string } | null
+  /** 暂存的改动最后是放回去了（restored）还是留在 stash 里（kept） */
+  stash: '' | 'restored' | 'kept'
+}
+
+export interface PluginUpdateTask {
+  id: string
+  type: 'check' | 'update'
+  mode: string
+  current: number
+  total: number
+  done: boolean
+  error: string
+  canceled?: boolean
+  result: {
+    items: (PluginGitInfo & PluginUpdateResult)[]
+    checkedAt?: number
+    restarted?: boolean
+    restartSkipped?: boolean
+  } | null
+  startAt: number
+  endAt: number
+}
+
+export interface PluginUpdateTaskState {
+  task: PluginUpdateTask | null
+  logs: { seq: number; level: string; text: string }[]
+  cursor: number
+}
+
+/** 插件的 git 状态列表，不联网 */
+export const apiPluginGitList = () => get<PluginGitInfo[]>('/plugin/update/list')
+
+/** 起检查更新任务（联网 fetch），进度靠 apiPluginUpdateTask 轮询 */
+export const apiPluginUpdateCheck = (names?: string[]) =>
+  post<PluginUpdateTaskState>('/plugin/update/check', { names })
+
+/** 起更新任务 */
+export const apiPluginUpdateRun = (body: {
+  names: string[]
+  mode?: 'safe' | 'stash' | 'force'
+  npmInstall?: boolean
+  restart?: boolean
+}) => post<PluginUpdateTaskState>('/plugin/update/run', body)
+
+/** 任务状态 + 增量日志 */
+export const apiPluginUpdateTask = (cursor?: number) =>
+  get<PluginUpdateTaskState>('/plugin/update/task', { cursor }, { showError: false })
+
+export const apiPluginUpdateCancel = () =>
+  post<PluginUpdateTaskState>('/plugin/update/cancel', {})
+
+/** 回滚到本次更新之前的 commit */
+export const apiPluginUpdateRollback = (name: string) =>
+  post<{ name: string; commit: string }>('/plugin/update/rollback', { name }, { showSuccess: true })
+
 export const apiGetPluginConfig = (pluginName: string) =>
   get<any>(`/plugin/s/${encodeURIComponent(pluginName)}/config`)
 

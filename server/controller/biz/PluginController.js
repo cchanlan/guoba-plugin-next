@@ -43,6 +43,7 @@ function flattenConfigData(data, schemas) {
 export default class PluginController extends ApiController {
 
   pluginService = autowired('pluginService')
+  pluginUpdateService = autowired('pluginUpdateService')
 
   constructor(guobaApp) {
     super('/plugin', guobaApp)
@@ -59,6 +60,14 @@ export default class PluginController extends ApiController {
     // 卸载plugin
     this.put('/uninstall', this.uninstallPlugin)
 
+    // 更新：list 只读本地 git 状态（快），check 才联网 fetch；两个耗时操作都是后台任务 + 轮询
+    this.get('/update/list', this.updateList)
+    this.post('/update/check', this.updateCheck)
+    this.post('/update/run', this.updateRun)
+    this.get('/update/task', this.updateTask)
+    this.post('/update/cancel', this.updateCancel)
+    this.post('/update/rollback', this.updateRollback)
+
     // 获取plugin icon（直接显示图片）
     this.get('/s/:pluginName/icon', this.getPluginIcon)
     // 获取plugin配置数据
@@ -68,6 +77,40 @@ export default class PluginController extends ApiController {
 
     // 执行操作
     this.post('/do/:pluginName/action', this.doAction)
+  }
+
+  /** 插件的 git 状态。不联网，behind 是上次 fetch 时的数据 */
+  async updateList() {
+    return Result.ok(await this.pluginUpdateService.list())
+  }
+
+  /** 起一个检查更新任务（联网 fetch），立刻返回，进度靠 /update/task 轮询 */
+  async updateCheck(req) {
+    const {names} = req.body ?? {}
+    return Result.ok(this.pluginUpdateService.check(names))
+  }
+
+  /** 起一个更新任务 */
+  async updateRun(req) {
+    const {names, mode, npmInstall, restart} = req.body ?? {}
+    return Result.ok(this.pluginUpdateService.update({names, mode, npmInstall, restart}))
+  }
+
+  /** 任务状态 + 增量日志 */
+  async updateTask(req) {
+    return Result.ok(this.pluginUpdateService.taskStatus(req.query?.cursor))
+  }
+
+  /** 取消正在跑的任务 */
+  async updateCancel() {
+    return Result.ok(this.pluginUpdateService.cancel(), '已请求取消')
+  }
+
+  /** 回滚到本次更新之前的 commit */
+  async updateRollback(req) {
+    const {name} = req.body ?? {}
+    const data = await this.pluginUpdateService.rollback(name)
+    return Result.ok(data, `已回滚到 ${data.commit}，重启后生效`)
   }
 
   /**

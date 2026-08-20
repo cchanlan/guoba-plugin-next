@@ -5,7 +5,7 @@ import YAML from 'yaml'
 import {GuobaError, Service} from '#guoba.framework'
 import {_paths, cfg} from '#guoba.platform'
 import {ZipWriter, readEntries, readEntryBuffer, extractEntry, safeJoin} from '../../utils/zip.js'
-import {parseReadmeInstall} from '../../utils/readmeInstall.js'
+import {installPluginDeps, NEED_SHELL, PLUGIN_NAME_RE, PNPM} from '../../utils/pluginDeps.js'
 import {
   discoverTarget, discoverPlain, repoInfo, sanitizeRemote, shouldSkipName,
   gitArgs, DISCOVER_LIMITS, GIT_DIR_REL, GIT_SKIP_RE, sanitizeGitConfig,
@@ -35,8 +35,6 @@ const MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024
 
 /** 备份包文件名规则，用它兜住路径穿越和乱七八糟的名字 */
 const PACK_NAME_RE = /^[\w.-]+\.zip$/i
-/** 插件目录名规则：不许有分隔符和相对路径 */
-const PLUGIN_NAME_RE = /^[\w.-]+$/
 /**
  * `.git` 里存 remote 地址（也就是可能存凭证）的文件名。
  *
@@ -52,22 +50,9 @@ const GIT_CONFIG_NAME_RE = /^config(?:\.worktree)?$/
  * `pnpm add ... -w` —— 不然 pnpm 会把它当命令行选项，而不是包名。
  */
 const DEP_NAME_RE = /^(?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/i
-/** README 最多读 1 MiB，外部仓库不能拿超大文档拖垮还原 */
-const README_MAX_SIZE = 1024 * 1024
 /** README 安装命令只认这些包管理器和动作，绝不执行原始 shell */
 const SAFE_INSTALL_MANAGERS = new Set(['pnpm', 'npm', 'cnpm', 'yarn'])
 const SAFE_INSTALL_ACTIONS = new Set(['install', 'i', 'add'])
-
-/** 装依赖用的包管理器。Yunzai 是 pnpm workspace，只能是 pnpm，见 {@link BackupService.#installDeps} */
-const PNPM = 'pnpm'
-/**
- * 起 pnpm 要不要过 shell。
- *
- * Windows 上 pnpm 是 `pnpm.cmd`，而 Node 18.20 / 20.12 起 spawn 一个 `.cmd` 不过 shell 会
- * 直接抛 `EINVAL`（CVE-2024-27980 的修复）—— 那边必须过 shell，否则依赖安装一次都成功不了。
- * 传给 pnpm 的参数全是本文件里硬编码的常量，没有任何用户输入拼进命令行，过 shell 是安全的。
- */
-const NEED_SHELL = process.platform === 'win32'
 
 /**
  * GitHub 反代候选（还原前会连直连一起测速，挑最快的）。
@@ -1367,84 +1352,14 @@ export default class BackupService extends Service {
   }
 
   /**
-   * 给刚还原好的单个插件安装依赖。
-   *
-   * package.json 是主来源，固定从根用路径 filter 安装，避免插件 cwd 的 pnpm install 把整个
-   * workspace 重装一遍。README 只扫描安全代码块，原始文本绝不进 shell；额外包统一转成
-   * `pnpm --filter ./plugins/<name> add`，这样最后一次根 install 后也不会丢。
+   * 给刚还原好的单个插件安装依赖。规则跟插件更新那边共用一套，见 utils/pluginDeps.js ——
+   * 两处各有自己的子进程管理和任务日志，所以把这两件事注入进去。
    */
   async #installPluginDeps(name) {
-    const out = {name, ran: false, ok: true, reason: '', readme: {accepted: [], rejected: []}}
-    if (!PLUGIN_NAME_RE.test(name)) return {...out, ok: false, reason: '插件名不合法'}
-    const dir = path.join(this.root, 'plugins', name)
-    const pkgFile = path.join(dir, 'package.json')
-    let pkg = null
-    try {
-      if (fs.statSync(pkgFile).size > README_MAX_SIZE) throw new Error('package.json 过大')
-      pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'))
-    } catch (err) {
-      if (fs.existsSync(pkgFile)) return {...out, ok: false, reason: `package.json 无法读取：${err.message}`}
-    }
-
-    let readme = {install: false, packages: [], accepted: [], rejected: []}
-    for (const file of ['README.md', 'Readme.md', 'readme.md']) {
-      const abs = path.join(dir, file)
-      try {
-        if (!fs.existsSync(abs) || fs.statSync(abs).size > README_MAX_SIZE) continue
-        readme = parseReadmeInstall(fs.readFileSync(abs, 'utf8'), {
-          pluginName: name, packageName: typeof pkg?.name === 'string' ? pkg.name : '',
-        })
-        break
-      } catch {
-        // README 只是补充，读失败不影响 package.json 安装
-      }
-    }
-    out.readme = {accepted: readme.accepted, rejected: readme.rejected}
-    for (const line of readme.rejected) this.#log(`${name}：忽略 README 命令 ${line}`, 'warn')
-    const filter = `./plugins/${name}`
-
-    if (pkg) {
-      out.ran = true
-      this.#log(`${name}：安装 package.json 依赖`)
-      const res = await this.#spawnLogged(PNPM, [
-        '--filter', filter, 'install', '--no-frozen-lockfile', '--fail-if-no-match',
-      ], {cwd: this.root, shell: NEED_SHELL})
-      if (res.code !== 0) {
-        out.ok = false
-        out.reason = res.tail || `pnpm install 退出码 ${res.code}`
-      }
-    }
-
-    const declared = new Set([
-      ...Object.keys(pkg?.dependencies ?? {}),
-      ...Object.keys(pkg?.optionalDependencies ?? {}),
-      ...Object.keys(pkg?.devDependencies ?? {}),
-    ])
-    const supplements = readme.packages.filter((p) => !declared.has(packageBaseName(p)))
-    if (supplements.length && pkg) {
-      out.ran = true
-      this.#log(`${name}：README 补充依赖 ${supplements.join('、')}`)
-      const res = await this.#spawnLogged(PNPM, [
-        '--filter', filter, 'add', '--save-prod', ...supplements,
-      ], {cwd: this.root, shell: NEED_SHELL})
-      if (res.code !== 0) {
-        out.ok = false
-        out.reason = res.tail || `README 补充依赖安装失败（${res.code}）`
-      }
-    }
-    if (!pkg && readme.packages.length) {
-      out.ran = true
-      this.#log(`${name}：没有 package.json，README 依赖安装到 Yunzai 根`, 'warn')
-      const res = await this.#spawnLogged(PNPM, ['add', '-w', '--save-prod', ...readme.packages], {
-        cwd: this.root, shell: NEED_SHELL,
-      })
-      if (res.code !== 0) {
-        out.ok = false
-        out.reason = res.tail || `README 依赖安装失败（${res.code}）`
-      }
-    }
-    if (!out.ran) this.#log(`${name}：没有需要安装的依赖`)
-    return out
+    return installPluginDeps(this.root, name, {
+      spawnLogged: (cmd, args, opts) => this.#spawnLogged(cmd, args, opts),
+      log: (text, level) => this.#log(text, level),
+    })
   }
 
   /**
@@ -1908,16 +1823,6 @@ function stamp(date = new Date()) {
   const p = (n) => String(n).padStart(2, '0')
   return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}`
     + `-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`
-}
-
-/** `pkg@1.2.3` → `pkg`；`@scope/pkg@1.2.3` → `@scope/pkg` */
-function packageBaseName(spec) {
-  const s = String(spec || '')
-  if (s.startsWith('@')) {
-    const at = s.indexOf('@', 1)
-    return at === -1 ? s : s.slice(0, at)
-  }
-  return s.split('@')[0]
 }
 
 function fmtSize(bytes) {
