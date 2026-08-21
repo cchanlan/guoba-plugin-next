@@ -22,14 +22,15 @@ import {
 import GIcon from '@/components/GIcon.vue'
 import PluginIcon from './components/PluginIcon.vue'
 import UpdatePanel from './components/UpdatePanel.vue'
+import GitLogModal from './components/GitLogModal.vue'
 import {
   apiGetPlugins,
   apiInstallPlugin,
   apiPluginGitList,
-  apiPluginUpdateRollback,
   apiUninstallPlugin,
   type PluginGitInfo,
 } from '@/api'
+import { sinceText } from './gitText'
 import type { PluginItem } from '@/types'
 
 const router = useRouter()
@@ -63,12 +64,13 @@ const counts = computed(() => ({
 /* ---------------- 更新 ---------------- */
 
 const updatePanel = ref<InstanceType<typeof UpdatePanel> | null>(null)
+const gitLog = ref<InstanceType<typeof GitLogModal> | null>(null)
 /**
- * 插件目录的 git 状态，key 是小写目录名 —— 插件列表里的 name 被统一转成了小写
- * （见 IPluginService.readLocalPlugins），而 git 那边用的是真实目录名，只能这样对上。
+ * 插件目录的 git 状态，key 是小写目录名。
+ * 卡片那边的 `name` 未必是目录名（插件可以在 guoba.support.js 里把自己叫「R插件」），
+ * 所以要用后端单独给的 `dir` 去对，不然这些插件卡片上就没有分支、更新和日志入口。
  */
 const gitMap = ref<Record<string, PluginGitInfo>>({})
-const rollbacking = ref('')
 
 /** 有更新的插件（按上次检查的结果算） */
 const updatable = computed(() => Object.values(gitMap.value).filter((it) => it.behind > 0))
@@ -84,7 +86,10 @@ const emptyText = computed(() => {
 })
 
 function gitOf(p: PluginItem): PluginGitInfo | undefined {
-  return gitMap.value[String(p.name).toLowerCase()]
+  // 未安装的条目不许蹭同名目录的状态：插件市场里同名 fork 是有的（xianxin-plugin 就占了两条），
+  // 不挡住的话「未安装」的卡片上会冒出「本地有改动」和日志入口
+  if (!p.installed) return undefined
+  return gitMap.value[String(p.dir || p.name).toLowerCase()]
 }
 
 async function loadGit() {
@@ -97,35 +102,10 @@ async function loadGit() {
   }
 }
 
-/** 相对时间，用来显示「上次检查」 */
-function sinceText(ms: number) {
-  if (!ms) return '从未检查'
-  const diff = Date.now() - ms
-  if (diff < 60_000) return '刚刚检查过'
-  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前检查`
-  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)} 小时前检查`
-  return `${Math.floor(diff / 86400_000)} 天前检查`
-}
-
-function confirmRollback(p: PluginItem) {
+/** 打开更新日志：既是「更新了什么」的入口，也是选版本回滚的入口 */
+function openGitLog(p: PluginItem) {
   const info = gitOf(p)
-  if (!info) return
-  Modal.confirm({
-    title: `把 ${p.title || p.name} 回滚到更新前？`,
-    content: '会把这个插件的代码 reset 回更新之前那个提交，装上的依赖不动。重启后生效。',
-    okText: '回滚',
-    okType: 'danger',
-    cancelText: '取消',
-    async onOk() {
-      rollbacking.value = info.name
-      try {
-        await apiPluginUpdateRollback(info.name)
-        await loadGit()
-      } finally {
-        rollbacking.value = ''
-      }
-    },
-  })
+  if (info) gitLog.value?.openLog(info.name)
 }
 
 const list = computed(() => {
@@ -196,7 +176,8 @@ function confirmUninstall(p: PluginItem) {
     okType: 'danger',
     cancelText: '取消',
     async onOk() {
-      await apiUninstallPlugin({ name: p.name, autoRestart: true })
+      // 删的是目录，得传目录名：name 可能是插件自己起的展示名，那样后端只会说「插件不存在」
+      await apiUninstallPlugin({ name: p.dir || p.name, autoRestart: true })
       load(true)
     },
   })
@@ -318,8 +299,19 @@ onMounted(() => {
             </Tooltip>
           </div>
 
+          <!-- 当前装的是哪一版：提交标题一行截断，下面跟作者和时间 -->
+          <div v-if="p.installed && gitOf(p)?.lastCommit" class="g-plugin-commit">
+            <div class="g-plugin-commit-subject" :title="gitOf(p)!.lastCommit!.subject">
+              {{ gitOf(p)!.lastCommit!.subject }}
+            </div>
+            <div class="g-plugin-commit-meta">
+              {{ gitOf(p)!.lastCommit!.author }} · {{ gitOf(p)!.lastCommit!.date }}
+            </div>
+          </div>
+
           <div class="g-plugin-actions">
-            <Space :size="6">
+            <!-- 按钮最多能凑到 5 个（配置 / 更新 / 日志 / 卸载 / 仓库），手机上要能换行 -->
+            <Space :size="6" wrap>
               <Button
                 v-if="p.hasConfig"
                 type="primary"
@@ -346,15 +338,14 @@ onMounted(() => {
                 更新
               </Button>
               <Button
-                v-if="gitOf(p)?.canRollback"
+                v-if="p.installed && gitOf(p)?.isRepo"
                 size="small"
-                :loading="rollbacking === gitOf(p)!.name"
-                @click="confirmRollback(p)"
+                @click="openGitLog(p)"
               >
-                回滚
+                日志
               </Button>
               <Button
-                v-if="p.installed && p.name !== 'miao-plugin'"
+                v-if="p.installed && (p.dir || p.name) !== 'miao-plugin'"
                 size="small"
                 danger
                 @click="confirmUninstall(p)"
@@ -398,6 +389,13 @@ onMounted(() => {
 
     <!-- 检查更新 / 更新的弹窗，进度和结果都在里面 -->
     <UpdatePanel ref="updatePanel" :items="Object.values(gitMap)" @refresh="loadGit" />
+
+    <!-- 更新日志 + 选版本回滚。要检查更新就把这个关掉，交给上面的更新面板 -->
+    <GitLogModal
+      ref="gitLog"
+      @refresh="loadGit"
+      @check="(name) => updatePanel?.startCheck([name])"
+    />
   </div>
 </template>
 
@@ -424,6 +422,32 @@ onMounted(() => {
   align-items: center;
   gap: 3px;
   color: var(--g-text-dim);
+}
+
+/* 当前版本那条提交：标题裁成一行，保证卡片高度还是齐的 */
+.g-plugin-commit {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--g-bg-soft);
+}
+
+.g-plugin-commit-subject {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--g-text-sub);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.g-plugin-commit-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--g-text-dim);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .g-page-head {
   margin-bottom: 14px;

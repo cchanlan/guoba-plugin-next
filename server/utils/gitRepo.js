@@ -18,8 +18,23 @@ const DEFAULT_TIMEOUT = 120000
 /** 记录里最多带回多少条提交，够看更新了什么就行 */
 const MAX_LOG = 30
 
+/** 翻更新日志时最多给多少条历史。回滚只在最近几十个提交里选，再往前该上命令行了 */
+const MAX_HISTORY = 200
+
 /** 日志字段分隔符：用不可打印字符，提交信息里出现不了 */
 const SEP = '\x1f'
+
+/** `git log` 的输出格式：短 hash / 作者 / 时间 / 标题 */
+const LOG_PRETTY = `--pretty=format:%h${SEP}%an${SEP}%ad${SEP}%s`
+
+/**
+ * 时间精确到分钟。只给日期的话，一天里推了好几次的仓库看不出先后，
+ * 而看更新日志时最想知道的恰恰是「这条是刚推的还是早上的」。
+ */
+const LOG_DATE = '--date=format:%Y-%m-%d %H:%M'
+
+/** 合法的 commit 写法：只认 hash，别的（`--upstream`、`HEAD~1`）一律不收 */
+export const COMMIT_RE = /^[0-9a-f]{7,40}$/i
 
 /** 让 git 绝不弹交互提示的环境变量 */
 function gitEnv() {
@@ -144,6 +159,7 @@ export async function readRepoInfo(dir) {
     isRepo: false, branch: '', detached: false, commit: '', shortCommit: '',
     upstream: '', remote: '', remoteUrl: '', ahead: 0, behind: 0,
     dirty: false, changed: [], untracked: [], updatable: false, reason: '',
+    lastCommit: null,
   }
   if (!isGitRepo(dir)) return {...base, reason: '不是 git 仓库，只能手动覆盖更新'}
 
@@ -174,6 +190,10 @@ export async function readRepoInfo(dir) {
 
   const status = await runGit(['status', '--porcelain'], {cwd: dir, timeout: 30000})
   if (status.ok) Object.assign(info, parseStatus(status.stdout))
+
+  // 当前 HEAD 那条提交：卡片上要显示「装的是哪一版」，光有 hash 看不出来
+  const head = await runGit(['log', '-1', LOG_PRETTY, LOG_DATE, 'HEAD'], {cwd: dir, timeout: 15000})
+  if (head.ok) info.lastCommit = parseLogLines(head.stdout)[0] ?? null
 
   if (detached) {
     info.reason = 'HEAD 处于游离状态（没在任何分支上），先手动切回分支'
@@ -214,8 +234,7 @@ export async function fetchRepo(dir, remote = 'origin', opts = {}) {
 /** 本地落后于上游的那些提交（新到的东西），最多 {@link MAX_LOG} 条 */
 export async function pendingCommits(dir, upstream) {
   const res = await runGit([
-    'log', `-${MAX_LOG}`, `--pretty=format:%h${SEP}%an${SEP}%ad${SEP}%s`, '--date=short',
-    `HEAD..${upstream}`,
+    'log', `-${MAX_LOG}`, LOG_PRETTY, LOG_DATE, `HEAD..${upstream}`,
   ], {cwd: dir, timeout: 30000})
   return res.ok ? parseLogLines(res.stdout) : []
 }
@@ -223,10 +242,37 @@ export async function pendingCommits(dir, upstream) {
 /** 两个 commit 之间的提交，用来在更新完之后说清「这次更新了什么」 */
 export async function commitsBetween(dir, from, to) {
   const res = await runGit([
-    'log', `-${MAX_LOG}`, `--pretty=format:%h${SEP}%an${SEP}%ad${SEP}%s`, '--date=short',
-    `${from}..${to}`,
+    'log', `-${MAX_LOG}`, LOG_PRETTY, LOG_DATE, `${from}..${to}`,
   ], {cwd: dir, timeout: 30000})
   return res.ok ? parseLogLines(res.stdout) : []
+}
+
+/**
+ * 从 HEAD 往回数的提交历史（更新日志 / 选版本回滚用）。
+ * @param {number} [limit] 要几条，上限 {@link MAX_HISTORY}
+ */
+export async function recentCommits(dir, limit = 50) {
+  const n = Math.max(1, Math.min(MAX_HISTORY, Number(limit) || 50))
+  const res = await runGit(['log', `-${n}`, LOG_PRETTY, LOG_DATE, 'HEAD'], {cwd: dir, timeout: 30000})
+  return res.ok ? parseLogLines(res.stdout) : []
+}
+
+/**
+ * 把一个 hash 解析成完整 commit id，顺便验证它真在这个仓库里。
+ * `^{commit}` 是为了挡住指向 tree / blob 的 hash —— reset 到那种对象只会报一句难懂的 git 错误。
+ * @return {Promise<string>} 完整 hash，解析不出来给空串
+ */
+export async function resolveCommit(dir, rev) {
+  if (!COMMIT_RE.test(String(rev ?? '').trim())) return ''
+  const res = await runGit(['rev-parse', '--verify', `${String(rev).trim()}^{commit}`], {cwd: dir, timeout: 15000})
+  return res.ok ? res.stdout.trim() : ''
+}
+
+/** a 是不是 b 的祖先。用来区分「往回退」和「跳到还没到过的提交」 */
+export async function isAncestor(dir, a, b) {
+  if (!a || !b) return false
+  const res = await runGit(['merge-base', '--is-ancestor', a, b], {cwd: dir, timeout: 15000})
+  return res.ok
 }
 
 /**

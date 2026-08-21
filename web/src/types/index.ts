@@ -237,6 +237,11 @@ export interface MsgStat {
 
 export interface PluginItem {
   name: string
+  /**
+   * 真实目录名。`name` 可能是插件自己声明的展示名（`R插件`），而 git 相关的一切都按目录走，
+   * 所以对上 git 状态只能用这个字段。远程列表里的未安装插件没有它。
+   */
+  dir?: string
   title?: string
   description?: string
   author?: string | string[]

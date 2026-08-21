@@ -158,10 +158,22 @@ export interface PluginGitInfo {
   /** 上次 fetch 的时间戳（毫秒），0 = 从没检查过 */
   lastFetchAt: number
   canRollback: boolean
+  /** 当前 HEAD 那条提交，用来在卡片上显示「装的是哪一版」 */
+  lastCommit: GitCommit | null
   /** 检查更新后才有：落后的那些提交 */
   commits?: GitCommit[]
   checked?: boolean
   error?: string
+}
+
+/** 一个插件的更新日志（本地历史 + 待更新的提交），选版本回滚就从这里挑 */
+export interface PluginGitLog extends PluginGitInfo {
+  /** 从 HEAD 往回数的提交历史，第一条就是当前版本 */
+  commits: GitCommit[]
+  /** 上次检查时拉到、还没更新上来的提交 */
+  pending: GitCommit[]
+  /** 一键退回的目标：上次更新（或回滚）之前待在哪个提交上 */
+  rollbackTo: { commit: string; short: string; at: number; via: 'update' | 'rollback' } | null
 }
 
 /** 更新单个插件的结果 */
@@ -224,9 +236,18 @@ export const apiPluginUpdateTask = (cursor?: number) =>
 export const apiPluginUpdateCancel = () =>
   post<PluginUpdateTaskState>('/plugin/update/cancel', {})
 
-/** 回滚到本次更新之前的 commit */
-export const apiPluginUpdateRollback = (name: string) =>
-  post<{ name: string; commit: string }>('/plugin/update/rollback', { name }, { showSuccess: true })
+/** 一个插件的更新日志，不联网（待更新那段是上次检查的结果） */
+export const apiPluginGitLog = (name: string, limit = 50) =>
+  get<PluginGitLog>('/plugin/update/log', { name, limit })
+
+/** 回滚：不带 commit 就退回上次更新前，带了就去指定的那个版本 */
+export const apiPluginUpdateRollback = (body: {
+  name: string
+  commit?: string
+  discardLocal?: boolean
+}) => post<{ name: string; commit: string; from: string; back: boolean }>(
+  '/plugin/update/rollback', body, { showSuccess: true },
+)
 
 export const apiGetPluginConfig = (pluginName: string) =>
   get<any>(`/plugin/s/${encodeURIComponent(pluginName)}/config`)

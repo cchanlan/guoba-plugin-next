@@ -3,7 +3,9 @@ import path from 'node:path'
 import {spawn} from 'node:child_process'
 import {GuobaError, Service} from '#guoba.framework'
 import {_paths} from '#guoba.platform'
-import {fetchRepo, firstLine, pendingCommits, readRepoInfo, resetTo} from '../../utils/gitRepo.js'
+import {
+  fetchRepo, firstLine, isAncestor, pendingCommits, readRepoInfo, recentCommits, resetTo, resolveCommit,
+} from '../../utils/gitRepo.js'
 import {UPDATE_MODES, updateRepo} from '../../utils/pluginUpdateFlow.js'
 import {installPluginDeps, PLUGIN_NAME_RE} from '../../utils/pluginDeps.js'
 
@@ -54,8 +56,8 @@ export class PluginUpdateService extends Service {
   /** 正在跑的子进程，取消时要把它们杀掉 */
   #running = new Set()
   /**
-   * 每个插件最近一次成功更新的前后 commit，回滚要用。
-   * 只在内存里 —— 重启后回滚入口就消失，这是有意的：隔了一次重启再回滚，风险比收益大。
+   * 每个插件最近一次由面板改动位置（更新或回滚）之前的 commit，用来一键退回。
+   * 只在内存里 —— 重启就没了，但那不影响回滚本身：翻更新日志挑一个提交同样能回。
    */
   #history = new Map()
 
@@ -269,34 +271,92 @@ export class PluginUpdateService extends Service {
       if (!out.deps.ok) this.#log(`${name}：依赖没装上 —— ${out.deps.reason}`, 'error')
     }
 
-    this.#history.set(name, {before: res.before, after: res.after, at: Date.now()})
+    this.#history.set(name, {before: res.before, after: res.after, at: Date.now(), via: 'update'})
     return out
+  }
+
+  // ------------------------------------------------------------------ 更新日志
+
+  /**
+   * 一个插件的更新日志：本地的提交历史 + 上次检查时拉到的待更新提交。
+   *
+   * **不联网**，所以待更新那段是上次 fetch 的结果，页面上要连 `lastFetchAt` 一起显示。
+   * 历史是选版本回滚的选项来源，所以每条都带完整信息（作者、时间、标题）。
+   *
+   * @param {string} name 插件目录名
+   * @param {number} [limit] 要几条历史
+   */
+  async history(name, limit = 50) {
+    const dir = this.#dirOf(name)
+    const info = await readRepoInfo(dir)
+    if (!info.isRepo) throw new GuobaError(info.reason || '不是 git 仓库，没有更新日志')
+    const commits = await recentCommits(dir, limit)
+    if (!commits.length) throw new GuobaError(info.reason || 'git 读不出提交历史')
+    const pending = info.behind > 0 && info.upstream ? await pendingCommits(dir, info.upstream) : []
+    const rec = this.#history.get(String(name ?? '').trim())
+    return {
+      name,
+      ...info,
+      commits,
+      pending,
+      lastFetchAt: this.#lastFetchAt(dir),
+      canRollback: !!rec,
+      // 一键退回的目标：上次更新（或上次回滚）之前待在哪个提交上
+      rollbackTo: rec ? {commit: rec.before, short: rec.before.slice(0, 7), at: rec.at, via: rec.via} : null,
+    }
   }
 
   // ------------------------------------------------------------------ 回滚
 
   /**
-   * 回滚到这次更新之前的 commit。
+   * 回滚：把插件的代码 `reset --hard` 到某个提交。
    *
-   * 只认本次进程内的更新记录：跨重启再回滚，工作区早就跑过一轮插件加载了，风险比收益大。
-   * 依赖不回滚 —— 装上的包留着不影响旧代码跑。
+   * 两种用法 —— 不传 `commit` 就退回「上次由面板改动之前」的位置（更新完发现有问题时最顺手），
+   * 传了就去指定的那个提交，也就是用户在更新日志里挑的版本。
+   *
+   * 依赖不回滚：装上的包留着不影响旧代码跑，而卸依赖比装依赖更容易把环境弄坏。
+   *
+   * @param {string} name 插件目录名
+   * @param {object} [opts]
+   * @param {string} [opts.commit] 目标提交的 hash，不传就退回上次改动前
+   * @param {boolean} [opts.discardLocal] 有本地改动时是否照样回滚（会丢掉那些改动）
    */
-  async rollback(name) {
+  async rollback(name, {commit, discardLocal = false} = {}) {
     if (this.#task && !this.#task.done) throw new GuobaError('有任务在跑，等它结束再回滚')
-    const rec = this.#history.get(String(name ?? '').trim())
-    if (!rec) throw new GuobaError('没有本次运行内的更新记录，回滚不了（可以手动 git reset）')
-    const dir = this.#dirOf(name)
+    const key = String(name ?? '').trim()
+    const dir = this.#dirOf(key)
     const info = await readRepoInfo(dir)
-    if (info.dirty) {
-      throw new GuobaError('更新之后又有了本地改动，先自己处理掉再回滚，免得连它一起丢了')
+    if (!info.isRepo || !info.commit) throw new GuobaError('不是 git 仓库，回滚不了')
+    // detached 时 reset 只挪 HEAD 不挪分支，回滚完插件还在游离状态，越弄越乱
+    if (info.detached) throw new GuobaError('HEAD 处于游离状态（没在任何分支上），先手动切回分支')
+
+    let target
+    if (commit) {
+      target = await resolveCommit(dir, commit)
+      if (!target) throw new GuobaError(`这个仓库里找不到提交 ${commit}`)
+    } else {
+      const rec = this.#history.get(key)
+      if (!rec) throw new GuobaError('没有本次运行内的更新记录，请在更新日志里挑一个版本')
+      target = rec.before
     }
-    const res = await resetTo(dir, rec.before)
+    if (target === info.commit) throw new GuobaError('已经在这个版本上了')
+    if (info.dirty && !discardLocal) {
+      throw new GuobaError(
+        `有 ${info.changed.length} 个文件被改过，回滚会把这些改动丢掉 —— 确认要丢就勾上「丢弃本地改动」`,
+      )
+    }
+
+    // 目标在当前提交的历史里才叫「回滚」；反过来是往前跳（比如挑了条待更新的提交）
+    const back = await isAncestor(dir, target, info.commit)
+    const res = await resetTo(dir, target)
     if (!res.ok) {
       throw new GuobaError(`回滚失败：${firstLine(res.stderr) || `git 退出码 ${res.code}`}`)
     }
-    this.#history.delete(name)
-    logger.mark(`[Guoba] 插件 ${name} 已回滚到 ${rec.before.slice(0, 7)}`)
-    return {name, commit: rec.before.slice(0, 7), needRestart: true}
+    // 记下这次的起点：挑错版本了还能一键退回来
+    this.#history.set(key, {before: info.commit, after: target, at: Date.now(), via: 'rollback'})
+    const short = target.slice(0, 7)
+    logger.mark(`[Guoba] 插件 ${key} 已${back ? '回滚' : '切换'}到 ${short}`)
+    return {name: key, commit: short, from: info.shortCommit, back, needRestart: true}
   }
 
   // ------------------------------------------------------------------ 任务

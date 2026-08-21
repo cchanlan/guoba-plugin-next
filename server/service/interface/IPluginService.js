@@ -26,7 +26,12 @@ export default class IPluginService extends Service {
     let remotePlugins = await this.getRemotePlugins(force)
     let localPlugins = await this.readLocalPlugins(this.pluginsPath)
     for (let rp of remotePlugins) {
-      let idx = localPlugins.findIndex(({name}) => lodash.toLower(name) === lodash.toLower(rp.name))
+      // 目录名也参与匹配：插件在 guoba.support.js 里把自己叫「R插件」时，name 跟远程仓库名
+      // （rconsole-plugin）对不上，同一个插件就会既列一条「未安装」又列一条本地的
+      let idx = localPlugins.findIndex(({name, dir}) => {
+        const target = lodash.toLower(rp.name)
+        return lodash.toLower(name) === target || (dir && lodash.toLower(dir) === target)
+      })
       if (idx > -1) {
         let lp = localPlugins[idx]
         Object.assign(rp, lp, {installed: true})
@@ -124,6 +129,10 @@ export default class IPluginService extends Service {
             }
           }
           PluginsMap.set(plugin.name, plugin)
+          // 真实目录名，放在 pluginInfo 合并之后 —— 插件的 pluginInfo.name 常是「R插件」这类
+          // 展示名（rconsole-plugin 就是），而 git 状态、更新、回滚全按目录走，
+          // 名字对不上的话卡片上就看不到分支、更新和日志入口
+          plugin.dir = name
           plugins.push(plugin)
         }
       }

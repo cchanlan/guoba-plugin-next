@@ -66,6 +66,8 @@ export default class PluginController extends ApiController {
     this.post('/update/run', this.updateRun)
     this.get('/update/task', this.updateTask)
     this.post('/update/cancel', this.updateCancel)
+    // 单个插件的提交历史，兼作「选版本回滚」的选项来源
+    this.get('/update/log', this.updateLog)
     this.post('/update/rollback', this.updateRollback)
 
     // 获取plugin icon（直接显示图片）
@@ -106,11 +108,17 @@ export default class PluginController extends ApiController {
     return Result.ok(this.pluginUpdateService.cancel(), '已请求取消')
   }
 
-  /** 回滚到本次更新之前的 commit */
+  /** 一个插件的更新日志：本地提交历史 + 上次检查时拉到的待更新提交。不联网 */
+  async updateLog(req) {
+    const {name, limit} = req.query ?? {}
+    return Result.ok(await this.pluginUpdateService.history(name, limit))
+  }
+
+  /** 回滚：不带 commit 就退回上次改动前，带了就去更新日志里挑的那个版本 */
   async updateRollback(req) {
-    const {name} = req.body ?? {}
-    const data = await this.pluginUpdateService.rollback(name)
-    return Result.ok(data, `已回滚到 ${data.commit}，重启后生效`)
+    const {name, commit, discardLocal} = req.body ?? {}
+    const data = await this.pluginUpdateService.rollback(name, {commit, discardLocal})
+    return Result.ok(data, `已${data.back ? '回滚' : '切换'}到 ${data.commit}，重启后生效`)
   }
 
   /**
