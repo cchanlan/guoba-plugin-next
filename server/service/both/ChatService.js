@@ -6,6 +6,7 @@ import {AssetStore, flattenOneBot, normalizeMsg, toBase64File} from './model/msg
 import {groupAvatarUrl, userAvatarUrl} from './model/avatar.js'
 import {listBots, ensureContacts} from './model/bots.js'
 import {packetSupport} from './model/packetSupport.js'
+import {describeSendError} from './model/sendError.js'
 
 /**
  * 实时缓冲最多留多少条。
@@ -1129,7 +1130,9 @@ export default class ChatService extends Service {
     try {
       res = await target.sendMsg(msg)
     } catch (err) {
-      throw new GuobaError(`发送失败：${err?.message ?? err}`)
+      // 适配器原文是给开发者看的（整条 URL + 错误码），翻成人话再抛给面板
+      logger.error(`[Guoba] 面板发送消息失败：${err?.message ?? err}`)
+      throw new GuobaError(describeSendError(err))
     }
 
     const messageId = res?.message_id != null ? String(res.message_id) : ''
