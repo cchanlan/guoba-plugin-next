@@ -1,8 +1,6 @@
 import {cfg} from "#guoba.platform";
-import {sendToBotMaster} from '#guoba.utils'
+import {getMasterBotIds, isFakeAccount, sendToBotMaster} from '#guoba.utils'
 
-// 控制台之类的非真实账号，不作为触发引导的依据，也不给它发引导
-const FAKE_BOT_IDS = ['stdin']
 // 账号刚连上时好友列表等信息可能还没同步完，等一会儿再发
 const GUIDE_DELAY = 10000
 
@@ -91,13 +89,13 @@ export class GuobaHelp extends plugin {
       return
     }
     // 插件被 #锅巴重启 重载时账号早就连上了，不会再有 connect 事件
-    const online = this.getRealBotId()
+    const online = await this.getRealBotId()
     if (online != null) {
       return this.sendGuide(online)
     }
     const onConnect = e => {
       const botId = e?.self_id
-      if (botId == null || FAKE_BOT_IDS.includes(String(botId))) {
+      if (isFakeAccount(botId)) {
         return
       }
       Bot.off('connect', onConnect)
@@ -106,10 +104,19 @@ export class GuobaHelp extends plugin {
     Bot.on('connect', onConnect)
   }
 
-  // 取一个已连上的真实账号
-  getRealBotId() {
-    const uins = Array.isArray(Bot.uin) ? Bot.uin : [Bot.uin]
-    return uins.find(i => i != null && !FAKE_BOT_IDS.includes(String(i)))
+  /**
+   * 取一个能给主人发消息的已连账号。
+   *
+   * 优先挑 `master` 里配了主人的账号：官bot 除了正式账号还会注册一个沙盒账号
+   * （QQBotSandbox），它名下查不到主人，挑中它引导就发不出去。
+   */
+  async getRealBotId() {
+    const uins = (Array.isArray(Bot.uin) ? Bot.uin : [Bot.uin]).filter(i => !isFakeAccount(i))
+    if (uins.length === 0) {
+      return null
+    }
+    const owners = await getMasterBotIds()
+    return uins.find(i => owners.has(String(i))) ?? uins[0]
   }
 
   async sendGuide(botId) {

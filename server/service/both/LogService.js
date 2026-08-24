@@ -1,7 +1,8 @@
 import fs from 'fs'
 import path from 'path'
 import {Service, GuobaError} from '#guoba.framework'
-import {_paths, cfg} from '#guoba.platform'
+import {_paths} from '#guoba.platform'
+import {getRealMasterList, sendToMasterList} from '#guoba.utils'
 
 /** 环形缓冲最多留多少行。太小了刷屏时翻不到前面，太大了白占内存 */
 const MAX_LINES = 3000
@@ -343,13 +344,17 @@ export default class LogService extends Service {
 
   /**
    * 把日志渲染图私聊发给主人。图走 multipart 上传（multer 落盘在临时目录），
-   * 这里读字节转 base64:// 交给适配器。主人取 `cfg.masterQQ`，可多个，逐个发。
+   * 这里读字节转 base64:// 交给适配器。主人可多个，逐个发。
    */
   async sendImage(file) {
-    // 锅巴的 cfg 是它自己的配置封装，没有 masterQQ —— TRSS 的真实 config 在 cfg.trssCfg。
-    // masterQQ 里可能混着 stdin（命令行标识），只留数字 QQ
-    const masters = (cfg.trssCfg?.masterQQ ?? []).filter((qq) => /^\d+$/.test(String(qq)))
-    if (!masters.length) throw new GuobaError('未配置主人 QQ（检查 config/config/other.yaml 的 masterQQ）')
+    /*
+     * 主人账号不一定是数字：官bot 的主人是 `appid:openid`，早先这里按 /^\d+$/ 过滤
+     * masterQQ，官bot 环境下一个主人都留不下，直接报「未配置主人 QQ」。
+     * 改走 master 映射：既能带上非数字账号，也知道该用哪个 Bot 发 —— 官bot 的 openid
+     * 只在自己 appid 名下有效，用 Bot.pickUser 全局挑号会挑错账号。
+     */
+    const masters = await getRealMasterList()
+    if (!masters.length) throw new GuobaError('未配置主人账号（检查 config/config/other.yaml 的 master）')
     if (!file?.path) throw new GuobaError('没有收到图片')
     const buffer = fs.readFileSync(file.path)
     fs.rmSync(file.path, {force: true})
@@ -357,18 +362,7 @@ export default class LogService extends Service {
       throw new GuobaError(`图片过大（上限 ${MAX_IMAGE_SIZE / 1024 / 1024}MB）`)
     }
     const msg = [{type: 'image', file: `base64://${buffer.toString('base64')}`}]
-    const sent = []
-    for (const qq of masters) {
-      try {
-        const friend = Bot?.pickUser ? Bot.pickUser(qq) : null
-        if (friend?.sendMsg) {
-          await friend.sendMsg(msg)
-          sent.push(qq)
-        }
-      } catch (err) {
-        logger.debug(`[Guoba] 日志图发送到 ${qq} 失败：${err?.message ?? err}`)
-      }
-    }
+    const sent = await sendToMasterList(msg)
     if (!sent.length) throw new GuobaError('发送失败，请检查主人配置')
     return {ok: true, sent}
   }

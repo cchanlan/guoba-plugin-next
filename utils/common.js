@@ -30,10 +30,24 @@ export function toPairsMap(arg) {
 }
 
 /**
+ * 非真实账号的判定。
+ *
+ * `stdin` 是控制台；官方 QQ 机器人（官bot）除了正式账号，还会额外注册一个沙盒环境的
+ * 账号 `QQBotSandbox`。这类账号没有关系链、私聊发不出去，也不该拿它当「有账号上线了」
+ * 的依据 —— 挑中它的话，`cfg.master` 里根本查不到它名下的主人。
+ */
+export function isFakeAccount(id) {
+  return id == null || id === '' || /^stdin$|sandbox$/i.test(String(id))
+}
+
+/**
  * 获取主人列表，元素为 {botId, userId}
  *
  * TRSS 的 cfg.master 是 `botId:userId` 的映射，能明确知道该用哪个账号发消息；
  * 其余情况只有 masterQQ 列表，botId 留空由框架自行挑选。
+ *
+ * 注意 userId 不一定是数字：官bot 的主人是 `appid:openid`（本身就带冒号），宿主
+ * 解析 master 时是 `split(':')` 后把剩下的 `join(':')` 还原的，所以这里拿到的是完整标识。
  */
 async function getMasterList() {
   let config
@@ -54,6 +68,26 @@ async function getMasterList() {
   let masterQQ = config.masterQQ ?? []
   if (!Array.isArray(masterQQ)) masterQQ = [masterQQ]
   return masterQQ.map(userId => ({botId: null, userId}))
+}
+
+/**
+ * 真实主人列表：去掉 stdin、官bot 沙盒这类收不到私聊的账号。
+ * botId 为 null 表示「由框架挑账号」，是合法的，不能当假账号滤掉。
+ */
+export async function getRealMasterList() {
+  const masters = await getMasterList()
+  return masters.filter(i =>
+    i && !isFakeAccount(i.userId) && (i.botId == null || !isFakeAccount(i.botId)),
+  )
+}
+
+/**
+ * master 映射里真正配了主人的 Bot 账号集合（字符串）。
+ * 用来在多账号环境里挑出「能给主人发消息」的那个账号。
+ */
+export async function getMasterBotIds() {
+  const masters = await getRealMasterList()
+  return new Set(masters.filter(i => i.botId != null).map(i => String(i.botId)))
 }
 
 /**
@@ -103,6 +137,21 @@ export async function sendToBotMaster(botId, msg) {
   if (sendTo.length === 0) {
     sendTo = masters.filter(i => i.botId == null).map(i => ({...i, botId}))
   }
+  /*
+   * 传入的账号在 master 里查不到，就退回给「配了主人的账号」发。
+   *
+   * 官bot 除了正式账号还会注册一个沙盒账号（QQBotSandbox），多号环境也常见某个号
+   * 没写进 master（只写了 masterQQ）。这时候直接跳过的话，首次引导这种一次性消息
+   * 就永远发不出去 —— 而且不能改用传入的账号发：官bot 的 openid 只在自己 appid
+   * 名下有效，拿沙盒账号去 pickFriend 正式账号的主人必然失败。
+   */
+  if (sendTo.length === 0) {
+    sendTo = (await getRealMasterList()).filter(i => i.botId != null)
+    if (sendTo.length > 0) {
+      const ids = [...new Set(sendTo.map(i => String(i.botId)))].join('、')
+      logger.mark(`[Guoba] Bot(${botId}) 名下没有主人账号，改用 ${ids} 发送`)
+    }
+  }
   if (sendTo.length === 0) {
     logger.warn(`[Guoba] Bot(${botId}) 名下没有主人账号，跳过发送`)
     return 0
@@ -117,12 +166,29 @@ export async function sendToBotMaster(botId, msg) {
 }
 
 /**
+ * 给所有真实主人发消息，返回发送成功的主人账号列表。
+ *
+ * 与 sendToMaster 的区别：跳过 stdin 这类假账号（它收不到图片），并且返回明细而不只是数量。
+ */
+export async function sendToMasterList(msg) {
+  const masters = await getRealMasterList()
+  const sent = []
+  for (const master of masters) {
+    if (await replyPrivate(master, msg)) {
+      sent.push(String(master.userId))
+    }
+  }
+  return sent
+}
+
+/**
  * 发送私聊消息
  * @param master {{botId: ?string, userId: string|number}} 目标主人
  * @param msg 消息
  * @return {Promise<boolean>} 是否发送成功
  */
 async function replyPrivate({botId, userId}, msg) {
+  // 数字 QQ 转 number（部分适配器只认 number），官bot 的 `appid:openid` 保持字符串
   userId = Number(userId) || userId
   try {
     let bot = botId != null ? Bot.bots?.[botId] : null
