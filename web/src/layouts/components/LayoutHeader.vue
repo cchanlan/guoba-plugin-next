@@ -229,9 +229,6 @@ const userMenu = () =>
   padding: 4px 10px 4px 4px;
   cursor: pointer;
   color: var(--g-text-sub);
-  /* 连点几下会把昵称当文本选中（蓝底），这里是按钮不是文本，禁掉选中 */
-  -webkit-user-select: none;
-  user-select: none;
 }
 
 .g-avatar {

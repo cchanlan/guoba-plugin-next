@@ -371,6 +371,8 @@ onBeforeUnmount(() => {
 .g-term-prompt {
   margin-right: 6px;
   color: var(--g-brand);
+  /* 输出区整体是可选的（要能复制报错），提示符得单独排除，
+     否则拖选一段命令粘出去全是 "$ " 打头 */
   user-select: none;
 }
 

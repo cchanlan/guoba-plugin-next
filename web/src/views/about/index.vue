@@ -109,7 +109,8 @@ function confirmRestart(type: 'guoba' | 'bot') {
               :label="item.label"
               :span="item.span"
             >
-              <span class="g-about-val">{{ item.value }}</span>
+              <!-- 版本号、UA 这些是报问题时要贴出去的，单独开选中 -->
+              <span class="g-about-val g-selectable">{{ item.value }}</span>
             </DescriptionsItem>
           </Descriptions>
         </Card>

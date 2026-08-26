@@ -92,6 +92,36 @@ html[data-theme='light'] {
   --g-ansi-bright-white: rgba(0, 0, 0, 0.88);
 }
 
+/* ---------------- 文本选中 ---------------- */
+
+/* 面板是当应用用的，界面骨架里到处是「点文字就等于点控件」的地方：勾选框和单选框的
+   标签、整行可点的链接卡、侧边菜单、双击就地编辑的表格单元格。连点两下这些文字，
+   浏览器就把它选中，Edge 还会在选区旁边弹一个「复制 / 搜索」的小浮层，正好糊住
+   下面的内容，手机上长按同理。所以骨架统一禁选，真正是「内容」的地方在下面放行。
+   antd 的 Modal / Drawer / Dropdown 挂在 body 下、不在 #app 里，规则得写在 body 上 */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 放行清单：这些文字是给人复制走的（报错日志、终端输出、配置值、commit hash），
+   共同点是「只读展示、点它不会触发操作」。表格里的 ID 那类都有专门的复制按钮，
+   不靠选中，所以不在这里。需要临时开口子的地方加 .g-selectable */
+input,
+textarea,
+[contenteditable]:not([contenteditable='false']),
+pre,
+code,
+.g-selectable,
+.g-log-box,
+.g-term-box,
+.g-markdown,
+.g-seg-text,
+.g-seg-md {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* ---------------- 滚动条 ---------------- */
 
 ::-webkit-scrollbar {
