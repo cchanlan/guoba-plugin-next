@@ -61,6 +61,13 @@ const avatarText = computed(() => {
   return matched ? matched[0].toUpperCase() : 'G'
 })
 
+/**
+ * 机器人头像。地址由后端按适配器算好（server/service/both/model/avatar.js）——
+ * 官方机器人、stdin 这类账号没有公开地址，那时是空串，Avatar 自己退回上面的首字；
+ * 图片加载失败（断网、腾讯挂了）也会退回去，不用额外处理。
+ */
+const avatarUrl = computed(() => auth.user?.avatar || '')
+
 function confirmRestartBot() {
   Modal.confirm({
     title: '重启 Bot',
@@ -164,7 +171,7 @@ const userMenu = () =>
 
       <Dropdown :trigger="['click']">
         <div class="g-user">
-          <Avatar :size="28" class="g-avatar">{{ avatarText }}</Avatar>
+          <Avatar :size="28" class="g-avatar" :src="avatarUrl">{{ avatarText }}</Avatar>
           <span class="g-user-name">{{ userName }}</span>
           <GIcon icon="ant-design:down-outlined" :size="11" />
         </div>
@@ -220,14 +227,8 @@ const userMenu = () =>
   align-items: center;
   gap: 8px;
   padding: 4px 10px 4px 4px;
-  border-radius: 999px;
   cursor: pointer;
-  transition: background 0.2s;
   color: var(--g-text-sub);
-}
-
-.g-user:hover {
-  background: var(--g-brand-soft);
 }
 
 .g-avatar {
