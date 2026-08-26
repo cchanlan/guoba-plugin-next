@@ -6,6 +6,10 @@ import lodash from 'lodash'
 import fetch from 'node-fetch'
 import {cfg, Constant} from "#guoba.platform"
 import {isV3, isV4, isTRSS} from '#guoba.adapter'
+import {isFakeAccount} from './account.js'
+
+// 判据放在零依赖的 account.js 里，server 的 model 层也要用（见 service/both/model/bots.js）
+export {isFakeAccount}
 
 /**
  * 随机生成指定长度的字符串
@@ -27,17 +31,6 @@ export function toPairsMap(arg) {
     obj[key] = value
   }
   return obj
-}
-
-/**
- * 非真实账号的判定。
- *
- * `stdin` 是控制台；官方 QQ 机器人（官bot）除了正式账号，还会额外注册一个沙盒环境的
- * 账号 `QQBotSandbox`。这类账号没有关系链、私聊发不出去，也不该拿它当「有账号上线了」
- * 的依据 —— 挑中它的话，`cfg.master` 里根本查不到它名下的主人。
- */
-export function isFakeAccount(id) {
-  return id == null || id === '' || /^stdin$|sandbox$/i.test(String(id))
 }
 
 /**

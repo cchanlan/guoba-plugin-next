@@ -5,6 +5,7 @@
  */
 
 import {botAppId} from './avatar.js'
+import {isFakeAccount} from '../../../../utils/account.js'
 
 /**
  * 拉到了、但列表确实是空的，隔多久再试。
@@ -282,6 +283,8 @@ export async function ensureContacts(kind = 'friend', botId = '') {
  *
  * 判据与 StatusService 一致：`Bot.bots` 上挂着 logger、_events 这类非账号属性，
  * 甚至有插件往上塞自己的东西，只有带 adapter 的才是真账号。
+ *
+ * 顺序上把 stdin、官bot 沙盒这类伪账号排到最后，原因见下面的 sort。
  */
 export function listBots() {
   const uins = []
@@ -297,8 +300,9 @@ export function listBots() {
     if (value && typeof value === 'object' && value.adapter) push(key)
   }
 
-  return uins.map((uin) => {
-    const bot = Bot?.bots?.[uin]
+  const list = uins.map((uin) => {
+    // V3 单账号下没有 Bot.bots，Bot 自己就是那个账号，昵称只能从它身上取
+    const bot = Bot?.bots?.[uin] ?? (String(Bot?.uin) === uin ? Bot : null)
     return {
       uin,
       nickname: typeof bot?.nickname === 'string' ? bot.nickname : '',
@@ -310,4 +314,26 @@ export function listBots() {
       appId: botAppId(uin),
     }
   })
+
+  /**
+   * 伪账号沉到最后。
+   *
+   * 面板有好几处是拿列表第一项当「当前账号」（顶栏的昵称头像、沙盒的默认 selfId），
+   * 而 stdin 往往正好排在最前 —— 它不用登录，注册得比任何真账号都早。
+   * 不整个滤掉：沙盒和消息记录里它仍然是个能选的目标。
+   * V8 的 sort 是稳定的，真账号之间的原有顺序不会被打乱。
+   */
+  return list.sort((a, b) => Number(isFakeAccount(a.uin)) - Number(isFakeAccount(b.uin)))
+}
+
+/**
+ * 「机器人本体」是哪个账号 —— 顶栏的昵称和头像用它。
+ *
+ * 只认真账号：stdin 的昵称就是「标准输入」，拿它当本体的话，用户在面板上看到的
+ * 就是这四个字和一个「标」字头像。真账号一个都没上线时返回 undefined，由调用方兜底 ——
+ * 别退回 `Bot.nickname`，TRSS 的 Proxy 会把它重定向到随机一个在线账号
+ * （lib/bot.js 里 uin.toJSON 的随机 + 60 秒缓存），只有 stdin 在线时又绕回「标准输入」。
+ */
+export function mainBot() {
+  return listBots().find((it) => !isFakeAccount(it.uin))
 }
