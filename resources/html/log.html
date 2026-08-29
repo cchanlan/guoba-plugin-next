@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{{title}}</title>
+  <style>
+    /*
+     * 日志出图模板。
+     *
+     * 渲染后的 html 落在宿主的 temp/html 下，跟本目录不是同一层，所以字体这类资源
+     * 必须由外面传绝对路径（ResPath）进来，写相对路径一定指飞。
+     */
+    @font-face {
+      font-family: "SR";
+      src: url("{{ResPath}}SR.ttf");
+      font-weight: normal;
+      font-style: normal;
+    }
+
+    :root {
+      --bg-color: #fdfbf5;       /* 整体米色背景 */
+      --card-bg: #ffffff;        /* 容器白色背景 */
+      --border-color: #4a3b32;   /* 深棕色边框 */
+      --text-main: #4a3b32;      /* 深棕色文字 */
+      --text-sub: #8c7b70;       /* 浅棕色文字 */
+      --divider: #e6e1d5;        /* 条目之间的虚线 */
+      --border-width: 2.5px;     /* 粗边框 */
+    }
+
+    body {
+      font-family: "SR", sans-serif;
+      background-color: var(--bg-color);
+      background-image: radial-gradient(#e0dcd0 1px, transparent 1px);
+      background-size: 20px 20px;
+      margin: 0;
+      padding: 20px;
+      max-width: 1000px;
+      color: var(--text-main);
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      border: var(--border-width) solid var(--border-color);
+      border-radius: 16px;
+      background: var(--card-bg);
+      padding: 20px 22px;
+      box-shadow: 6px 6px 0px rgba(74, 59, 50, 0.1);
+    }
+
+    h1 {
+      text-align: center;
+      color: var(--text-main);
+      font-size: 1.6em;
+      margin: 0 0 22px 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    /* 标题旁边的装饰图标 */
+    h1::before {
+      content: '🐾';
+      font-size: 1.2em;
+    }
+
+    /* --- 日志列表 --- */
+    .log-list {
+      display: flex;
+      flex-direction: column;
+    }
+
+    /*
+     * 每条日志不再各套一个小框：没有边框、背景和阴影，条目之间只用一条虚线分隔。
+     * 外层容器已经是个框了，再套一层小框显得又挤又碎。
+     */
+    .log-item {
+      padding: 11px 2px;
+    }
+
+    .log-item:first-child {
+      padding-top: 0;
+    }
+
+    .log-item:last-child {
+      padding-bottom: 0;
+    }
+
+    .log-item + .log-item {
+      border-top: 2px dashed var(--divider);
+    }
+
+    /* 头部区域：级别 和 时间 */
+    .log-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+
+    .time-badge {
+      font-family: "SR";
+      color: var(--text-sub);
+      font-size: 0.9em;
+      font-weight: bold;
+    }
+
+    /* 胶囊样式的等级标签 */
+    .level-badge {
+      font-weight: 800;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.85em;
+      text-align: center;
+      border: 2px solid var(--border-color);
+      min-width: 50px;
+      box-shadow: 1px 1px 0px rgba(0, 0, 0, 0.1);
+    }
+
+    /* 级别配色跟终端里的日志颜色同源 */
+    .badge-MARK {
+      background-color: #dcedc8; /* 浅绿 */
+      color: #33691e;
+    }
+
+    .badge-INFO {
+      background-color: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    .badge-WARN {
+      background-color: #fff3c4;
+      color: #8d6e00;
+    }
+
+    .badge-ERRO {
+      background-color: #ffccbc; /* 浅红 */
+      color: #bf360c;
+    }
+
+    .badge-FATA {
+      background-color: #ffb3a7;
+      color: #8e0000;
+    }
+
+    .badge-DEBU {
+      background-color: #e3f0fb;
+      color: #1565c0;
+    }
+
+    .badge-TRAC {
+      background-color: #eceff1;
+      color: #546e7a;
+    }
+
+    /* 错误标题（仅 Error 显示） */
+    .error-title {
+      font-weight: 900;
+      font-size: 1.1em;
+      color: #d32f2f;
+      margin-left: 5px;
+    }
+
+    /* 内容区域 */
+    .log-content {
+      color: var(--text-main);
+      line-height: 1.6;
+      font-size: 0.95em;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      word-break: break-all;
+      font-family: Consolas, "Courier New", monospace;
+      padding: 2px 0;
+    }
+
+    /* 打码内容的高亮样式 */
+    .censored {
+      background: #4a3b32;
+      color: #ffcc00;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: bold;
+    }
+
+    .plugin {
+      margin-top: 22px;
+      font-size: 12px;
+      font-family: "SR";
+      text-align: center;
+      color: var(--text-sub);
+      opacity: 0.7;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>{{title}}</h1>
+
+    <div id="logContainer" class="log-list"></div>
+
+    <div class="plugin">{{footer}}</div>
+  </div>
+  <script>
+    function formatMessage(message) {
+      // 1. 转义 HTML 防止注入
+      let safeMsg = String(message)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+
+      // 2. 高亮打码内容
+      safeMsg = safeMsg.replace(/不给你看喵！/g, '<span class="censored">不给你看喵！</span>');
+
+      // 3. 方括号美化
+      safeMsg = safeMsg.replace(/\[(.*?)\]/g, (match, p1) => {
+        return `[<span style="color:#1976d2;font-weight:bold;">${p1}</span>]`;
+      });
+
+      // 4. 换行
+      return safeMsg.replace(/\n/g, '<br>');
+    }
+
+    function renderLogs(logs) {
+      const container = document.getElementById('logContainer')
+
+      const html = logs.map(log => {
+        const isError = log.level === 'ERRO' || log.level === 'FATA';
+        const titleHtml = isError ? `<span class="error-title">⛔ 错误日志 detected!</span>` : '';
+
+        return `
+          <div class="log-item">
+            <div class="log-header">
+              <span class="level-badge badge-${log.level}">${log.level}</span>
+              <span class="time-badge">${log.time}</span>
+              ${titleHtml}
+            </div>
+            <div class="log-content">${formatMessage(log.message)}</div>
+          </div>
+        `
+      }).join('')
+
+      container.innerHTML = html
+    }
+
+    const logData = {{@ logs}};
+
+    renderLogs(logData)
+  </script>
+</body>
+</html>
+

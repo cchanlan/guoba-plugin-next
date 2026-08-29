@@ -22,9 +22,9 @@ export class LogController extends ApiController {
     this.post('/send-image', this.sendImage)
   }
 
-  /** 把日志渲染图私聊发给主人。图片走 multipart（base64 塞 JSON 会撞宿主 body 上限 413） */
+  /** 把日志渲染成图私聊发给主人。前端只传行数据，图由服务端用出图模板渲染 */
   async sendImage(req) {
-    return Result.ok(await this.logService.sendImage(req.files?.[0]))
+    return Result.ok(await this.logService.sendImage(req.body))
   }
 
   /**

@@ -469,9 +469,9 @@ export const apiLogStatus = () => get<LogStatus>('/log/status', undefined, { sho
 
 export const apiClearLog = () => post<number>('/log/clear', {}, { showSuccess: true })
 
-/** 把日志渲染图私聊发给主人。走 multipart（base64 塞 JSON 会 413） */
-export const apiLogSendImage = (fd: FormData) =>
-  post<{ ok: boolean; sent: string[] }>('/log/send-image', fd)
+/** 把日志渲染成图私聊发给主人。图由服务端渲染（跟 #锅巴日志 同一套模板），这里只传行数据 */
+export const apiLogSendImage = (body: { lines: LogLine[] }) =>
+  post<{ ok: boolean; sent: string[]; fallback?: boolean }>('/log/send-image', body)
 
 /* ---------------- 数据浏览（Redis / SQLite） ---------------- */
 

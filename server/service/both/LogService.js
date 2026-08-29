@@ -2,7 +2,13 @@ import fs from 'fs'
 import path from 'path'
 import {Service, GuobaError} from '#guoba.framework'
 import {_paths} from '#guoba.platform'
-import {getRealMasterList, sendToMasterList} from '#guoba.utils'
+import {
+  formatLogText,
+  getRealMasterList,
+  mergeLogLines,
+  renderLogImage,
+  sendToMasterList,
+} from '#guoba.utils'
 
 /** 环形缓冲最多留多少行。太小了刷屏时翻不到前面，太大了白占内存 */
 const MAX_LINES = 3000
@@ -17,8 +23,8 @@ const PRELOAD_LINES = 300
 /** 一次最多返回多少行 */
 const MAX_LIMIT = 2000
 
-/** 日志截图发给主人的图，单张字节上限（约 10MB PNG） */
-const MAX_IMAGE_SIZE = 10 * 1024 * 1024
+/** 日志截图发给主人时，一次最多渲染多少条，跟前端取的「最近 100 行」对齐 */
+const MAX_SEND_ITEMS = 100
 
 /**
  * 劫持前的原始 write 存在 process 上。
@@ -343,10 +349,16 @@ export default class LogService extends Service {
   }
 
   /**
-   * 把日志渲染图私聊发给主人。图走 multipart 上传（multer 落盘在临时目录），
-   * 这里读字节转 base64:// 交给适配器。主人可多个，逐个发。
+   * 把日志渲染成图私聊发给主人。
+   *
+   * 图在 Bot 进程里用宿主的渲染器出（模板见 resources/html/log.html），跟聊天里的
+   * `#锅巴日志` 是同一份模板 —— 早先是前端用 canvas 画一张深色终端图上传上来，
+   * 两边长得完全不一样，改成服务端渲染后只需维护一套 UI。
+   *
+   * 行数据由前端传：面板上有级别 / 关键字筛选，发出去的应该是「主人在页面上看到的」
+   * 那些行，而不是缓冲里最新的一批。
    */
-  async sendImage(file) {
+  async sendImage(body) {
     /*
      * 主人账号不一定是数字：官bot 的主人是 `appid:openid`，早先这里按 /^\d+$/ 过滤
      * masterQQ，官bot 环境下一个主人都留不下，直接报「未配置主人 QQ」。
@@ -355,16 +367,14 @@ export default class LogService extends Service {
      */
     const masters = await getRealMasterList()
     if (!masters.length) throw new GuobaError('未配置主人账号（检查 config/config/other.yaml 的 master）')
-    if (!file?.path) throw new GuobaError('没有收到图片')
-    const buffer = fs.readFileSync(file.path)
-    fs.rmSync(file.path, {force: true})
-    if (buffer.length > MAX_IMAGE_SIZE) {
-      throw new GuobaError(`图片过大（上限 ${MAX_IMAGE_SIZE / 1024 / 1024}MB）`)
-    }
-    const msg = [{type: 'image', file: `base64://${buffer.toString('base64')}`}]
-    const sent = await sendToMasterList(msg)
+    const items = mergeLogLines(body?.lines, MAX_SEND_ITEMS)
+    if (!items.length) throw new GuobaError('没有可发送的日志')
+    const res = await renderLogImage(items, {title: '锅巴日志'})
+    // 宿主没装渲染后端（或 Chromium 起不来）时退回文本，总比什么都收不到好
+    const fallback = !res?.images?.length
+    const sent = await sendToMasterList(fallback ? [formatLogText(items)] : res.images)
     if (!sent.length) throw new GuobaError('发送失败，请检查主人配置')
-    return {ok: true, sent}
+    return {ok: true, sent, fallback}
   }
 
   /** 页面上显示的状态 */
