@@ -212,10 +212,11 @@ function copyAll() {
 const sendingImage = ref(false)
 
 /**
- * 把最近 100 行日志发给主人。
+ * 把最近的日志发给主人。
  *
- * 图由服务端渲染（模板 resources/html/log.html），跟聊天里的 #锅巴日志 是同一套 UI ——
- * 早先是这里用 canvas 画一张深色终端图上传，两边风格完全不一样，还得单独维护。
+ * 图由服务端渲染（模板 resources/html/log.html），跟聊天里的 #锅巴日志 是同一套 UI、
+ * 同样的条数上限（30 条），两边发出来的图长得一样 —— 早先是这里用 canvas 画一张深色
+ * 终端图上传，风格完全不同还得单独维护。多传几行是因为堆栈会被合并成一条。
  */
 async function sendImageToMaster() {
   const all = lines.value
@@ -225,7 +226,7 @@ async function sendImageToMaster() {
   }
   sendingImage.value = true
   try {
-    const data = await apiLogSendImage({ lines: all.slice(-100) })
+    const data = await apiLogSendImage({ lines: all.slice(-150) })
     const tip = data.fallback ? '（渲染器不可用，已改为文本）' : ''
     message.success(`已发送给 ${data.sent.length} 个主人${tip}`)
   } catch {
@@ -285,7 +286,7 @@ onBeforeUnmount(() => {
       <Tooltip title="把当前显示的日志复制到剪贴板">
         <Button size="small" @click="copyAll">复制</Button>
       </Tooltip>
-      <Tooltip title="把当前显示的日志渲染成图，私聊发给主人">
+      <Tooltip title="把最近 30 条日志渲染成图，私聊发给主人（跟 #锅巴日志 同一套样式）">
         <Button size="small" :loading="sendingImage" @click="sendImageToMaster">
           <GIcon icon="ant-design:send-outlined" :size="13" /> 发给主人
         </Button>

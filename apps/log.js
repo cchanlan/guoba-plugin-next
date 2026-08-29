@@ -1,12 +1,17 @@
 import {autowired} from '#guoba.framework'
 import {formatLogText, makeForwardMsg, mergeLogLines, renderLogImage} from '#guoba.utils'
 
-/** 运行日志默认发多少条 */
-const DEFAULT_LIMIT = 50
+/**
+ * 运行日志默认发多少条。
+ *
+ * 一条日志在图上大约 110px 高，30 条就快 3500px 了 —— 再长会超过 QQ 那边约 4096 的
+ * 长边上限被压缩，字就糊了。要更多条自己在指令后面加数字。
+ */
+const DEFAULT_LIMIT = 30
 /** 错误日志默认发多少条 —— 错误往往带一长串堆栈，条数少点才看得清 */
 const DEFAULT_ERROR_LIMIT = 10
-/** 手动指定条数的上限，再多图也看不过来 */
-const MAX_LIMIT = 200
+/** 手动指定条数的上限：再多图就太长了，宿主截图也有高度上限 */
+const MAX_LIMIT = 100
 /** 向 LogService 多要几倍的行：续行（堆栈）会被合并，行数不等于条数 */
 const LINE_FACTOR = 3
 /** LogService.query 单次能给的最大行数 */
@@ -72,12 +77,8 @@ export class GuobaLog extends plugin {
 
     const title = isError ? '锅巴错误日志' : '锅巴日志'
     const res = await renderLogImage(items, {title})
-    if (res?.images?.length) {
-      if (res.images.length === 1) {
-        return this.reply(res.images[0])
-      }
-      // 分片出的多张图打包成转发消息，免得刷一屏
-      return this.reply(await makeForwardMsg(this.e, res.images, title))
+    if (res?.image) {
+      return this.reply(res.image)
     }
 
     // 渲染器不可用或出图失败，退回文本，日志本身不能因为出不了图就看不到

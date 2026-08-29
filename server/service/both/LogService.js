@@ -23,8 +23,13 @@ const PRELOAD_LINES = 300
 /** 一次最多返回多少行 */
 const MAX_LIMIT = 2000
 
-/** 日志截图发给主人时，一次最多渲染多少条，跟前端取的「最近 100 行」对齐 */
-const MAX_SEND_ITEMS = 100
+/**
+ * 日志截图发给主人时，一次最多渲染多少条。
+ *
+ * 跟 `#锅巴日志` 的默认条数保持一致 —— 两边条数不一样的话，出来的图长度差一截，
+ * 看着就像两套东西；再长也会超过 QQ 约 4096 的长边上限被压糊。
+ */
+const MAX_SEND_ITEMS = 30
 
 /**
  * 劫持前的原始 write 存在 process 上。
@@ -371,8 +376,8 @@ export default class LogService extends Service {
     if (!items.length) throw new GuobaError('没有可发送的日志')
     const res = await renderLogImage(items, {title: '锅巴日志'})
     // 宿主没装渲染后端（或 Chromium 起不来）时退回文本，总比什么都收不到好
-    const fallback = !res?.images?.length
-    const sent = await sendToMasterList(fallback ? [formatLogText(items)] : res.images)
+    const fallback = !res?.image
+    const sent = await sendToMasterList(fallback ? [formatLogText(items)] : [res.image])
     if (!sent.length) throw new GuobaError('发送失败，请检查主人配置')
     return {ok: true, sent, fallback}
   }

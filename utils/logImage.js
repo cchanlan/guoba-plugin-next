@@ -25,8 +25,6 @@ const RES_PATH = `${path.join(_paths.resources, 'fonts')}/`.replace(/\\/g, '/')
 const MAX_ROWS_PER_ITEM = 12
 /** 一条日志正文最多多少字符 */
 const MAX_TEXT_LEN = 1000
-/** 超过这么多条就分片截图：单张长图发到 QQ 会被压得看不清 */
-const MULTI_PAGE_ITEMS = 60
 /** 打码后填进去的字样，模板里有对应的高亮样式 */
 const CENSORED = '不给你看喵！'
 
@@ -120,9 +118,13 @@ function defaultFooter(count) {
 /**
  * 把日志条目渲染成图。
  *
+ * 只出一张完整的图：宿主的分片截图（multiPage）是把同一页按 4000px 切开，除了第一张
+ * 之后的每张都没有标题、也没有外框，看着像被裁下来的碎片，跟聊天里那张对不上。
+ * 想控制图的长度就少给几条，别指望分片。
+ *
  * @param items mergeLogLines 的结果
  * @param options {{title?: string, footer?: string}}
- * @return {Promise<?{images: any[], count: number}>} 渲染不出来返回 null，调用方自己决定怎么兜底
+ * @return {Promise<?{image: any, count: number}>} 渲染不出来返回 null，调用方自己决定怎么兜底
  */
 export async function renderLogImage(items, options = {}) {
   if (!items?.length) return null
@@ -144,14 +146,8 @@ export async function renderLogImage(items, options = {}) {
     quality: 95,
   }
   try {
-    // 条数多的时候分片，一张几万像素的长图发出去会被压缩得看不清
-    if (items.length > MULTI_PAGE_ITEMS && typeof renderer.screenshots === 'function') {
-      const imgs = await renderer.screenshots('guoba-log', data)
-      const images = [].concat(imgs ?? []).filter(Boolean)
-      return images.length ? {images, count: items.length} : null
-    }
     const img = await renderer.screenshot('guoba-log', data)
-    return img ? {images: [img], count: items.length} : null
+    return img ? {image: img, count: items.length} : null
   } catch (err) {
     logger.error('[Guoba] 日志出图失败')
     logger.error(err)
