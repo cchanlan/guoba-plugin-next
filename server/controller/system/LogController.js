@@ -20,6 +20,23 @@ export class LogController extends ApiController {
     this.get('/status', this.status)
     this.post('/clear', this.clear)
     this.post('/send-image', this.sendImage)
+    this.get('/clean', this.getClean)
+    this.put('/clean', this.saveClean)
+    this.post('/clean/run', this.runClean)
+  }
+
+  /** 日志文件的定时清理设置（连当前占用一起给，页面上要显示能清多少） */
+  async getClean() {
+    return Result.ok(this.logService.getCleanSettings())
+  }
+
+  async saveClean(req) {
+    return Result.ok(await this.logService.saveCleanSettings(req.body), '已保存')
+  }
+
+  /** 立刻按当前设置清一次磁盘上的日志文件 */
+  async runClean() {
+    return Result.ok(this.logService.cleanNow(), '清理完成')
   }
 
   /** 把日志渲染成图私聊发给主人。前端只传行数据，图由服务端用出图模板渲染 */

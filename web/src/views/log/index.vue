@@ -6,17 +6,32 @@
  * server/service/both/LogService.js），这里按秒轮询取增量：带上上次的 cursor，
  * 后端只返回更新的行。比长连接省事，断网恢复后自己就接上了。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Button, Empty, Input, Select, Switch, Tag, Tooltip, message } from 'ant-design-vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import {
+  Button,
+  Empty,
+  Input,
+  InputNumber,
+  Modal,
+  Select,
+  Switch,
+  Tag,
+  Tooltip,
+  message,
+} from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
 import GBackTop from '@/components/GBackTop.vue'
 import { scrollPageToBottom } from '@/utils/scroll'
 import { ansiStyle, parseAnsi, type AnsiSpan } from '@/utils/ansi'
 import {
   apiClearLog,
+  apiGetLogClean,
   apiLogSendImage,
   apiLogStatus,
+  apiRunLogClean,
+  apiSaveLogClean,
   apiTailLog,
+  type LogCleanSettings,
   type LogLine,
   type LogStatus,
 } from '@/api'
@@ -236,6 +251,77 @@ async function sendImageToMaster() {
   }
 }
 
+/* -------- 日志文件清理（清的是 Yunzai logs 目录，跟上面「清空」清内存缓冲不是一回事） -------- */
+
+const cleanOpen = ref(false)
+const cleanLoading = ref(false)
+const cleanSaving = ref(false)
+const cleanRunning = ref(false)
+const cleanInfo = ref<LogCleanSettings | null>(null)
+const cleanForm = reactive({ enable: true, cron: '0 30 4 1 * ?', keepDays: 30, errorLogMaxMB: 5 })
+
+function fmtSize(bytes = 0) {
+  if (!bytes) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let idx = 0
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024
+    idx++
+  }
+  return `${value.toFixed(idx ? 1 : 0)} ${units[idx]}`
+}
+
+async function loadClean() {
+  cleanLoading.value = true
+  try {
+    const data = await apiGetLogClean()
+    cleanInfo.value = data
+    Object.assign(cleanForm, {
+      enable: data.enable,
+      cron: data.cron,
+      keepDays: data.keepDays,
+      errorLogMaxMB: data.errorLogMaxMB,
+    })
+  } catch {
+    // 错误已由请求层提示
+  } finally {
+    cleanLoading.value = false
+  }
+}
+
+function openClean() {
+  cleanOpen.value = true
+  loadClean()
+}
+
+async function saveClean() {
+  cleanSaving.value = true
+  try {
+    cleanInfo.value = await apiSaveLogClean({ ...cleanForm })
+    cleanOpen.value = false
+  } catch {
+    // 错误已由请求层提示（cron 写错时后端会说明）
+  } finally {
+    cleanSaving.value = false
+  }
+}
+
+/** 立刻清一次，清完把占用数字刷新一下 */
+async function runClean() {
+  cleanRunning.value = true
+  try {
+    const res = await apiRunLogClean()
+    const freed = fmtSize(res.freed + res.truncated)
+    message.success(`已删除 ${res.removed} 个文件，释放 ${freed}`)
+    await loadClean()
+  } catch {
+    // 错误已由请求层提示
+  } finally {
+    cleanRunning.value = false
+  }
+}
+
 onMounted(async () => {
   await Promise.all([pull(true), loadStatus()])
   // 手机上日志框只占页面的一部分，光贴容器底还是看不到最新几行 ——
@@ -294,6 +380,11 @@ onBeforeUnmount(() => {
       <Tooltip title="只清面板里的显示，磁盘上的日志文件不动">
         <Button size="small" @click="clear">清空</Button>
       </Tooltip>
+      <Tooltip title="定时清理 Yunzai logs 目录里的日志文件">
+        <Button size="small" @click="openClean">
+          <GIcon icon="ant-design:delete-outlined" :size="13" /> 文件清理
+        </Button>
+      </Tooltip>
       <Button size="small" :loading="loading" @click="refresh">刷新</Button>
     </div>
 
@@ -325,6 +416,66 @@ onBeforeUnmount(() => {
     </div>
 
     <GBackTop />
+
+    <Modal
+      v-model:open="cleanOpen"
+      title="日志文件清理"
+      :confirm-loading="cleanSaving"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="saveClean"
+    >
+      <div class="g-clean">
+        <p class="g-clean-desc">
+          清理的是 <code>{{ cleanInfo?.dir || 'logs' }}</code> 里的日志文件，跟工具栏的「清空」（只清页面显示）无关。
+        </p>
+
+        <div class="g-clean-stat" v-if="cleanInfo">
+          当前 {{ cleanInfo.files }} 个文件、{{ fmtSize(cleanInfo.size) }}；
+          其中 {{ cleanInfo.expired }} 个已超出保留天数，
+          这次清理预计释放 {{ fmtSize(cleanInfo.expiredSize) }}。
+          <template v-if="cleanInfo.errorLogSize">
+            error.log 现在 {{ fmtSize(cleanInfo.errorLogSize) }}。
+          </template>
+        </div>
+
+        <div class="g-clean-row">
+          <span class="g-clean-label">定时清理</span>
+          <span>
+            <Switch v-model:checked="cleanForm.enable" size="small" />
+            <Tag v-if="cleanForm.enable && cleanInfo && !cleanInfo.scheduled" color="orange">未挂上定时任务</Tag>
+          </span>
+        </div>
+
+        <div class="g-clean-row">
+          <span class="g-clean-label">清理周期</span>
+          <Input v-model:value="cleanForm.cron" placeholder="0 30 4 1 * ?" :disabled="!cleanForm.enable" />
+        </div>
+        <p class="g-clean-hint">cron 表达式，5 段或 6 段。默认每月 1 号凌晨 4:30。</p>
+
+        <div class="g-clean-row">
+          <span class="g-clean-label">保留天数</span>
+          <InputNumber v-model:value="cleanForm.keepDays" :min="1" :max="3650" style="width: 100%" />
+        </div>
+        <p class="g-clean-hint">按修改时间算，更早的归档日志直接删；当天正在写的那份不会动。</p>
+
+        <div class="g-clean-row">
+          <span class="g-clean-label">error.log 上限</span>
+          <InputNumber
+            v-model:value="cleanForm.errorLogMaxMB"
+            :min="1"
+            :max="10240"
+            addon-after="MB"
+            style="width: 100%"
+          />
+        </div>
+        <p class="g-clean-hint">
+          error.log 一直被写着删不掉，超过这个大小就在清理时截断（同样的报错在 command 日志里还有一份）。
+        </p>
+
+        <Button :loading="cleanRunning" :disabled="cleanLoading" @click="runClean">立即清理一次</Button>
+      </div>
+    </Modal>
   </div>
 </template>
 
@@ -475,5 +626,45 @@ onBeforeUnmount(() => {
 
 .g-log-dim {
   color: var(--g-text-dim);
+}
+
+/* 清理设置弹窗：label 在上、控件在下，窄屏也不会被挤成竖排文字 */
+.g-clean {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.g-clean-desc,
+.g-clean-hint {
+  margin: 0;
+  color: var(--g-text-sub);
+  font-size: 12px;
+}
+
+.g-clean-hint {
+  margin: -2px 0 6px;
+  color: var(--g-text-dim);
+}
+
+.g-clean-stat {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--g-bg-soft);
+  color: var(--g-text-sub);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.g-clean-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.g-clean-label {
+  color: var(--g-text-sub);
+  font-size: 12px;
 }
 </style>

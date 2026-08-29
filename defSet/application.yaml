@@ -72,3 +72,16 @@ backup:
     - https://ghproxy.net/
     - https://github.moeyy.xyz/
     - https://hub.gitmirror.com/
+
+# 日志文件清理（清的是 Yunzai 的 logs 目录，跟面板里「清空」按钮清内存缓冲是两回事）
+log:
+  clean:
+    # 是否启用定时清理
+    enable: true
+    # 清理周期（cron 表达式，六位，默认每月 1 号凌晨 4:30）
+    cron: "0 30 4 1 * ?"
+    # 保留最近多少天的日志文件，更早的归档直接删
+    keepDays: 30
+    # error.log 是一直在追加的当前文件，删不掉（log4js 还握着句柄），
+    # 超过这个大小（MB）就在清理时截断 —— 同样的报错在 command.*.log 里也有一份
+    errorLogMaxMB: 5

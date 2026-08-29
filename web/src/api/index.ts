@@ -473,6 +473,54 @@ export const apiClearLog = () => post<number>('/log/clear', {}, { showSuccess: t
 export const apiLogSendImage = (body: { lines: LogLine[] }) =>
   post<{ ok: boolean; sent: string[]; fallback?: boolean }>('/log/send-image', body)
 
+/** 日志目录的占用情况 */
+export interface LogDirStat {
+  /** 日志文件个数 */
+  files: number
+  /** 合计占用字节 */
+  size: number
+  /** 已过期（超出保留天数）的文件数 */
+  expired: number
+  /** 这次清理预计能释放的字节，含要截断的 error.log */
+  expiredSize: number
+  /** 当前 error.log 的大小 */
+  errorLogSize: number
+}
+
+/** 日志文件的定时清理设置 */
+export interface LogCleanSettings extends LogDirStat {
+  enable: boolean
+  /** 六位或五位 cron */
+  cron: string
+  keepDays: number
+  /** error.log 超过这个 MB 数就在清理时截断 */
+  errorLogMaxMB: number
+  /** 配置开着不等于真挂上了定时任务（缺 node-schedule / cron 写错都会失败） */
+  scheduled: boolean
+  /** 日志目录绝对路径 */
+  dir: string
+}
+
+export interface LogCleanResult {
+  removed: number
+  freed: number
+  truncated: number
+  failed: number
+  keepDays: number
+  stat: LogDirStat
+}
+
+export const apiGetLogClean = () => get<LogCleanSettings>('/log/clean')
+
+export const apiSaveLogClean = (body: {
+  enable: boolean
+  cron: string
+  keepDays: number
+  errorLogMaxMB: number
+}) => put<LogCleanSettings>('/log/clean', body, { showSuccess: true })
+
+export const apiRunLogClean = () => post<LogCleanResult>('/log/clean/run', {}, { showSuccess: true })
+
 /* ---------------- 数据浏览（Redis / SQLite） ---------------- */
 
 /** Redis key 的类型，与 `TYPE` 命令返回值一致 */

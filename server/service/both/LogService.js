@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import {Service, GuobaError} from '#guoba.framework'
-import {_paths} from '#guoba.platform'
+import {_paths, cfg} from '#guoba.platform'
 import {
   formatLogText,
   getRealMasterList,
@@ -30,6 +30,26 @@ const MAX_LIMIT = 2000
  * 看着就像两套东西；再长也会超过 QQ 约 4096 的长边上限被压糊。
  */
 const MAX_SEND_ITEMS = 30
+
+/* ---------------- 日志文件清理 ---------------- */
+
+/** 默认清理周期：每月 1 号凌晨 4:30（六位 cron） */
+const DEFAULT_CLEAN_CRON = '0 30 4 1 * ?'
+/** 默认保留天数 */
+const DEFAULT_KEEP_DAYS = 30
+/** error.log 超过多少 MB 就在清理时截断 */
+const DEFAULT_ERROR_LOG_MAX_MB = 5
+/** 只动日志文件，别的东西一概不碰（`command.2026-08-01.log.zst` 这类归档也在内） */
+const LOG_FILE_RE = /\.log(\.(zst|gz))?$/
+/** log4js 一直在追加的那份错误日志，删不掉只能截断 */
+const CURRENT_ERROR_LOG = 'error.log'
+/**
+ * 热重载键。锅巴热重载时本模块被重新 import，实例是新的，但上一代的定时任务还挂在
+ * node-schedule 里 —— 把 job 挂到 process 上，新实例构造时先撤掉旧的。同 BackupService。
+ */
+const CLEAN_JOB_KEY = Symbol.for('guoba.logClean.job')
+/** 跨热重载实例共享的注册代次，防止旧实例动态 import 晚回来又挂一个 job */
+const CLEAN_GENERATION_KEY = Symbol.for('guoba.logClean.job-generation')
 
 /**
  * 劫持前的原始 write 存在 process 上。
@@ -67,6 +87,19 @@ function today() {
   const d = new Date()
   const p = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** 只用来写日志，给人看的大小 */
+function formatSize(bytes) {
+  if (!bytes) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let idx = 0
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024
+    idx++
+  }
+  return `${value.toFixed(idx ? 1 : 0)} ${units[idx]}`
 }
 
 /**
@@ -133,6 +166,8 @@ export default class LogService extends Service {
   /** 多行日志（异常堆栈之类）的后续行没有级别前缀，继承上一行的 */
   #lastLevel = 'info'
   #attached = false
+  /** 清理任务的注册代次，见 {@link CLEAN_GENERATION_KEY} */
+  #cleanGeneration = 0
 
   constructor(guobaApp) {
     super(guobaApp)
@@ -143,6 +178,8 @@ export default class LogService extends Service {
       // 读不到磁盘日志不影响实时捕获
     }
     this.attach()
+    // 热重载后旧实例的 job 还挂在 node-schedule 上，applyCleanSchedule 第一步就会撤掉
+    this.applyCleanSchedule().catch((err) => logger.error('[Guoba] 日志清理定时任务启动失败：', err))
   }
 
   /**
@@ -392,5 +429,208 @@ export default class LogService extends Service {
       source: process.env.pm_out_log_path ? 'pm2' : 'stdout',
       logFile: this.#preloadFile() || '',
     }
+  }
+
+  // ---------------------------------------------------------------- 日志文件清理
+
+  /** Yunzai 的日志目录 */
+  #logDir() {
+    return path.join(_paths.root, 'logs')
+  }
+
+  /**
+   * 清理设置 + 当前日志目录的占用情况。
+   *
+   * `scheduled` 是「真的挂上了 job」，跟 `enable` 不是一回事 —— 少了 node-schedule
+   * 或者 cron 写错时配置开着也不会跑。
+   */
+  getCleanSettings() {
+    const clean = cfg.get('log.clean') ?? {}
+    const keepDays = Number(clean.keepDays) > 0 ? Math.floor(Number(clean.keepDays)) : DEFAULT_KEEP_DAYS
+    const errorLogMaxMB = Number(clean.errorLogMaxMB) > 0 ? Number(clean.errorLogMaxMB) : DEFAULT_ERROR_LOG_MAX_MB
+    return {
+      enable: clean.enable !== false,
+      cron: clean.cron || DEFAULT_CLEAN_CRON,
+      keepDays,
+      errorLogMaxMB,
+      scheduled: Boolean(process[CLEAN_JOB_KEY]),
+      dir: this.#logDir(),
+      ...this.statLogDir(keepDays, errorLogMaxMB),
+    }
+  }
+
+  /** 日志目录里有多少文件、占多少、其中多少是这次清理会动的 */
+  statLogDir(keepDays = DEFAULT_KEEP_DAYS, errorLogMaxMB = DEFAULT_ERROR_LOG_MAX_MB) {
+    const deadline = Date.now() - keepDays * 24 * 60 * 60 * 1000
+    const stat = {files: 0, size: 0, expired: 0, expiredSize: 0, errorLogSize: 0}
+    let names
+    try {
+      names = fs.readdirSync(this.#logDir())
+    } catch {
+      // 目录不存在（新装的 Bot 还没写过日志）
+      return stat
+    }
+    for (const name of names) {
+      if (!LOG_FILE_RE.test(name)) continue
+      let info
+      try {
+        info = fs.statSync(path.join(this.#logDir(), name))
+      } catch {
+        continue
+      }
+      if (!info.isFile()) continue
+      stat.files++
+      stat.size += info.size
+      if (name === CURRENT_ERROR_LOG) {
+        stat.errorLogSize = info.size
+        if (info.size > errorLogMaxMB * 1024 * 1024) stat.expiredSize += info.size
+        continue
+      }
+      if (info.mtimeMs < deadline) {
+        stat.expired++
+        stat.expiredSize += info.size
+      }
+    }
+    return stat
+  }
+
+  /**
+   * 保存清理设置。
+   *
+   * 顺序是「先挂 job 成功再落配置」：cron 写错时不能把无效值写进配置文件，
+   * 否则下次启动照样挂不上，还得手改 yaml。
+   */
+  async saveCleanSettings(data = {}) {
+    const enable = Boolean(data.enable)
+    const cron = String(data.cron ?? '').trim()
+    const keepDays = Math.floor(Number(data.keepDays))
+    const errorLogMaxMB = Number(data.errorLogMaxMB)
+    if (enable && !cron) throw new GuobaError('启用定时清理时必须填写 cron 表达式')
+    const segments = cron ? cron.split(/\s+/) : []
+    if (cron && (segments.length < 5 || segments.length > 6)) {
+      throw new GuobaError('cron 表达式需为 5 段或 6 段')
+    }
+    if (!(keepDays >= 1 && keepDays <= 3650)) throw new GuobaError('保留天数需在 1 ~ 3650 之间')
+    if (!(errorLogMaxMB > 0 && errorLogMaxMB <= 10240)) throw new GuobaError('error.log 上限需在 0 ~ 10240 MB 之间')
+
+    const scheduled = await this.applyCleanSchedule({enable, cron})
+    if (enable && !scheduled) {
+      // 挂不上就把旧设置恢复回去，别留个「开着但不跑」的状态
+      await this.applyCleanSchedule()
+      throw new GuobaError(`定时清理注册失败，请检查 cron 表达式：${cron}`)
+    }
+    cfg.set('log.clean.enable', enable)
+    if (cron) cfg.set('log.clean.cron', cron)
+    cfg.set('log.clean.keepDays', keepDays)
+    cfg.set('log.clean.errorLogMaxMB', errorLogMaxMB)
+    return this.getCleanSettings()
+  }
+
+  /** 按当前（或指定）设置重挂定时任务，返回是否真的挂上了 */
+  async applyCleanSchedule(override) {
+    const generation = (process[CLEAN_GENERATION_KEY] || 0) + 1
+    process[CLEAN_GENERATION_KEY] = generation
+    this.#cleanGeneration = generation
+    // 先撤旧 job：cron 无效时旧 job 残留会在下次热重载时变成两个
+    this.#cancelCleanJob()
+    const {enable, cron} = override || this.getCleanSettings()
+    if (!enable) return false
+    let schedule
+    try {
+      schedule = (await import('node-schedule')).default ?? await import('node-schedule')
+    } catch {
+      logger.warn('[Guoba] 没找到 node-schedule，日志定时清理不可用')
+      return false
+    }
+    try {
+      // import 期间可能已经有更新的一代设置了，旧调用不许再挂
+      if (generation !== process[CLEAN_GENERATION_KEY] || generation !== this.#cleanGeneration) return false
+      const job = schedule.scheduleJob(cron, () => {
+        try {
+          const res = this.cleanNow()
+          logger.mark(`[Guoba] 日志定时清理完成：删除 ${res.removed} 个文件，释放 ${formatSize(res.freed + res.truncated)}`)
+        } catch (err) {
+          logger.error('[Guoba] 日志定时清理失败：', err)
+        }
+      })
+      if (!job) throw new Error(`cron 表达式无效：${cron}`)
+      if (generation !== process[CLEAN_GENERATION_KEY]) {
+        job.cancel()
+        return false
+      }
+      process[CLEAN_JOB_KEY] = job
+      logger.info(`[Guoba] 日志定时清理已启用：${cron}`)
+      return true
+    } catch (err) {
+      logger.error('[Guoba] 日志定时清理注册失败：', err)
+      return false
+    }
+  }
+
+  #cancelCleanJob() {
+    const job = process[CLEAN_JOB_KEY]
+    if (job) {
+      try {
+        job.cancel()
+      } catch {
+        // 已经取消过了
+      }
+      delete process[CLEAN_JOB_KEY]
+    }
+  }
+
+  /**
+   * 立刻清一次。
+   *
+   * 归档日志（`command.2026-08-01.log.zst` 这类）按修改时间过期就删；当天那份还在写，
+   * mtime 是最新的，走不到删除分支。`error.log` 例外：log4js 一直握着它的句柄，删掉
+   * 之后写入会落到已删除的 inode 上 —— 日志丢了、磁盘也不释放，所以只截断不删除。
+   * 报错在同一天的 `command.*.log` 里另有一份，截断不会让记录彻底消失。
+   */
+  cleanNow(override) {
+    const {keepDays, errorLogMaxMB} = override || this.getCleanSettings()
+    const dir = this.#logDir()
+    const deadline = Date.now() - keepDays * 24 * 60 * 60 * 1000
+    const result = {removed: 0, freed: 0, truncated: 0, failed: 0, keepDays}
+    let names
+    try {
+      names = fs.readdirSync(dir)
+    } catch (err) {
+      throw new GuobaError(`读不到日志目录：${err.message}`)
+    }
+    for (const name of names) {
+      if (!LOG_FILE_RE.test(name)) continue
+      const file = path.join(dir, name)
+      let info
+      try {
+        info = fs.statSync(file)
+      } catch {
+        continue
+      }
+      if (!info.isFile()) continue
+      if (name === CURRENT_ERROR_LOG) {
+        if (info.size > errorLogMaxMB * 1024 * 1024) {
+          try {
+            fs.truncateSync(file, 0)
+            result.truncated += info.size
+          } catch (err) {
+            result.failed++
+            logger.warn(`[Guoba] 截断 ${name} 失败：${err.message}`)
+          }
+        }
+        continue
+      }
+      if (info.mtimeMs >= deadline) continue
+      try {
+        fs.rmSync(file)
+        result.removed++
+        result.freed += info.size
+      } catch (err) {
+        result.failed++
+        logger.warn(`[Guoba] 删除 ${name} 失败：${err.message}`)
+      }
+    }
+    result.stat = this.statLogDir(keepDays, errorLogMaxMB)
+    return result
   }
 }
