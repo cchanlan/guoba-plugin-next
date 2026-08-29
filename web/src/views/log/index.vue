@@ -382,7 +382,7 @@ onBeforeUnmount(() => {
       </Tooltip>
       <Tooltip title="定时清理 Yunzai logs 目录里的日志文件">
         <Button size="small" @click="openClean">
-          <GIcon icon="ant-design:delete-outlined" :size="13" /> 文件清理
+          <GIcon icon="ant-design:delete-outlined" :size="13" /> 日志清理
         </Button>
       </Tooltip>
       <Button size="small" :loading="loading" @click="refresh">刷新</Button>
@@ -419,7 +419,7 @@ onBeforeUnmount(() => {
 
     <Modal
       v-model:open="cleanOpen"
-      title="日志文件清理"
+      title="日志清理"
       :confirm-loading="cleanSaving"
       ok-text="保存"
       cancel-text="取消"
