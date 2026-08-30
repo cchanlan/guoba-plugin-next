@@ -262,7 +262,10 @@ export default class IPluginService extends Service {
     }
 
     if (autoNpmInstall && await Bot.fsStat(`${pluginPath}/package.json`)) {
-      result = await Bot.exec(`cd ${pluginPath} && pnpm install`);
+      // 路径要加引号：Windows 的家目录常带空格（C:\Users\张 三\...），Linux 上也可能有。
+      // cd 在 Windows 上不跨盘符切换，得给 /d
+      const cd = process.platform === 'win32' ? `cd /d "${pluginPath}"` : `cd "${pluginPath}"`;
+      result = await Bot.exec(`${cd} && pnpm install`);
       if (result.error) {
         logger.error(`[Guoba] 插件安装失败：${result.error}`);
         return {status: 'error', message: `插件安装失败：${result.error}`};
