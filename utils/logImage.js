@@ -141,9 +141,10 @@ export async function renderLogImage(items, options = {}) {
     ResPath: RES_PATH,
     title: options.title || '锅巴日志',
     footer: options.footer ?? defaultFooter(items.length),
-    // 日志图以文字为主，jpeg 体积只有 png 的几分之一，95 的质量看不出差别
-    imgType: 'jpeg',
-    quality: 95,
+    // 日志图以文字为主：webp 同画质比 jpeg 还小一截，且小字边缘不糊（jpeg 的色度抽样会）
+    // 渲染器把 imgType 直接透传给 puppeteer 的 screenshot({type})，webp 是原生支持的类型
+    imgType: 'webp',
+    quality: 90,
   }
   try {
     const img = await renderer.screenshot('guoba-log', data)
