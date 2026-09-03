@@ -158,6 +158,84 @@ export function supportGuoba () {
             // 是否去除首尾空格，默认为 true，传 false 则保留首尾空格
             trimValue: false
           }
+        },
+        {
+          label: '网页截图',
+          // 第三个分组标记开始
+          component: 'SOFT_GROUP_BEGIN'
+        },
+        {
+          field: 'webShot.enable',
+          label: '启用网页截图',
+          helpMessage: '开启后，群里发一个网址就会自动截图预览',
+          bottomHelpMessage: '默认关闭：开启后服务器会去访问群友发的任意网址，请自行斟酌',
+          component: 'Switch'
+        },
+        {
+          field: 'webShot.loadTimeout',
+          label: '加载超时（秒）',
+          bottomHelpMessage: '页面最长等这么久，超时就算截图失败',
+          component: 'InputNumber',
+          componentProps: {
+            min: 5,
+            max: 120,
+            placeholder: '默认 25 秒'
+          }
+        },
+        {
+          field: 'webShot.extraWait',
+          label: '额外等待（秒）',
+          bottomHelpMessage: '页面加载完后再等一会儿，等图片和动效出来。截出来发白就调大一点',
+          component: 'InputNumber',
+          componentProps: {
+            min: 0,
+            max: 30,
+            placeholder: '默认 2 秒'
+          }
+        },
+        {
+          field: 'webShot.autoScroll',
+          label: '滚动整页',
+          bottomHelpMessage: '滚一遍页面把懒加载的图片都触发出来。长页面会慢几秒，关掉更快',
+          component: 'Switch'
+        },
+        {
+          field: 'webShot.proxy',
+          label: '代理地址',
+          bottomHelpMessage: '访问 GitHub 这类外网站要用，留空则永远直连。例：http://127.0.0.1:7890',
+          component: 'Input',
+          componentProps: {
+            placeholder: '留空不使用代理'
+          }
+        },
+        {
+          field: 'webShot.proxyFirst',
+          label: '优先走代理',
+          bottomHelpMessage: '关闭时先直连、失败再走代理（国内站更快，推荐关闭）',
+          component: 'Switch'
+        },
+        {
+          field: 'webShot.blockPrivate',
+          label: '拦截内网地址',
+          helpMessage: '建议保持开启，否则群友可以用链接探测你的内网',
+          bottomHelpMessage: '连页面跳转和 iframe 一起拦。查 IP 的网站也不给截，免得把服务器 IP 发到群里',
+          component: 'Switch'
+        },
+        {
+          field: 'webShot.skipUnworthy',
+          label: '跳过没内容的页面',
+          helpMessage: '只发能看到页面内容的图',
+          bottomHelpMessage: '要过人机验证的、要登录才能看的、打不开报错的、整页空白的，都不发图',
+          component: 'Switch'
+        },
+        {
+          field: 'webShot.blacklist',
+          label: '网址黑名单',
+          bottomHelpMessage: '这些域名不截图，每行一个，子域名一起生效。例：example.com',
+          component: 'InputTextArea',
+          componentProps: {
+            placeholder: '每行一个域名，例如：\nexample.com\nbad-site.net'
+          }
         }
       ],
       // 获取配置数据方法（用于前端填充显示数据）
@@ -170,6 +248,11 @@ export function supportGuoba () {
         let whitelist = lodash.get(config, 'base.gitInstallWhitelist')
         if (Array.isArray(whitelist)) {
           lodash.set(config, 'base.gitInstallWhitelist', whitelist.join('\n'))
+        }
+        // 网址黑名单同样是「一行一个」的文本框
+        let shotBlacklist = lodash.get(config, 'webShot.blacklist')
+        if (Array.isArray(shotBlacklist)) {
+          lodash.set(config, 'webShot.blacklist', shotBlacklist.join('\n'))
         }
         return config
       },
@@ -185,7 +268,10 @@ export function supportGuoba () {
               value = host
             }
           }
-          if (keyPath === 'base.gitInstallWhitelist' && typeof value === 'string') {
+          if (
+            (keyPath === 'base.gitInstallWhitelist' || keyPath === 'webShot.blacklist') &&
+            typeof value === 'string'
+          ) {
             value = value.split('\n').map(s => s.trim()).filter(Boolean)
           }
           lodash.set(config, keyPath, value)
