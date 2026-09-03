@@ -211,6 +211,7 @@ const QR_LOGIN_RE = /扫[一码].{0,6}登录|扫描.{0,8}登录|二维码.{0,4}�
 export const UNWORTHY_TIP = {
   challenge: '这个网站要过人机验证，截不到内容',
   login: '这个页面要登录才能看，就不发图了',
+  blocked: '这个网站不让截图，自己点开看看吧',
   error: '这个网页打不开，就不发图了',
   empty: '这个页面没什么内容，就不发图了'
 }
@@ -230,8 +231,35 @@ export class UnworthyError extends Error {
   }
 }
 
-/** 等页面真正渲染完：滚动触发懒加载 → 等图片和字体 → 额外静置 */
+/** 等页面真正渲染完：等网络安静 → 滚动触发懒加载 → 等图片和字体 → 额外静置 */
 async function settle(page, cfg) {
+  /*
+   * 「等到什么时候算加载完」这件事，交给 goto 的 waitUntil 是不行的 ——
+   * **三种值各有各的卡死方式，而且卡住时都只能吃满超时**：
+   *
+   *  - `networkidle2`：要求网络安静下来。带长连接 / 心跳轮询的站永远等不到。
+   *    实测 iplark.com 用它 goto 要 2.2 秒，机器一忙就直接超时。
+   *  - `load`：要求**所有**子资源加载完。只要有一个资源永远不返回（被墙的 CDN、
+   *    长轮询的接口）就永远不触发。实测 wx.qq.com 用它，直连 10 秒、代理 25 秒全超时。
+   *  - `domcontentloaded`：只等 DOM 解析完，几乎总能触发 —— 所以 goto 用它，
+   *    然后在这里自己等内容出来，每一步都带上限。
+   *
+   * 这里盯的是**结果而不是过程**：等到「页面高度不再变化」。
+   * 只用 waitForNetworkIdle 不够 —— domcontentloaded 那一刻 JS 还没开始发请求，
+   * 「当前 0 个在途请求」会被立刻判成加载完，于是异步渲染的那半页内容全丢。
+   * 实测 gitcode 首页：只判一次网络安静是 1953px / 3404 字，等高度稳定能拿到 3108px / 5041 字。
+   */
+  let lastH = -1
+  for (let i = 0; i < 4; i++) {
+    try {
+      await page.waitForNetworkIdle({idleTime: 500, timeout: 3000})
+    } catch {}
+    const h = await page.evaluate(() => document.body?.scrollHeight || 0).catch(() => 0)
+    if (h === lastH) break
+    lastH = h
+    await new Promise(r => setTimeout(r, 500))
+  }
+
   if (cfg.autoScroll) {
     try {
       await page.evaluate(() => new Promise(res => {
@@ -249,6 +277,11 @@ async function settle(page, cfg) {
         }
         step()
       }))
+    } catch {}
+
+    // 滚动会触发一批新的懒加载请求，再等一轮网络安静补漏（上限短一点就够）
+    try {
+      await page.waitForNetworkIdle({idleTime: 500, timeout: 4000})
     } catch {}
   }
 
@@ -371,7 +404,14 @@ export async function inspectPage(page, status = 0) {
   //    实测 gitcode 的 404 正文有 1300~1600 字还在来回浮动，
   //    按字数判会同一个链接两次两种结果。状态码才是稳的那个
   if (status >= 400 || (thin && ERROR_TITLE_RE.test(title))) {
-    return new UnworthyError('error', `错误页 ${status || ''} [${title}]`.replace(/\s+/g, ' '))
+    // 403 / 418 / 429 多半是「认出你是自动化工具」而不是「这页不存在」：
+    // 实测 iplark.com 用 curl 直连回 200，puppeteer 去拿就是 418。
+    // 分开说一句，免得用户自己浏览器打得开、却收到一句「网页打不开」
+    const blocked = [403, 418, 429].includes(status)
+    return new UnworthyError(
+      blocked ? 'blocked' : 'error',
+      `${blocked ? '被站点拒绝' : '错误页'} ${status || ''} [${title}]`.replace(/\s+/g, ' ')
+    )
   }
 
   // 4. 白板：没文字、没图、页面还很矮，截出来就是一片空白
@@ -437,7 +477,7 @@ async function shootOnce(targetUrl, cfg, proxy, isLast = true) {
   const browser = await puppeteer.launch({headless: true, args: launchArgs(proxy)})
   try {
     const page = await preparePage(browser, cfg)
-    const resp = await page.goto(targetUrl, {waitUntil: 'networkidle2', timeout})
+    const resp = await page.goto(targetUrl, {waitUntil: 'domcontentloaded', timeout})
 
     await settle(page, cfg)
 
@@ -500,7 +540,7 @@ async function baiduShoot(weburl, keyWd, cfg, proxy, isLast = true) {
   const browser = await puppeteer.launch({headless: true, args: launchArgs(proxy)})
   try {
     const page = await preparePage(browser, cfg)
-    let lastResp = await page.goto(weburl, {waitUntil: 'networkidle2', timeout})
+    let lastResp = await page.goto(weburl, {waitUntil: 'domcontentloaded', timeout})
 
     if (keyWd !== '列表') {
       let link = await page.evaluate(kw => {
@@ -514,7 +554,7 @@ async function baiduShoot(weburl, keyWd, cfg, proxy, isLast = true) {
       // 跳过去之前同样过一遍安全校验，不合法就留在搜索结果页
       const check = await checkUrl(link, cfg)
       if (check.ok) {
-        lastResp = await page.goto(check.url, {waitUntil: 'networkidle2', timeout})
+        lastResp = await page.goto(check.url, {waitUntil: 'domcontentloaded', timeout})
       } else {
         logger.warn(`[Guoba] 网页截图搜索结果跳转被拦截 ${link} (${check.reason})`)
       }
