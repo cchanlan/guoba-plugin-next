@@ -193,6 +193,20 @@ const LOGIN_TITLE_RE = /^\s*(?:请)?(?:登录|登陸|注册|註冊|会员登录|
 /** 只有登录墙才会说的话，兜住那些不在 /login 路径上的登录墙 */
 const LOGIN_TEXT_RE = /请先登录|请登录后|登录后(?:即可)?(?:查看|可见|继续|使用)|需要登录|登录以继续|扫码登录|账号登录|密码登录|验证码登录|sign in to continue|log in to continue|please sign in|please log in/i
 
+/*
+ * 扫码登录（弹二维码那种）。跟上面几条分开判，因为它的页面**可能是有内容的** ——
+ * 二维码盖在弹层里，背后的正文照样被 innerText 读到，字数一点都不「贫瘠」。
+ *
+ * 难点是**不能一见二维码就拦**：正常页面的页脚全是「扫码下载 App」「扫码关注公众号」。
+ * 所以要两个条件凑齐：**有一个足够大的可见二维码**，而且（它在弹层里 ‖ 页面明说了是扫码登录）。
+ */
+/** 二维码元素。范围放宽，大小和位置在浏览器里再筛 */
+const QR_SELECTORS = '[class*="qrcode" i],[id*="qrcode" i],[class*="qr-code" i],[class*="qrCode"],[id*="qrCode"],canvas[class*="qr" i]'
+/** 一看就是扫码登录的硬信号：微信开放平台的登录 iframe、微信 JS SDK 那个登录框 */
+const QR_HARD_SELECTORS = 'iframe[src*="qrconnect"],iframe[src*="open.weixin.qq.com/connect"],.impowerBox,.wx_qrcode'
+/** 扫码措辞。**必须带「登录」二字** —— 「扫码下载」「扫码关注」「扫码支付」全是正常页面在说 */
+const QR_LOGIN_RE = /扫[一码].{0,6}登录|扫描.{0,8}登录|二维码.{0,4}登录|scan (?:the )?qr ?code to (?:log|sign) ?in|scan to (?:log|sign) ?in/i
+
 /** 不发图时给群里的说法 */
 export const UNWORTHY_TIP = {
   challenge: '这个网站要过人机验证，截不到内容',
@@ -238,16 +252,21 @@ async function settle(page, cfg) {
     } catch {}
   }
 
-  // 等字体和图片，单张图最多等 3 秒
+  // 等字体和图片，整段**必须有上限**：`document.fonts.ready` 在字体挂在墙外 CDN 上时
+  // 永远不 resolve，而 goto 的 timeout 管不到 evaluate —— 实测微信网页版卡了 184 秒才回来。
+  // race 掉之后那个 evaluate 还在页面里跑，但没人等它了，截图照常进行
   try {
-    await page.evaluate(() => Promise.all([
-      document.fonts ? document.fonts.ready : null,
-      ...[...document.images].filter(i => !i.complete).map(i => new Promise(r => {
-        i.addEventListener('load', r, {once: true})
-        i.addEventListener('error', r, {once: true})
-        setTimeout(r, 3000)
-      }))
-    ]))
+    await Promise.race([
+      page.evaluate(() => Promise.all([
+        document.fonts ? document.fonts.ready : null,
+        ...[...document.images].filter(i => !i.complete).map(i => new Promise(r => {
+          i.addEventListener('load', r, {once: true})
+          i.addEventListener('error', r, {once: true})
+          setTimeout(r, 3000)
+        }))
+      ])),
+      new Promise(r => setTimeout(r, 5000))
+    ])
   } catch {}
 
   if (cfg.extraWait > 0) {
@@ -269,12 +288,29 @@ async function settle(page, cfg) {
 export async function inspectPage(page, status = 0) {
   let snap
   try {
-    snap = await page.evaluate(sels => {
+    snap = await page.evaluate((sels, qrSel, qrHardSel) => {
       const body = document.body
       const text = (body?.innerText || '').replace(/\s+/g, ' ').trim()
       // 只算**可见**的密码框：不少站点把登录表单预置在弹层里，没显示出来的不算登录墙
       const pwd = [...document.querySelectorAll('input[type="password"]')]
         .filter(i => i.offsetWidth > 0 && i.offsetHeight > 0)
+
+      // 够大的可见二维码。60px 以下的当图标处理（有些站导航栏挂个小 qr 图标）
+      const qr = [...document.querySelectorAll(qrSel)].filter(el => {
+        const r = el.getBoundingClientRect()
+        return r.width >= 60 && r.height >= 60
+      })
+      // 这些二维码有没有被弹层裹着 —— 弹层意味着「内容被盖住了」，截图没意义。
+      // 判据是往上找到 fixed，或者 absolute 且 z-index 抬得很高
+      const qrOverlay = qr.some(el => {
+        for (let n = el; n && n !== document.body; n = n.parentElement) {
+          const s = getComputedStyle(n)
+          if (s.position === 'fixed') return true
+          if (s.position === 'absolute' && (parseInt(s.zIndex) || 0) >= 100) return true
+        }
+        return false
+      })
+
       return {
         title: (document.title || '').trim(),
         text: text.slice(0, 3000),
@@ -286,12 +322,15 @@ export async function inspectPage(page, status = 0) {
             return false
           }
         }),
+        qrCount: qr.length,
+        qrOverlay,
+        qrHard: !!document.querySelector(qrHardSel),
         pwdCount: pwd.length,
         linkCount: document.querySelectorAll('a[href]').length,
         imgCount: [...document.images].filter(i => i.complete && i.naturalWidth > 2).length,
         bodyH: body?.scrollHeight || 0
       }
-    }, CHALLENGE_SELECTORS)
+    }, CHALLENGE_SELECTORS, QR_SELECTORS, QR_HARD_SELECTORS)
   } catch (err) {
     // 页面正在跳转、已经关掉之类读不到的情况：不拦，让图照常发出去
     logger.debug(`[Guoba] 网页截图体检读不到: ${err.message}`)
@@ -299,6 +338,7 @@ export async function inspectPage(page, status = 0) {
   }
 
   const {title, text, textLen, hit, pwdCount, linkCount, imgCount, bodyH} = snap
+  const {qrCount, qrOverlay, qrHard} = snap
   // 「内容贫瘠」的门槛。盾页和登录页正文都只有几十到几百字，正常网页轻松上千
   const thin = textLen < 600
 
@@ -308,16 +348,22 @@ export async function inspectPage(page, status = 0) {
     return new UnworthyError('challenge', `人机验证页 [${hit.join(' ') || title}]`, true)
   }
 
-  // 2. 登录墙。四条各管一种情况：地址就是 /login（最硬，页面本身就是登录墙）；
+  // 扫码登录墙。微信那套 iframe / .impowerBox 是硬信号，单独出现就算；
+  // 其余要「够大的可见二维码」配上「在弹层里 ‖ 页面明说了扫码登录」才算，
+  // 免得把页脚挂着「扫码下载 App」的正常页面一起拦掉
+  const qrWall = qrHard || (qrCount > 0 && (qrOverlay || QR_LOGIN_RE.test(text)))
+
+  // 2. 登录墙。五条各管一种情况：弹二维码的；地址就是 /login（最硬，页面本身就是登录墙）；
   //    标题开头是「登录」；有可见密码框而且除了表单没别的东西（光有密码框不算 ——
   //    论坛首页侧栏就带登录框，正文照样完整）；以及明说了「请先登录」这类话的
   if (
+    qrWall ||
     LOGIN_PATH_RE.test(page.url()) ||
     LOGIN_TITLE_RE.test(title) ||
     (pwdCount > 0 && (textLen < 400 || linkCount < 8)) ||
     (thin && LOGIN_TEXT_RE.test(text))
   ) {
-    return new UnworthyError('login', `需要登录 [${title}]`)
+    return new UnworthyError('login', `需要登录 [${qrWall ? '扫码 · ' : ''}${title}]`)
   }
 
   // 3. 服务器自己说了这不是正常内容。
