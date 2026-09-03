@@ -172,6 +172,13 @@ export function supportGuoba () {
           component: 'Switch'
         },
         {
+          field: 'webShot.masterOnly',
+          label: '仅主人可用',
+          helpMessage: '开启后，群友发的链接会被直接忽略，不回任何提示',
+          bottomHelpMessage: '建议保持开启：个别页面会把服务器的网络信息印在图上，只有自己用风险小得多',
+          component: 'Switch'
+        },
+        {
           field: 'webShot.loadTimeout',
           label: '加载超时（秒）',
           bottomHelpMessage: '页面最长等这么久，超时就算截图失败',

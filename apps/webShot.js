@@ -45,10 +45,22 @@ export class GuobaWebShot extends plugin {
     const config = this.config
     // 关掉的时候要静默放行，让别的插件还能处理这条消息
     if (!config.enable) return false
+    // 限定主人时，别人发的链接就当没看见 —— 回一句「你不是主人」只会刷屏
+    if (config.masterOnly && !e.isMaster) return false
 
     // 正则允许不带协议的裸域名，只在完全没写协议时补全
     let raw = e.msg.trim()
     if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = 'https://' + raw
+
+    // 链接本身就写着在查 IP（比如直接发 baidu.com/s?wd=我的ip），不用等加载完再判
+    let decoded = raw
+    try {
+      decoded = decodeURIComponent(raw)
+    } catch {}
+    if (WebShot.IP_QUERY_RE.test(decoded)) {
+      await this.reply('查 IP 的页面就不截了哦~')
+      return true
+    }
 
     const check = await WebShot.checkUrl(raw, config)
     if (!check.ok) {
@@ -68,9 +80,18 @@ export class GuobaWebShot extends plugin {
   async baiduWeb(e) {
     const config = this.config
     if (!config.enable) return false
+    if (config.masterOnly && !e.isMaster) return false
 
     const words = e.msg.replace(/#|百度/gm, '').replace(/，| |,/g, ',').split(',').filter(Boolean)
     const [searchKey, keyWd] = words.length > 1 ? words : [words[0], '']
+
+    // 搜「我的ip」时百度会把本机 IP、归属地、运营商直接印在结果页顶部，
+    // 而 baidu.com 是正常域名、域名黑名单拦不住 —— 所以这一步就掐掉，连搜都不搜
+    if (WebShot.IP_QUERY_RE.test(searchKey || '')) {
+      await this.reply('查 IP 的就不截了哦~')
+      return true
+    }
+
     const weburl = `https://www.baidu.com/s?wd=${encodeURIComponent(searchKey || '')}`
 
     try {

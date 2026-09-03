@@ -20,6 +20,7 @@ const require = createRequire(import.meta.url)
 /** 默认配置。锅巴面板里改的是 defSet/config 的 webShot 段，这里只兜底 */
 export const DEFAULT_CONFIG = {
   enable: false,
+  masterOnly: true,
   loadTimeout: 25,
   extraWait: 2,
   proxy: '',
@@ -212,8 +213,109 @@ export const UNWORTHY_TIP = {
   challenge: '这个网站要过人机验证，截不到内容',
   login: '这个页面要登录才能看，就不发图了',
   blocked: '这个网站不让截图，自己点开看看吧',
+  leak: '这个页面会显示服务器的网络信息，不发图哦',
   error: '这个网页打不开，就不发图了',
   empty: '这个页面没什么内容，就不发图了'
+}
+
+/**
+ * 明显是在查 IP 的搜索词 —— 连搜都不用搜。
+ * `#百度 我的ip` 的结果页顶部会直接印出本机 IP、归属地、运营商，
+ * 而 baidu.com 本身是正常域名，域名黑名单那关拦不住它。
+ */
+export const IP_QUERY_RE = /(我的|本机|当前|公网|外网|出口|查看|查询)\s*ip|ip\s*(地址)?.{0,3}(查询|查看|是多少|归属地|定位|检测|风险)|my\s*ip|what.{0,8}my\s*ip|ip\s*lookup|ip地址/i
+
+/** 页面上有没有「长得像 IP」的字符串。没有就不必去查自己的出口 IP，省一次请求 */
+const HAS_IP_RE = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\b[0-9a-f]{1,4}(?::[0-9a-f]{0,4}){3,}/i
+
+/*
+ * 出口 IP 自查。
+ *
+ * 域名黑名单（IP_ECHO_HOSTS）只能拦已知的那些查 IP 的站，实际漏的是这两类：
+ * 搜索结果页（`#百度 我的ip` 的结果页顶部直接印着本机 IP、归属地、运营商），
+ * 以及各种「顺带显示你的 IP」的工具站（CF 优选域名那类，域名无穷无尽，列不完）。
+ * 所以最后这道闸门只能看**内容**：页面上出现了自己的出口 IP 就不发图。
+ *
+ * 探测**用截图那个浏览器自己开一页去问**，而不是在 Node 侧 fetch —— 走代理和直连的
+ * 出口不是同一个（实测直连 IPv6 是家宽的、代理出口在美国），只有让浏览器自己去问，
+ * 拿到的才是这次截图真正用的那个出口。
+ */
+const EGRESS_TTL = 30 * 60 * 1000
+/** key 是代理地址（直连用空串），value 是 {ips, at} */
+const egressCache = new Map()
+
+/**
+ * 查出口 IP 的服务。挑的都是**整页只回一个 IP** 的纯文本接口（带中文说明或 JSON 的认不出来），
+ * 而且要国内外都留：实测这台机器访问 ip.3322.net 走 IPv4、访问 ident.me 走 IPv6，
+ * 两个出口都得拿到才防得住 —— 主人踩的那次就是页面同时印了 v4 和 v6。
+ * （4.ipw.cn / cip.cc 在这台机器上 DNS 解析不了或超时，别再往回加。）
+ */
+const IP_PROBES = [
+  'https://ip.3322.net',
+  'https://ident.me',
+  'https://ipinfo.io/ip',
+  'https://ifconfig.me/ip',
+  'https://api.ipify.org'
+]
+
+async function egressIPs(browser, proxyKey) {
+  const hit = egressCache.get(proxyKey)
+  if (hit && Date.now() - hit.at < EGRESS_TTL) return hit.ips
+
+  const ips = new Set()
+  // 单独开一页，而且**不装 CDP 拦截** —— 装了会被自己的域名黑名单拦下来
+  const page = await browser.newPage()
+  try {
+    for (const url of IP_PROBES) {
+      try {
+        await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 6000})
+        const txt = (await page.evaluate(() => document.body?.innerText || '')).trim()
+        // 只认「整页就是一个 IP」的干净响应，避免把报错页当成 IP
+        if (/^[0-9a-f.:]{7,45}$/i.test(txt)) ips.add(txt.toLowerCase())
+      } catch {}
+      // v4 和 v6 各拿到一个就够
+      if ([...ips].some(i => i.includes('.')) && [...ips].some(i => i.includes(':'))) break
+    }
+  } finally {
+    await page.close().catch(() => {})
+  }
+
+  const arr = [...ips]
+  egressCache.set(proxyKey, {ips: arr, at: Date.now()})
+  if (arr.length) {
+    logger.debug(`[Guoba] 网页截图出口自查(${proxyKey || '直连'}): 拿到 ${arr.length} 个`)
+  } else {
+    // 探测全挂时不硬拦（否则网络一抖，所有提到 IP 的正常页面都发不出去），
+    // 但要吼一声 —— 这一轮只剩域名黑名单挡着了。有 30 分钟缓存，不会刷屏
+    logger.warn(`[Guoba] 网页截图查不到本机出口 IP(${proxyKey || '直连'})，这段时间只能靠域名黑名单挡`)
+  }
+  return arr
+}
+
+/**
+ * 页面文本里有没有自己的出口 IP。
+ * 匹配放宽到「IPv4 前三段 / IPv6 前四组」—— 有些站会打码成 `14.145.57.*`，
+ * 那样照样把网段告诉别人了，同样得拦。
+ */
+function leakedIP(text, ips) {
+  const low = text.toLowerCase()
+  for (const ip of ips) {
+    if (!ip) continue
+    if (low.includes(ip)) return ip
+    if (ip.includes('.')) {
+      const p = ip.split('.')
+      if (p.length === 4 && low.includes(`${p[0]}.${p[1]}.${p[2]}.`)) return ip
+    } else if (ip.includes(':')) {
+      const g = ip.split(':').filter(Boolean)
+      if (g.length >= 4) {
+        const head = g.slice(0, 4)
+        if (low.includes(head.join(':'))) return ip
+        // 有的站把 IPv6 每组补满四位（240e:03bb:0654:3c90），也得认出来
+        if (low.includes(head.map(x => x.padStart(4, '0')).join(':'))) return ip
+      }
+    }
+  }
+  return null
 }
 
 /**
@@ -316,9 +418,10 @@ async function settle(page, cfg) {
  *
  * @param page puppeteer 的 Page
  * @param status 主文档的 HTTP 状态码，拿不到传 0
+ * @param getEgress 可选，返回本机出口 IP 列表的函数（只在页面里真有 IP 样式的串时才调）
  * @returns {Promise<UnworthyError|null>} 返回 null 表示这张图可以发
  */
-export async function inspectPage(page, status = 0) {
+export async function inspectPage(page, status = 0, getEgress = null) {
   let snap
   try {
     snap = await page.evaluate((sels, qrSel, qrHardSel) => {
@@ -419,6 +522,20 @@ export async function inspectPage(page, status = 0) {
     return new UnworthyError('empty', '页面没有可显示的内容')
   }
 
+  // 5. 最后一道闸门：页面上印着本机的出口 IP 就不能发。
+  //    放最后是因为要多打一次请求 —— 前面几条只要命中，这一步就省掉了；
+  //    而且只有页面里真出现「长得像 IP 的串」时才查，正常网页等于零成本
+  if (getEgress && HAS_IP_RE.test(text)) {
+    try {
+      const mine = await getEgress()
+      const hit = mine.length ? leakedIP(text, mine) : null
+      // 日志里只留个头，免得截图发出来又是一次泄露
+      if (hit) return new UnworthyError('leak', `页面印着本机出口 IP（${hit.slice(0, 7)}…）`)
+    } catch (err) {
+      logger.debug(`[Guoba] 网页截图出口自查失败: ${err.message}`)
+    }
+  }
+
   return null
 }
 
@@ -489,7 +606,7 @@ async function shootOnce(targetUrl, cfg, proxy, isLast = true) {
 
     // goto 碰上同页锚点跳转会返回 null，状态码要防空
     if (cfg.skipUnworthy) {
-      const bad = await inspectPage(page, resp?.status?.() || 0)
+      const bad = await inspectPage(page, resp?.status?.() || 0, () => egressIPs(browser, proxy || ''))
       if (bad) throw bad
     }
 
@@ -562,9 +679,10 @@ async function baiduShoot(weburl, keyWd, cfg, proxy, isLast = true) {
 
     await settle(page, cfg)
 
-    // 跳进去的目标站也可能是登录墙或盾页（百度自己被风控时，标题就是「百度安全验证」）
+    // 跳进去的目标站也可能是登录墙或盾页（百度自己被风控时，标题就是「百度安全验证」）；
+    // 搜索结果页尤其要查出口 IP —— 搜「我的ip」时百度会把本机 IP 直接印在结果顶部
     if (cfg.skipUnworthy) {
-      const bad = await inspectPage(page, lastResp?.status?.() || 0)
+      const bad = await inspectPage(page, lastResp?.status?.() || 0, () => egressIPs(browser, proxy || ''))
       if (bad) throw bad
     }
 
