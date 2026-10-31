@@ -593,6 +593,8 @@ const faceSrc = computed(() => {
 
 .g-seg-md {
   margin: 2px 0;
+  /* markdown 里的长链接、连续英文没有空格，不在任意位置断行就会把气泡撑出容器 */
+  overflow-wrap: anywhere;
 }
 
 .g-seg-md :deep(> :first-child) {
@@ -606,6 +608,15 @@ const faceSrc = computed(() => {
 .g-seg-md :deep(img) {
   max-width: 340px;
   border-radius: 6px;
+}
+
+/* 手机气泡通常不到 340 宽，而 QQ 的 md 图片还带声明尺寸的行内 width/height，
+   不让位就会戳出聊天框。高度一并交给浏览器按比例算，否则会被压变形 */
+@media (max-width: 768px) {
+  .g-seg-md :deep(img) {
+    max-width: 100% !important;
+    height: auto !important;
+  }
 }
 
 .g-seg-md :deep(pre) {

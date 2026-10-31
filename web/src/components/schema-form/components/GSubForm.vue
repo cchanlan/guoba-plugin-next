@@ -10,6 +10,7 @@ import {
   message,
 } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
+import { useAppStore } from '@/stores/app'
 import { buildFormModel, structuredCloneSafe } from '@/utils/schema'
 import type { FormSchema } from '@/types'
 
@@ -41,6 +42,10 @@ const props = withDefaults(
 )
 
 const emit = defineEmits<{ 'update:value': [any] }>()
+
+const appStore = useAppStore()
+/** 窄屏：子表单表格压缩列宽，靠横向滑动看全 */
+const narrow = computed(() => appStore.viewportNarrow)
 
 const subSchemas = computed(() => props.schemas ?? [])
 
@@ -83,13 +88,15 @@ const columns = computed(() => {
     dataIndex: s.field,
     key: s.field,
     ellipsis: true,
+    // 窄屏给固定列宽：自适应会把每列压成半个字，滑过去也看不出内容
+    ...(narrow.value ? { width: 132 } : {}),
     customRender: ({ record }: any) => formatCell(record?.[s.field!], s),
   }))
   cols.push({
     title: '操作',
     dataIndex: '__action__',
     key: '__action__',
-    width: 120,
+    width: narrow.value ? 112 : 120,
   } as any)
   return cols
 })
@@ -182,6 +189,7 @@ function onRemove(index: number) {
       :dataSource="rows"
       :pagination="false"
       size="small"
+      :scroll="narrow ? { x: 'max-content' } : undefined"
       :rowKey="(_record: any, index?: number) => index ?? 0"
       class="g-subform-table"
     >

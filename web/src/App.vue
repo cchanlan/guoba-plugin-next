@@ -5,6 +5,7 @@ import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import { useAppStore } from '@/stores/app'
 import { useThemeConfig } from '@/theme'
 import { getPopupContainer } from '@/utils/popup'
+import { installHorizontalDrag } from '@/utils/horizontalDrag'
 
 const appStore = useAppStore()
 
@@ -32,6 +33,7 @@ function paintGlassSurfaces(root: ParentNode = document) {
 let paintObserver: MutationObserver | null = null
 
 onMounted(() => {
+  installHorizontalDrag()
   paintGlassSurfaces()
   paintObserver = new MutationObserver((mutations) => {
     for (const m of mutations) {

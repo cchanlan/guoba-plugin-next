@@ -171,6 +171,15 @@ code,
   user-select: text;
 }
 
+/**
+ * antd 的表单控件槽是 flex 项，默认 min-width: auto 会被里面的宽表格撑开：
+ * 表格自己的横向滚动就退化成整页横向溢出，手机上右边几列直接飘到屏幕外、
+ * 怎么滑都够不着。放开收缩能力，宽内容交给表格 / 代码块自己滚。
+ */
+.ant-form-item-control-input-content {
+  min-width: 0;
+}
+
 /* ---------------- 滚动条 ---------------- */
 
 ::-webkit-scrollbar {
@@ -388,6 +397,20 @@ code,
   .ant-table-wrapper .ant-table-container {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
+  }
+
+  /* 开了 scroll.x 后真正的滚动层是 content / body，补上手感并限制边界，
+     免得滑到头把整页带走；真机手势还有 utils/horizontalDrag.ts 兜底 */
+  .ant-table-wrapper .ant-table-content,
+  .ant-table-wrapper .ant-table-body {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+
+  /* 手机上那条横向滚动条只有一细条，留着反而碍眼；右侧露半列已经能提示可滑 */
+  .ant-table-wrapper .ant-table-content::-webkit-scrollbar,
+  .ant-table-wrapper .ant-table-body::-webkit-scrollbar {
+    display: none;
   }
 
   /**
@@ -666,7 +689,14 @@ html[data-theme-id='glass'][data-theme='light'] body .ant-table-wrapper {
 
 html[data-theme-id='glass'][data-theme='light'] body .ant-table-container {
   border-radius: var(--g-radius-lg);
-  overflow: hidden;
+}
+
+/* 圆角裁剪只给宽屏做。窄屏这层是表格的横向滑动容器，
+   overflow: hidden 会把右滑直接吃掉，右边几列永远够不着 */
+@media (min-width: 769px) {
+  html[data-theme-id='glass'][data-theme='light'] body .ant-table-container {
+    overflow: hidden;
+  }
 }
 
 /**
