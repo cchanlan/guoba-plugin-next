@@ -124,12 +124,13 @@ export default class PluginController extends ApiController {
   /**
    * 获取插件列表
    * @param req.query.force 是否清空缓存强制刷新
+   * @param req.query.remote 是否拉取远程插件列表（默认 true，传 false 只读本地）
    * @return {Promise<Result>}
    */
   async getPlugins(req) {
-    let {force} = req.query
+    let {force, remote} = req.query
     force = force === 'true'
-    let data = await this.pluginService.getPlugins(force)
+    let data = await this.pluginService.getPlugins(force, remote !== 'false')
     return Result.ok(data)
   }
 

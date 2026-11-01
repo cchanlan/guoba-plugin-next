@@ -38,9 +38,14 @@ const appStore = useAppStore()
 
 const loading = ref(true)
 const refreshing = ref(false)
-const plugins = ref<PluginItem[]>([])
+/** 插件市场列表正在拉取（索引仓库 reset + pull，慢） */
+const marketLoading = ref(false)
+/** 市场列表拉过一次就复用，切回「已安装」再进来不用重新等 */
+const marketLoaded = ref(false)
+const localPlugins = ref<PluginItem[]>([])
+const marketPlugins = ref<PluginItem[]>([])
 const keyword = ref('')
-const filter = ref<'all' | 'installed' | 'uninstalled' | 'configurable' | 'updatable'>('all')
+const filter = ref<'installed' | 'uninstalled' | 'updatable'>('installed')
 
 const installOpen = ref(false)
 const installLink = ref('')
@@ -49,17 +54,15 @@ const autoRestart = ref(true)
 const autoNpmInstall = ref(true)
 
 const filterOptions = [
-  { label: '全部', value: 'all' },
   { label: '已安装', value: 'installed' },
   { label: '未安装', value: 'uninstalled' },
-  { label: '可配置', value: 'configurable' },
   { label: '可更新', value: 'updatable' },
 ]
 
 const counts = computed(() => ({
-  all: plugins.value.length,
-  installed: plugins.value.filter((p) => p.installed).length,
-  configurable: plugins.value.filter((p) => p.hasConfig).length,
+  installed: localPlugins.value.length,
+  configurable: localPlugins.value.filter((p) => p.hasConfig).length,
+  uninstalled: marketPlugins.value.filter((p) => !p.installed).length,
 }))
 
 /* ---------------- 更新 ---------------- */
@@ -81,6 +84,7 @@ const updatable = computed(() => Object.values(gitMap.value).filter((it) => it.b
  * 而是还没检查过（落后数是上次 fetch 的结果）。
  */
 const emptyText = computed(() => {
+  if (filter.value === 'uninstalled' && marketLoading.value) return '正在联网获取插件列表…'
   if (filter.value !== 'updatable') return '没有匹配的插件'
   const checked = Object.values(gitMap.value).some((it) => it.lastFetchAt > 0)
   return checked ? '没有待更新的插件' : '还没检查过，点右上角「检查更新」'
@@ -111,10 +115,11 @@ function openGitLog(p: PluginItem) {
 
 const list = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
-  return plugins.value.filter((p) => {
-    if (filter.value === 'installed' && !p.installed) return false
+  // 已安装 / 可更新只看本地，未安装才用联网拉回来的全量列表
+  const source = filter.value === 'uninstalled' ? marketPlugins.value : localPlugins.value
+  return source.filter((p) => {
+    // 未安装视图只看还能装的；已装的在「已安装」里看
     if (filter.value === 'uninstalled' && p.installed) return false
-    if (filter.value === 'configurable' && !p.hasConfig) return false
     // 「可更新」按上次检查的结果筛，没检查过就是空的（空状态里会提示去检查）
     if (filter.value === 'updatable' && !gitOf(p)?.behind) return false
     if (!kw) return true
@@ -154,19 +159,69 @@ function loadMore() {
   visibleLimit.value += PAGE_SIZE
 }
 
+async function loadLocal(force = false) {
+  try {
+    const res = await apiGetPlugins(force, false)
+    localPlugins.value = Array.isArray(res) ? res : []
+  } catch {
+    localPlugins.value = []
+  }
+}
+
+async function loadMarket(force = false) {
+  marketLoading.value = true
+  try {
+    const res = await apiGetPlugins(force, true)
+    marketPlugins.value = Array.isArray(res) ? res : []
+    marketLoaded.value = true
+  } catch {
+    marketPlugins.value = []
+    marketLoaded.value = false
+  } finally {
+    marketLoading.value = false
+  }
+}
+
+/** 首次进页面只读本地，不碰远程索引；点「未安装」才联网 */
 async function load(force = false) {
   if (force) refreshing.value = true
   else loading.value = true
   try {
-    const res = await apiGetPlugins(force)
-    plugins.value = Array.isArray(res) ? res : []
-  } catch {
-    plugins.value = []
+    await loadLocal(force)
   } finally {
     loading.value = false
     refreshing.value = false
   }
 }
+
+/** 工具栏刷新：本地强制重扫（刷新没缓存到的插件），市场拉过就一起刷 */
+async function refresh() {
+  refreshing.value = true
+  try {
+    await loadLocal(true)
+    if (marketLoaded.value || filter.value === 'uninstalled') {
+      await loadMarket(true)
+    }
+  } finally {
+    refreshing.value = false
+  }
+}
+
+/** 装 / 卸之后市场里那条的安装状态也变了，缓存作废 */
+async function reloadAfterChange() {
+  marketLoaded.value = false
+  marketPlugins.value = []
+  await loadLocal(true)
+  if (filter.value === 'uninstalled') {
+    await loadMarket(true)
+  }
+}
+
+watch(filter, (val) => {
+  if (val === 'uninstalled' && !marketLoaded.value) {
+    loadMarket()
+  }
+})
 
 function openDetail(p: PluginItem) {
   if (!p.hasConfig) return
@@ -189,7 +244,7 @@ async function doInstall() {
     installOpen.value = false
     installLink.value = ''
     // 装完通常会重启，这里刷新一次列表尽力保持同步
-    load(true)
+    await reloadAfterChange()
   } finally {
     installing.value = false
   }
@@ -205,7 +260,7 @@ function confirmUninstall(p: PluginItem) {
     async onOk() {
       // 删的是目录，得传目录名：name 可能是插件自己起的展示名，那样后端只会说「插件不存在」
       await apiUninstallPlugin({ name: p.dir || p.name, autoRestart: true })
-      load(true)
+      await reloadAfterChange()
     },
   })
 }
@@ -224,7 +279,7 @@ function installFromCard(p: PluginItem) {
 }
 
 onMounted(() => {
-  load(false)
+  load()
   loadGit()
 })
 </script>
@@ -234,7 +289,9 @@ onMounted(() => {
     <div class="g-page-head">
       <h2 class="g-page-title">插件管理</h2>
       <p class="g-page-desc">
-        共 {{ counts.all }} 个插件，已安装 {{ counts.installed }} 个，其中 {{ counts.configurable }} 个支持锅巴配置<template v-if="updatable.length">，{{ updatable.length }} 个有更新</template>。
+        <template v-if="filter === 'uninstalled' && !marketLoaded">正在联网获取插件列表…</template>
+        <template v-else-if="filter === 'uninstalled'">未安装 {{ counts.uninstalled }} 个，已安装 {{ counts.installed }} 个<template v-if="updatable.length">，{{ updatable.length }} 个有更新</template>。</template>
+        <template v-else>已安装 {{ counts.installed }} 个，其中 {{ counts.configurable }} 个支持锅巴配置<template v-if="updatable.length">，{{ updatable.length }} 个有更新</template>。</template>
       </p>
     </div>
 
@@ -254,8 +311,8 @@ onMounted(() => {
       <template v-if="!appStore.isMobile">
         <Segmented v-model:value="filter" :options="filterOptions" />
         <div class="g-toolbar-actions">
-          <Tooltip title="强制刷新远程插件列表">
-            <Button :loading="refreshing" @click="load(true)">
+          <Tooltip title="重新扫描已安装插件；未安装列表拉过就一起刷新">
+            <Button :loading="refreshing" @click="refresh">
               <GIcon icon="ant-design:reload-outlined" :size="13" />
             </Button>
           </Tooltip>
@@ -280,8 +337,8 @@ onMounted(() => {
       <template v-else>
         <div class="g-toolbar-filter">
           <Segmented v-model:value="filter" :options="filterOptions" />
-          <Tooltip title="强制刷新远程插件列表">
-            <Button :loading="refreshing" class="g-toolbar-refresh" @click="load(true)">
+          <Tooltip title="重新扫描已安装插件；未安装列表拉过就一起刷新">
+            <Button :loading="refreshing" class="g-toolbar-refresh" @click="refresh">
               <GIcon icon="ant-design:reload-outlined" :size="13" />
             </Button>
           </Tooltip>
@@ -305,7 +362,7 @@ onMounted(() => {
       </template>
     </div>
 
-    <Row v-if="loading" :gutter="[16, 16]">
+    <Row v-if="loading || marketLoading" :gutter="[16, 16]">
       <Col v-for="i in 8" :key="i" :xs="24" :sm="12" :lg="8" :xxl="6">
         <Card :bordered="false"><Skeleton active :paragraph="{ rows: 2 }" /></Card>
       </Col>
@@ -314,7 +371,14 @@ onMounted(() => {
     <Empty v-else-if="!list.length" :description="emptyText" />
 
     <Row v-else :gutter="[16, 16]">
-      <Col v-for="p in shownList" :key="p.name" :xs="24" :sm="12" :lg="8" :xxl="6">
+      <Col
+        v-for="p in shownList"
+        :key="p.installed ? 'local:' + (p.dir || p.name) : 'remote:' + (p.link || p.name)"
+        :xs="24"
+        :sm="12"
+        :lg="8"
+        :xxl="6"
+      >
         <Card :bordered="false" class="g-plugin-card">
           <div class="g-plugin-top">
             <PluginIcon :plugin="p" :size="38" />

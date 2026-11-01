@@ -179,8 +179,8 @@ export const apiRemoveCardForm = (formKey: string, cardKey: string) =>
 
 /* ---------------- 插件 ---------------- */
 
-export const apiGetPlugins = (force = false) =>
-  get<PluginItem[]>('/plugin/list', { force })
+export const apiGetPlugins = (force = false, remote = true) =>
+  get<PluginItem[]>('/plugin/list', { force, remote })
 
 export const apiGetPluginReadme = (link: string, force = false) =>
   get<string>('/plugin/readme', { link, force })
