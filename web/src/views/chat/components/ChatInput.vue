@@ -12,19 +12,27 @@
  * 图片以原始 File 对象提交（multipart），不再转 base64 —— 共享 TRSS 端口时 body
  * 解析器是宿主的 express.json，默认 100kb，一张图塞进 JSON 就 413 了。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
-import { apiChatEmoji, apiChatEmojiRemove, apiChatEmojiUpload, chatEmojiUrl } from '@/api'
+import {
+  apiChatEmoji,
+  apiChatEmojiRemove,
+  apiChatEmojiUpload,
+  apiChatMembers,
+  chatEmojiUrl,
+} from '@/api'
 import type {
   ChatCustomEmoji,
   ChatEmojiPick,
+  ChatMember,
   ChatReplyTarget,
   ChatSendMode,
   ChatSendPayload,
 } from '@/api'
 import { filesFromHtml } from '@/utils/clipboard'
 import { withMountPrefix } from '@/utils/env'
+import { userAvatar } from '@/utils/avatar'
 
 /** 预览用的图片，objectURL 由组件负责回收 */
 interface PickedImage {
@@ -51,12 +59,17 @@ const props = defineProps<{
   reply: ChatReplyTarget | null
   /** 当前会话的账号，表情面板要靠它取这个号的收藏表情 */
   botId: string
+  /** 会话类型与群号：只有群里才给 @ 成员索引 */
+  sessionType: 'group' | 'friend'
+  groupId: string
   /** 自定义表情图片的媒体票据，由页面定期续签（<img> 带不上请求头） */
   emojiTicket: string
 }>()
 
 const emit = defineEmits<{
   send: [payload: ChatSendPayload]
+  /** 点表情直接发一条（不再进待发列表，图片才挂输入框上方） */
+  sendEmoji: [item: ChatEmojiPick]
   cancelReply: []
 }>()
 
@@ -183,7 +196,7 @@ const canSend = computed(() => {
     case 'media':
       return !!mediaFiles.value.length
     default:
-      return !!text.value.trim() || !!images.value.length || !!pickedEmojis.value.length
+      return !!text.value.trim() || !!images.value.length
   }
 })
 
@@ -219,19 +232,20 @@ function submit() {
       return
     }
   }
+  // @ 索引插进来的名字只用于显示，发送时交给 ats 拼 at 段，正文里要把带标记的那段删掉
+  const cleanText = text.value.replace(/@\u200b[^\u200b]*\u200b/g, '').trim()
   emit('send', {
     mode: mode.value,
-    text: text.value,
+    text: cleanText,
     raw: raw.value,
     images: images.value.map((i) => i.file),
     ats: ats.value,
     ark: mode.value === 'ark' ? buildArkPayload() : '',
     files: mode.value === 'media' ? [...mediaFiles.value] : [],
     useMsgIdReply: useMsgIdReply.value,
-    faces: pickedEmojis.value.filter((i) => i.kind === 'face').map((i) => i.id ?? ''),
-    emojis: pickedEmojis.value
-      .filter((i) => i.kind !== 'face')
-      .map((i) => ({ kind: i.kind as 'fav' | 'custom', url: i.url, id: i.id })),
+    // 表情现在点一下就单独发出去，不再混进这条待发消息
+    faces: [],
+    emojis: [],
   })
 }
 
@@ -254,7 +268,6 @@ function reset() {
       text.value = ''
       clearImages()
       ats.value = []
-      clearPicked()
   }
 }
 
@@ -288,6 +301,156 @@ function onEnter(e: KeyboardEvent) {
   submit()
 }
 
+/* ---------------- @ 成员索引 ---------------- */
+
+/** 一次最多展示多少个候选，再多就靠搜索缩小 */
+const MAX_AT_ITEMS = 50
+
+const botAdapter = inject<((uin?: string) => string) | null>('chatBotAdapter', null)
+
+const memberOpen = ref(false)
+const memberLoading = ref(false)
+const memberError = ref('')
+const memberList = ref<ChatMember[]>([])
+const memberKeyword = ref('')
+const memberIndex = ref(0)
+const memberPanelEl = ref<HTMLElement | null>(null)
+/** 输入框的真实 DOM，@ 面板要用它取光标位置 */
+let textareaEl: HTMLTextAreaElement | null = null
+/** 当前这份成员表是给哪个群拉的 */
+let memberLoadedFor = ''
+
+const filteredMembers = computed(() => {
+  const kw = memberKeyword.value.trim().toLowerCase()
+  const list = kw
+    ? memberList.value.filter((m) =>
+      m.name.toLowerCase().includes(kw)
+      || m.card.toLowerCase().includes(kw)
+      || m.userId.includes(kw))
+    : memberList.value
+  return list.slice(0, MAX_AT_ITEMS)
+})
+
+function memberAvatar(m: ChatMember) {
+  return userAvatar(m.userId, { adapter: botAdapter?.(props.botId) ?? '' })
+}
+
+async function loadMembers() {
+  if (!props.botId || !props.groupId) return
+  const key = `${props.botId}:${props.groupId}`
+  if (memberLoadedFor === key || memberLoading.value) return
+  memberLoading.value = true
+  memberError.value = ''
+  try {
+    const data = await apiChatMembers({ botId: props.botId, groupId: props.groupId })
+    memberList.value = data?.list ?? []
+    memberLoadedFor = key
+  } catch (e: any) {
+    memberError.value = e?.message || '成员列表加载失败'
+  } finally {
+    memberLoading.value = false
+  }
+}
+
+function closeMemberPanel() {
+  memberOpen.value = false
+}
+
+/** 光标前是不是一个没打完的 `@关键词`，是就把面板支起来 */
+function syncMemberPanel() {
+  if (mode.value !== 'normal') return closeMemberPanel()
+  if (props.sessionType !== 'group' || !props.groupId) return closeMemberPanel()
+  const pos = textareaEl?.selectionStart ?? text.value.length
+  const before = text.value.slice(0, pos)
+  const matched = /@([^\s@]{0,20})$/.exec(before)
+  if (!matched) return closeMemberPanel()
+  memberKeyword.value = matched[1]
+  memberIndex.value = 0
+  if (!memberOpen.value) {
+    memberOpen.value = true
+    emojiOpen.value = false
+  }
+  void loadMembers()
+}
+
+function onTextInput(e: Event) {
+  if ((e as InputEvent).isComposing) return
+  textareaEl = e.target as HTMLTextAreaElement
+  syncMemberPanel()
+}
+
+function moveMember(step: number) {
+  const size = filteredMembers.value.length
+  if (!size) return
+  memberIndex.value = (memberIndex.value + step + size) % size
+  nextTick(() => {
+    memberPanelEl.value?.querySelector('.g-at-item.is-on')?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
+/**
+ * 选中一个成员。
+ *
+ * 正文里插 `@名字`，两边各夹一个零宽空格当标记 —— 发送前只删带标记的，
+ * 用户手打的 `@名字` 不会误伤；真正的 at 段由已有的 ats 列表在消息最前面带上。
+ */
+function pickMember(item: ChatMember) {
+  const pos = textareaEl?.selectionStart ?? text.value.length
+  const before = text.value.slice(0, pos)
+  const matched = /@([^\s@]{0,20})$/.exec(before)
+  const start = matched ? pos - matched[0].length : pos
+  const token = `@\u200b${item.name}\u200b `
+  text.value = text.value.slice(0, start) + token + text.value.slice(pos)
+  if (!ats.value.some((a) => a.qq === item.userId)) {
+    ats.value.push({ qq: item.userId, name: item.name })
+  }
+  closeMemberPanel()
+  nextTick(() => {
+    const next = start + token.length
+    textareaEl?.focus()
+    textareaEl?.setSelectionRange(next, next)
+  })
+}
+
+/** 输入框键盘：@ 面板开着时上下选、回车 / Tab 选中、Esc 收起，否则走原来的发送 */
+function onInputKeydown(e: KeyboardEvent) {
+  // 中文输入法正在选词，回车是确认候选，不是发送 / 选人
+  if (e.isComposing) return
+  if (memberOpen.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      moveMember(1)
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      moveMember(-1)
+      return
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault()
+      const item = filteredMembers.value[memberIndex.value]
+      if (item) pickMember(item)
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      closeMemberPanel()
+      return
+    }
+  }
+  if (e.key === 'Enter') onEnter(e)
+}
+
+watch(
+  () => props.groupId,
+  () => {
+    memberLoadedFor = ''
+    memberList.value = []
+    closeMemberPanel()
+  },
+)
+
 /* ---------------- 表情 ---------------- */
 
 interface FaceItem {
@@ -313,8 +476,6 @@ const EMOJI_TABS: Array<{ key: EmojiTab; label: string }> = [
 
 const RECENT_KEY = 'guoba.chat.recent-emoji'
 const MAX_RECENT = 24
-/** 一次最多带几个表情，跟后端 MAX_SEND_EMOJIS 对齐 */
-const MAX_PICKED = 20
 
 const emojiOpen = ref(false)
 const emojiTab = ref<EmojiTab>('recent')
@@ -324,8 +485,6 @@ const emojiLoading = ref(false)
 const favorites = ref<string[]>([])
 const favoritesError = ref('')
 const customEmojis = ref<ChatCustomEmoji[]>([])
-/** 已选、待随本条消息发出去的表情 */
-const pickedEmojis = ref<ChatEmojiPick[]>([])
 /** 最近用过的，存 localStorage，跨会话共用一份 */
 const recentEmojis = ref<ChatEmojiPick[]>([])
 
@@ -404,6 +563,7 @@ async function loadEmojiData(refresh = false) {
 function toggleEmoji() {
   emojiOpen.value = !emojiOpen.value
   if (!emojiOpen.value) return
+  closeMemberPanel()
   loadFaces()
   loadEmojiData()
 }
@@ -422,8 +582,7 @@ function onDocPointerDown(e: MouseEvent) {
 }
 
 /**
- * QQ 表情点一下：有图（小黄脸 / 超级表情）就攒成待发表情，没图的是 unicode emoji，
- * 直接补进正文 —— 发 face 段反而不认。
+ * QQ 表情点一下就单独发出去；unicode emoji 没有脸段，还是补进正文。
  */
 function pickFace(item: FaceItem) {
   if (item.text) {
@@ -435,16 +594,8 @@ function pickFace(item: FaceItem) {
 }
 
 function pickEmoji(item: ChatEmojiPick) {
-  if (pickedEmojis.value.length >= MAX_PICKED) {
-    message.warning(`一次最多带 ${MAX_PICKED} 个表情`)
-    return
-  }
-  pickedEmojis.value.push({ ...item })
   remember(item)
-}
-
-function clearPicked() {
-  pickedEmojis.value = []
+  emit('sendEmoji', { ...item })
 }
 
 async function onEmojiFileChange(e: Event) {
@@ -469,7 +620,6 @@ async function removeCustomEmoji(item: ChatCustomEmoji, e: Event) {
   try {
     const data = await apiChatEmojiRemove(item.id)
     customEmojis.value = data?.custom ?? []
-    pickedEmojis.value = pickedEmojis.value.filter((i) => !(i.kind === 'custom' && i.id === item.id))
   } catch {
     // 请求层已经弹过错误
   }
@@ -644,16 +794,6 @@ defineExpose({
       <span v-if="qqbot" class="g-cin-at-tip">带 @ 的消息会按 MD 发送</span>
     </div>
 
-    <!-- 已选的表情，跟图片一样排在输入框上方，发送时按顺序拼进消息 -->
-    <div v-if="mode === 'normal' && pickedEmojis.length" class="g-cin-emojis">
-      <div v-for="(item, i) in pickedEmojis" :key="`${pickKey(item)}-${i}`" class="g-cin-emoji">
-        <img :src="pickSrc(item)" :alt="item.name ?? '表情'" />
-        <span class="g-cin-emoji-del" @click="pickedEmojis.splice(i, 1)">
-          <GIcon icon="ant-design:close-outlined" :size="9" />
-        </span>
-      </div>
-    </div>
-
     <div v-if="mode === 'normal' && images.length" class="g-cin-imgs">
       <div v-for="(img, i) in images" :key="img.url" class="g-cin-img">
         <img :src="img.url" alt="" />
@@ -677,7 +817,9 @@ defineExpose({
       :auto-size="{ minRows: 2, maxRows: 6 }"
       :bordered="false"
       :class="{ 'g-cin-mono': mode === 'markdown' }"
-      @keydown.enter="onEnter"
+      @keydown="onInputKeydown"
+      @input="onTextInput"
+      @blur="closeMemberPanel"
       @paste="onPaste"
     />
     <a-textarea
@@ -781,6 +923,40 @@ defineExpose({
       >
         <GIcon icon="ant-design:send-outlined" :size="17" />
       </button>
+    </div>
+
+    <!-- 输入 @ 弹出的群成员索引，上下键选、回车 / Tab 确认 -->
+    <div v-if="memberOpen && mode === 'normal'" ref="memberPanelEl" class="g-at">
+      <div v-if="memberLoading" class="g-at-empty">
+        <a-spin size="small" />
+        <span>正在加载群成员…</span>
+      </div>
+      <div v-else-if="memberError" class="g-at-empty">{{ memberError }}</div>
+      <div v-else-if="!filteredMembers.length" class="g-at-empty">没有匹配的成员</div>
+      <div v-else class="g-at-list">
+        <button
+          v-for="(m, i) in filteredMembers"
+          :key="m.userId"
+          type="button"
+          class="g-at-item"
+          :class="{ 'is-on': i === memberIndex }"
+          @pointerdown.prevent="pickMember(m)"
+          @mouseenter="memberIndex = i"
+        >
+          <img
+            v-if="memberAvatar(m)"
+            :src="memberAvatar(m)"
+            alt=""
+            class="g-at-avatar"
+            loading="lazy"
+          />
+          <span v-else class="g-at-avatar g-at-avatar-alt">{{ m.name.slice(0, 1) }}</span>
+          <span class="g-at-name">{{ m.name }}</span>
+          <span v-if="m.role === 'owner'" class="g-at-role">群主</span>
+          <span v-else-if="m.role === 'admin'" class="g-at-role">管理</span>
+          <span class="g-at-qq">{{ m.userId }}</span>
+        </button>
+      </div>
     </div>
 
     <!-- 表情面板：QQ 自带 / 收藏 / 自定义三档，浮在输入区上方 -->
@@ -1264,54 +1440,97 @@ defineExpose({
 
 /* ---------------- 表情 ---------------- */
 
-/* 已选的表情，尺寸比待发图片小一号，免得一条里挤了一排图太占地方 */
-.g-cin-emojis {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.g-cin-emoji {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 52px;
-  height: 52px;
-  border: 1px solid var(--g-border);
-  border-radius: 8px;
-  background: var(--g-bg-soft);
-}
-
-.g-cin-emoji img {
-  max-width: 42px;
-  max-height: 42px;
-  object-fit: contain;
-}
-
-.g-cin-emoji-del {
+/* 面板浮在输入区上方，点面板外收起 */
+/* @ 成员索引：跟表情面板抢同一个位置，同时只会开一个 */
+.g-at {
   position: absolute;
-  top: -5px;
-  right: -5px;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% - 2px);
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  max-width: 420px;
+  max-height: 280px;
+  border: 1px solid var(--g-border);
+  border-radius: 10px;
+  background: var(--g-bg-elevated);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.g-at-list {
+  overflow-y: auto;
+}
+
+.g-at-item {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  background: var(--g-bg-elevated);
-  border: 1px solid var(--g-border);
-  color: var(--g-text-sub);
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--g-text);
+  font-size: 13px;
+  text-align: left;
   cursor: pointer;
 }
 
-.g-cin-emoji-del:hover {
-  color: var(--g-danger);
-  border-color: var(--g-danger);
+.g-at-item.is-on,
+.g-at-item:hover {
+  background: var(--g-bg-soft);
 }
 
-/* 面板浮在输入区上方，点面板外收起 */
+.g-at-avatar {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--g-bg-soft);
+  object-fit: cover;
+}
+
+.g-at-avatar-alt {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--g-text-sub);
+  font-size: 11px;
+}
+
+.g-at-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.g-at-role {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--g-brand-soft);
+  color: var(--g-brand);
+  font-size: 10px;
+}
+
+.g-at-qq {
+  flex: none;
+  color: var(--g-text-dim);
+  font-size: 11px;
+}
+
+.g-at-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px;
+  color: var(--g-text-sub);
+  font-size: 13px;
+}
+
 .g-emoji {
   position: absolute;
   left: 8px;

@@ -36,6 +36,7 @@ export class ChatController extends ApiController {
     this.get('/group-info', this.groupInfo)
     this.get('/user-info', this.userInfo)
     this.get('/member-info', this.memberInfo)
+    this.get('/members', this.members)
     this.post('/refresh-group', this.refreshGroup)
     this.post('/pin', this.pin)
     this.post('/blacklist', this.blacklist)
@@ -187,6 +188,12 @@ export class ChatController extends ApiController {
   async memberInfo(req) {
     const {botId, groupId, userId} = req.query ?? {}
     return Result.ok(await this.chatService.memberInfo({botId, groupId, userId}))
+  }
+
+  /** 群成员列表：输入框里打 @ 时的昵称索引，见 ChatService.groupMembers */
+  async members(req) {
+    const {botId, groupId, keyword} = req.query ?? {}
+    return Result.ok(await this.chatService.groupMembers({botId, groupId, keyword}))
   }
 
   /** 置顶 / 取消置顶（纯面板状态） */

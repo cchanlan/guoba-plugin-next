@@ -30,6 +30,7 @@ import {
   chatAssetUrl,
   chatProxyUrl,
   type ChatActiveItem,
+  type ChatEmojiPick,
   type ChatMsg,
   type ChatRaw,
   type ChatReplyMode,
@@ -581,6 +582,37 @@ async function onSend(payload: ChatSendPayload) {
 }
 
 /**
+ * 表情面板里点一下就发一条只带这个表情的消息。
+ *
+ * 不走输入框那套待发流程：文本、图片、@ 都留在原地，连点几个表情就是连发几条，
+ * 跟 QQ 的手感一致。图片仍然挂在输入框上方，等用户自己点发送。
+ */
+async function onSendEmoji(item: ChatEmojiPick) {
+  const session = current.value
+  if (!session) return
+  try {
+    const fd = new FormData()
+    fd.set('botId', session.botId)
+    fd.set('type', session.type)
+    fd.set('id', session.id)
+    fd.set('text', '')
+    fd.set('kind', 'legacy')
+    if (item.kind === 'face') {
+      fd.set('faces', JSON.stringify([item.id]))
+    } else {
+      fd.set('emojis', JSON.stringify([{ kind: item.kind, url: item.url, id: item.id }]))
+    }
+    const data = await apiChatSend(fd)
+    // 后端也把这条塞进了缓冲，轮询会再送一次，靠 messageId 去重
+    if (data.message) messages.value.push(...dedupe([data.message]))
+    follow.value = true
+    await scrollToEnd()
+  } catch {
+    // 请求层已经弹过错误
+  }
+}
+
+/**
  * 把某条设成回复目标。三种口径共用这一份状态，发送时按 mode 分派给后端的
  * replyTo / replyMsgId / replyEventId（见 replyFieldsOf）。
  */
@@ -1047,8 +1079,11 @@ const dateFlags = computed(() => {
             :qqbot="isQQBot"
             :reply="replyTo"
             :bot-id="current?.botId ?? ''"
+            :session-type="current?.type ?? 'group'"
+            :group-id="current?.id ?? ''"
             :emoji-ticket="mediaTicket"
             @send="onSend"
+            @send-emoji="onSendEmoji"
             @cancel-reply="replyTo = null"
           />
         </template>

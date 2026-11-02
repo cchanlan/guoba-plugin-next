@@ -5,14 +5,8 @@ import {autowired, GuobaError, Service} from '#guoba.framework'
 import {AssetStore, flattenOneBot, normalizeMsg, toBase64File} from './model/msgSegment.js'
 import {groupAvatarUrl, userAvatarUrl} from './model/avatar.js'
 import {listBots, ensureContacts} from './model/bots.js'
-import {
-  getNote,
-  isPinned,
-  setPinned,
-  isBlacklisted,
-  setBlacklisted,
-  setNote,
-} from './model/chatPrefs.js'
+import {getNote, isPinned, setPinned, isBlacklisted, setBlacklisted, setNote} from './model/chatPrefs.js'
+import {listTempSessions, rememberTempSession} from './model/chatTempSessions.js'
 import {mirrorGroupBlacklist} from './model/qqbotBlacklist.js'
 import {packetSupport} from './model/packetSupport.js'
 import {describeSendError} from './model/sendError.js'
@@ -236,6 +230,10 @@ const MEMBER_INFO_FIELDS = {
 /** 成员信息现取的缓存：成功 5 分钟，失败 30 秒（失败重试别太勤，也别让刚入群的看不到） */
 const MEMBER_LIVE_TTL = 5 * 60 * 1000
 const MEMBER_LIVE_MISS_TTL = 30 * 1000
+/** 群成员列表缓存多久。@ 索引是边打边过滤，一分钟内不重复问协议端 */
+const MEMBER_LIST_TTL = 60 * 1000
+/** 一次最多回多少个成员，大群全量塞给前端没必要 */
+const MAX_MEMBER_LIST = 500
 
 /**
  * 在响应里按候选键名找值，可以往下钻几层。
@@ -501,6 +499,8 @@ export default class ChatService extends Service {
    * 免得协议端不支持时每点一下都卡一下。
    */
   #memberLiveCache = new Map()
+  /** 群成员列表缓存：`botId:群号` -> {at, list}，@ 索引和群成员查询共用 */
+  #memberListCache = new Map()
   #handler = null
   #attached = false
 
@@ -600,6 +600,27 @@ export default class ChatService extends Service {
       sender,
       segments,
     }, {unread: !self})
+    /**
+     * 非好友私聊落一份盘：临时会话只活在收到的消息里，不进 `bot.fl`，
+     * 不存的话重启就没了。好友表可能还没加载，先记下来，展示时再按好友表过滤。
+     */
+    if (type === 'friend' && !self) {
+      const friends = Bot.getFriendMap?.()
+      const isFriend = friends instanceof Map
+        && (friends.has(Number(id)) || friends.has(id))
+      if (!isFriend) {
+        const active = this.#sessions.get(`${botId}:friend:${id}`)
+        rememberTempSession({
+          key: `${botId}:friend:${id}`,
+          botId,
+          userId: id,
+          name: sender.nickname || sender.card || '',
+          lastTime: active?.lastTime ?? Math.floor(Date.now() / 1000),
+          lastText: active?.lastText ?? '',
+          groupId: String(e.group_id ?? ''),
+        })
+      }
+    }
     // 事件里的原始数据比历史接口给的全（有上报原文），后来的以它为准
     if (messageId) {
       const upload = this.#parseUpload(e)
@@ -1316,6 +1337,56 @@ export default class ChatService extends Service {
         pinned: isPinned(key),
         blacklisted: isBlacklisted(key),
       })
+    }
+
+    /**
+     * 私聊列表补上「临时会话」。
+     *
+     * 好友表（`bot.fl`）里只有加过好友的人，群临时会话 / 陌生人私聊根本不在里面。
+     * 收到过的会落进 chatTempSessions 的 JSON（内存活跃表只在本进程里有效，重启就没了），
+     * 这里把「持久化的 + 本进程刚收到的」合起来，再滤掉已经是好友的，前端标一个「临时」。
+     */
+    if (!isGroup) {
+      const tempMap = new Map()
+      for (const item of listTempSessions(wantBot)) tempMap.set(item.key, {...item})
+      for (const [activeKey, active] of this.#sessions) {
+        const matched = /^([^:]+):friend:(.+)$/.exec(activeKey)
+        if (!matched) continue
+        if (wantBot && matched[1] !== wantBot) continue
+        const old = tempMap.get(activeKey)
+        tempMap.set(activeKey, {
+          key: activeKey,
+          botId: matched[1],
+          userId: matched[2],
+          name: old?.name || this.#names.get(matched[2]) || matched[2],
+          lastTime: active.lastTime,
+          lastText: active.lastText,
+          unread: active.unread,
+        })
+      }
+      for (const [activeKey, item] of tempMap) {
+        const sid = String(item.userId ?? '')
+        if (!sid) continue
+        // 已经是好友的交给上面的好友表那一路，这里不重复
+        if (map.has(Number(sid)) || map.has(sid)) continue
+        const name = item.name || this.#names.get(sid) || sid
+        if (kw && !name.toLowerCase().includes(kw) && !sid.includes(kw)) continue
+        list.push({
+          key: activeKey,
+          botId: item.botId,
+          type: 'friend',
+          id: sid,
+          name,
+          note: getNote(activeKey),
+          avatar: userAvatarUrl(sid, item.botId),
+          lastTime: item.lastTime ?? 0,
+          lastText: item.lastText ?? '',
+          unread: item.unread ?? 0,
+          pinned: isPinned(activeKey),
+          blacklisted: isBlacklisted(activeKey),
+          temp: true,
+        })
+      }
     }
 
     // 置顶的排最前（且不受有没有消息影响），其余按最近活跃，最后按号码 —— 顺序稳定不跳动
@@ -2292,6 +2363,88 @@ export default class ChatService extends Service {
   /** 刷新用户信息：数据跟 {@link userInfo} 一样，只是跳过缓存 */
   async refreshUserInfo({botId = '', id = ''} = {}) {
     return this.userInfo({botId, id, refresh: true})
+  }
+
+  /**
+   * 群成员列表：输入框里打 @ 时的昵称索引。
+   *
+   * 两档取法：群对象上的成员表（icqq 这类）→ OneBot 的 `get_group_member_list`。
+   * 拉一次缓存一分钟，关键词在本地过滤，输入过程中不再反复问协议端。
+   */
+  async groupMembers({botId = '', groupId = '', keyword = ''} = {}) {
+    const gid = String(groupId ?? '').trim()
+    if (!gid) throw new GuobaError('缺少群号')
+    const owner = String(botId ?? '').trim()
+    const bot = this.#bot(owner)
+    if (!bot) throw new GuobaError('找不到这个机器人账号')
+    const cacheKey = `${owner}:${gid}`
+    let hit = this.#memberListCache.get(cacheKey)
+    if (!hit || Date.now() - hit.at >= MEMBER_LIST_TTL) {
+      const list = await this.#fetchGroupMembers(bot, gid)
+      hit = {at: Date.now(), list}
+      this.#memberListCache.set(cacheKey, hit)
+    }
+    const kw = String(keyword ?? '').trim().toLowerCase()
+    const list = kw
+      ? hit.list.filter((m) =>
+        m.name.toLowerCase().includes(kw)
+        || m.card.toLowerCase().includes(kw)
+        || m.userId.includes(kw))
+      : hit.list
+    return {list: list.slice(0, MAX_MEMBER_LIST), total: list.length}
+  }
+
+  /** 取整份群成员表，统一成 `{userId, name, card, role}` */
+  async #fetchGroupMembers(bot, gid) {
+    const groupId = Number(gid) || gid
+    const out = []
+    const seen = new Set()
+    const push = (uid, card, nickname, role) => {
+      const id = String(uid ?? '').trim()
+      if (!id || seen.has(id)) return
+      seen.add(id)
+      // 群名片常常是一串空格，trim 后为空就该退回昵称 / QQ 号
+      const cleanCard = String(card ?? '').trim()
+      const cleanNick = String(nickname ?? '').trim()
+      out.push({
+        userId: id,
+        name: cleanCard || cleanNick || id,
+        card: cleanCard,
+        role: String(role ?? ''),
+      })
+    }
+
+    try {
+      const group = typeof bot.pickGroup === 'function' ? bot.pickGroup(groupId) : null
+      if (typeof group?.getMemberMap === 'function') {
+        const map = await group.getMemberMap()
+        for (const member of map instanceof Map ? map.values() : map ?? []) {
+          const info = member?.info ?? member
+          push(
+            info?.user_id ?? member?.user_id,
+            info?.card ?? member?.card,
+            info?.nickname ?? member?.nickname,
+            info?.role ?? member?.role,
+          )
+        }
+      }
+    } catch {
+      // 群对象上没这张表（多数 OneBot 实现），走下面的接口
+    }
+
+    if (!out.length && typeof bot.sendApi === 'function') {
+      const res = await bot.sendApi('get_group_member_list', {group_id: groupId})
+      const data = res?.data ?? res
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          push(item?.user_id, item?.card, item?.nickname, item?.role)
+        }
+      }
+    }
+
+    if (!out.length) throw new GuobaError('这个适配器取不到群成员列表')
+    out.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+    return out
   }
 
   /**

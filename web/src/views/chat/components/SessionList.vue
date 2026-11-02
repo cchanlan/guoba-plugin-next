@@ -497,6 +497,7 @@ load(true)
               {{ item.note || item.name || item.id }}
             </span>
             <GIcon v-if="item.pinned" icon="ant-design:pushpin-filled" :size="11" class="g-sess-pin" />
+            <span v-if="item.temp" class="g-sess-tag">临时</span>
             <span v-if="item.blacklisted" class="g-sess-tag">已拉黑</span>
             <span class="g-sess-time">{{ timeText(item.lastTime) }}</span>
           </span>

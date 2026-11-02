@@ -1022,6 +1022,8 @@ export interface ChatSession extends ChatActiveItem {
   pinned?: boolean
   /** 已被拉黑，列表上给个标记 */
   blacklisted?: boolean
+  /** 不是好友的私聊（群临时会话 / 陌生人），由收到过的消息补进列表 */
+  temp?: boolean
 }
 
 export interface ChatMsg {
@@ -1174,6 +1176,21 @@ export const apiChatMemberInfo = (params: {
   groupId: string
   userId: string
 }) => get<ChatMemberInfo>('/chat/member-info', params, { showError: false })
+
+/** 群成员：输入框打 @ 时弹出的昵称索引 */
+export interface ChatMember {
+  userId: string
+  /** 群名片优先，缺了用昵称 */
+  name: string
+  card: string
+  role: string
+}
+
+export const apiChatMembers = (params: {
+  botId: string
+  groupId: string
+  keyword?: string
+}) => get<{ list: ChatMember[]; total: number }>('/chat/members', params, { showError: false })
 
 /** 刷新群信息：跳过缓存强制问一次适配器，返回的是同一份结构 */
 export const apiChatRefreshGroup = (body: { botId: string; id: string }) =>
