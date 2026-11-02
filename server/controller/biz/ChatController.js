@@ -35,6 +35,7 @@ export class ChatController extends ApiController {
     this.post('/forward', this.forward)
     this.get('/group-info', this.groupInfo)
     this.get('/user-info', this.userInfo)
+    this.get('/member-info', this.memberInfo)
     this.post('/refresh-group', this.refreshGroup)
     this.post('/pin', this.pin)
     this.post('/blacklist', this.blacklist)
@@ -180,6 +181,12 @@ export class ChatController extends ApiController {
     return Result.ok(await this.chatService.userInfo({
       botId, id, refresh: refresh === '1' || refresh === 'true',
     }))
+  }
+
+  /** 群成员信息：消息记录点头像的信息卡里补的入群时间，见 ChatService.memberInfo */
+  async memberInfo(req) {
+    const {botId, groupId, userId} = req.query ?? {}
+    return Result.ok(await this.chatService.memberInfo({botId, groupId, userId}))
   }
 
   /** 置顶 / 取消置顶（纯面板状态） */

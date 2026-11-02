@@ -13,6 +13,7 @@ import { computed, inject, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import GIcon from '@/components/GIcon.vue'
 import MsgSegment from '@/components/msg/MsgSegment.vue'
+import { apiChatMemberInfo } from '@/api'
 import { toDataUrl, writeRich, writeText } from '@/utils/clipboard'
 import { userAvatar } from '@/utils/avatar'
 import type { ChatMsg, MsgSeg } from '@/api'
@@ -68,6 +69,12 @@ const hasEmoji = computed(() =>
 const name = computed(() => {
   const s = props.msg.sender
   return s.card || s.nickname || s.userId || '未知'
+})
+
+/** 信息卡标题用本身昵称：消息流外面显示的已经是群名片，卡片里再写一遍就重复了 */
+const realName = computed(() => {
+  const s = props.msg.sender
+  return s.nickname || s.card || s.userId || '未知'
 })
 
 const avatar = computed(() =>
@@ -134,20 +141,84 @@ function mdToText(content: string) {
 
 /**
  * 点头像弹出的信息卡。
+ *
+ * 入群时间不在消息事件里，卡片打开时才单独问一次；加载中 / 取不到都占一行，
+ * 复制按钮只挂在真正有值的行上。
  */
+const memberInfo = ref<{ loading: boolean; joinTime: number; sign: string; error: string }>({
+  loading: false,
+  joinTime: 0,
+  sign: '',
+  error: '',
+})
+let memberInfoSeq = 0
+
+function formatJoinTime(seconds: number) {
+  const d = new Date(seconds * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 const userRows = computed(() => {
   const s = props.msg.sender
-  const rows: Array<{ label: string; value: string }> = []
+  const rows: Array<{ label: string; value: string; copy?: boolean }> = []
   if (props.msg.self) rows.push({label: '来源', value: '机器人自己'})
-  if (s.card && s.card !== s.nickname) rows.push({label: '群名片', value: s.card})
+  if (s.card && s.card !== s.nickname) rows.push({label: '群名片', value: s.card, copy: true})
   if (s.role) rows.push({label: '群身份', value: ROLE_TEXT[s.role] ?? s.role})
-  if (s.title) rows.push({label: '群头衔', value: s.title})
+  if (s.title) rows.push({label: '群头衔', value: s.title, copy: true})
   const openid = s.openid || (isQQBot.value ? String(s.userId).split(':').pop() ?? '' : '')
-  if (openid) rows.push({label: 'openid', value: openid})
-  rows.push({label: isQQBot.value ? '账号' : 'QQ', value: s.userId || '未知'})
-  if (s.unionid) rows.push({label: 'unionid', value: s.unionid})
+  if (openid) rows.push({label: 'openid', value: openid, copy: true})
+  rows.push({label: isQQBot.value ? '账号' : 'QQ', value: s.userId || '未知', copy: !!s.userId})
+  if (memberInfo.value.sign) rows.push({label: '签名', value: memberInfo.value.sign, copy: true})
+  if (s.unionid) rows.push({label: 'unionid', value: s.unionid, copy: true})
+  // 入群时间只有群聊才有，私聊不显示这一行
+  if (props.msg.type === 'group') {
+    if (memberInfo.value.loading) rows.push({label: '入群时间', value: '查询中…'})
+    else if (memberInfo.value.joinTime) {
+      rows.push({label: '入群时间', value: formatJoinTime(memberInfo.value.joinTime)})
+    } else if (memberInfo.value.error) {
+      rows.push({label: '入群时间', value: memberInfo.value.error})
+    }
+  }
   return rows
 })
+
+/** 卡片打开时才查入群时间；拿不到就重试（后端有失败缓存，不会打爆接口） */
+function onUserCardOpen(open: boolean) {
+  if (!open || props.msg.type !== 'group') return
+  void loadMemberInfo()
+}
+
+async function loadMemberInfo() {
+  const state = memberInfo.value
+  if (state.loading || state.joinTime) return
+  state.loading = true
+  state.error = ''
+  const seq = ++memberInfoSeq
+  try {
+    const data = await apiChatMemberInfo({
+      botId: props.msg.botId,
+      groupId: props.msg.id,
+      userId: props.msg.sender.userId,
+    })
+    if (seq !== memberInfoSeq) return
+    state.joinTime = data.joinTime || 0
+    state.sign = data.sign || ''
+    if (!state.joinTime) state.error = data.liveError || '取不到入群时间'
+  } catch (err: any) {
+    if (seq !== memberInfoSeq) return
+    state.error = err?.message || '取不到入群时间'
+  } finally {
+    if (seq === memberInfoSeq) state.loading = false
+  }
+}
+
+/** 信息卡里的小复制按钮 */
+async function copyValue(value: string, label: string) {
+  if (!value) return
+  if (await writeText(value)) message.success(`已复制${label}`)
+  else message.error('复制失败，请手动选中文本')
+}
 
 /** 跟图片一起复制时用的文本 */
 const copyText = computed(() => toText(false))
@@ -248,18 +319,49 @@ async function copyMessage() {
           trigger="click"
           placement="rightTop"
           :get-popup-container="getPopupContainer"
+          @open-change="onUserCardOpen"
         >
           <template #content>
-            <div class="g-cmsg-user">
+            <!--
+              卡片里的文字要能长按选中复制；右键 / 长按也不再冒泡成消息的菜单。
+              按下事件也拦一道：弹层挂在消息行里，不拦的话 antd 会把「点复制按钮」
+              当成点外部，复制完卡片就关了。
+            -->
+            <div
+              class="g-cmsg-user"
+              @contextmenu.stop
+              @mousedown.stop
+              @pointerdown.stop
+              @touchstart.stop
+            >
               <div class="g-cmsg-user-head">
-                <img v-if="avatar && !avatarFailed" :src="avatar" :alt="name" />
-                <span v-else class="g-cmsg-user-fallback">{{ name.slice(0, 1) }}</span>
-                <span class="g-cmsg-user-nick">{{ name }}</span>
+                <img v-if="avatar && !avatarFailed" :src="avatar" :alt="realName" />
+                <span v-else class="g-cmsg-user-fallback">{{ realName.slice(0, 1) }}</span>
+                <span class="g-cmsg-user-nick">{{ realName }}</span>
+                <button
+                  type="button"
+                  class="g-cmsg-copy"
+                  title="复制昵称"
+                  @click.stop="copyValue(realName, '昵称')"
+                >
+                  <GIcon icon="ant-design:copy-outlined" :size="12" />
+                </button>
               </div>
               <dl class="g-cmsg-user-rows">
                 <template v-for="row in userRows" :key="row.label">
                   <dt>{{ row.label }}</dt>
-                  <dd :title="row.value">{{ row.value }}</dd>
+                  <dd :title="row.value">
+                    <span class="g-cmsg-user-val">{{ row.value }}</span>
+                    <button
+                      v-if="row.copy"
+                      type="button"
+                      class="g-cmsg-copy"
+                      :title="`复制${row.label}`"
+                      @click.stop="copyValue(row.value, row.label)"
+                    >
+                      <GIcon icon="ant-design:copy-outlined" :size="11" />
+                    </button>
+                  </dd>
                 </template>
               </dl>
             </div>
@@ -400,6 +502,9 @@ async function copyMessage() {
   max-width: 280px;
   color: var(--g-text);
   font-size: 13px;
+  /* 骨架里全局禁选，卡片里的值要能长按选中复制，这里单独放行 */
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .g-cmsg-user-head {
@@ -448,9 +553,41 @@ async function copyMessage() {
 }
 
 .g-cmsg-user-rows dd {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
   margin: 0;
   color: var(--g-text-sub);
   word-break: break-all;
+}
+
+.g-cmsg-user-val {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 信息卡里的复制按钮：静态小图标，点一下复制对应那一行的值 */
+.g-cmsg-copy {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--g-text-dim);
+  cursor: pointer;
+}
+
+.g-cmsg-copy:hover,
+.g-cmsg-copy:active {
+  background: var(--g-bg-soft);
+  color: var(--g-brand);
 }
 
 .g-cmsg-avatar img {

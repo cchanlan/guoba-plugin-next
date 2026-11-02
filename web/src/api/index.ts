@@ -1154,6 +1154,27 @@ export const apiChatGroupInfo = (params: { botId: string; id: string }) =>
 export const apiChatUserInfo = (params: { botId: string; id: string }) =>
   get<ChatUserInfo>('/chat/user-info', params, { showError: false })
 
+/**
+ * 群成员信息：消息记录里点头像的信息卡补的「入群时间」。
+ *
+ * 消息事件里不带你得单独问适配器，所以只在卡片打开时调，别在消息列表里批量请求。
+ */
+export interface ChatMemberInfo {
+  userId: string
+  /** 秒，0 表示取不到 */
+  joinTime: number
+  /** 个性签名，空串表示取不到或没设置 */
+  sign: string
+  /** 取不到时的原因，空串表示拿到了 */
+  liveError: string
+}
+
+export const apiChatMemberInfo = (params: {
+  botId: string
+  groupId: string
+  userId: string
+}) => get<ChatMemberInfo>('/chat/member-info', params, { showError: false })
+
 /** 刷新群信息：跳过缓存强制问一次适配器，返回的是同一份结构 */
 export const apiChatRefreshGroup = (body: { botId: string; id: string }) =>
   post<ChatGroupInfo>('/chat/refresh-group', body)

@@ -219,6 +219,25 @@ const USER_INFO_ACTIONS = ['get_friend_info', 'get_stranger_info']
 const USER_LIVE_TTL = GROUP_LIVE_TTL
 
 /**
+ * 群成员信息（点头像卡片里的「入群时间」）的候选键名。
+ *
+ * 消息事件本身不带入群时间，只能点开卡片时现问适配器：icqq 的 `getInfo()` 与
+ * OneBot 的 `get_group_member_info` 都叫 `join_time`，QQ 官方那边叫 `joined_at`，
+ * 其余别名是给别的实现留的。
+ */
+const MEMBER_INFO_FIELDS = {
+  joinTime: [
+    'join_time', 'joinTime', 'join_time_stamp', 'joinTimeStamp',
+    'join_group_time', 'joinGroupTime', 'join_at', 'joinAt', 'joined_at', 'joinedAt',
+  ],
+  /** 个性签名不是群成员接口给的，得单独问 get_stranger_info，见 #fetchSign */
+  sign: ['longNick', 'long_nick', 'sign', 'signature', 'personalSign', 'personality'],
+}
+/** 成员信息现取的缓存：成功 5 分钟，失败 30 秒（失败重试别太勤，也别让刚入群的看不到） */
+const MEMBER_LIVE_TTL = 5 * 60 * 1000
+const MEMBER_LIVE_MISS_TTL = 30 * 1000
+
+/**
  * 在响应里按候选键名找值，可以往下钻几层。
  *
  * 默认只要标量（群名、人数这些都是），`allowArray` 打开后才认数组 ——
@@ -251,6 +270,24 @@ function textOf(source, keys) {
 function numOf(source, keys) {
   const hit = Number(probeFields(source, keys))
   return Number.isFinite(hit) && hit > 0 ? Math.round(hit) : 0
+}
+
+/**
+ * 入群时间归一成秒。
+ *
+ * OneBot / icqq 给的是秒，个别实现给毫秒，QQ 官方给 ISO 字符串 —— 三种都收，
+ * 认不出返回 0。
+ */
+function joinTimeOf(source) {
+  const raw = probeFields(source, MEMBER_INFO_FIELDS.joinTime)
+  if (raw == null || raw === '') return 0
+  if (typeof raw === 'string' && !/^\d+(\.\d+)?$/.test(raw.trim())) {
+    const at = Date.parse(raw)
+    return Number.isFinite(at) && at > 0 ? Math.floor(at / 1000) : 0
+  }
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return 0
+  return Math.floor(n > 1e12 ? n / 1000 : n)
 }
 
 /**
@@ -457,6 +494,13 @@ export default class ChatService extends Service {
    * 见 {@link ChatService#userInfo}。
    */
   #userLiveCache = new Map()
+  /**
+   * 现取的群成员信息缓存：`botId:群号:QQ` -> {at, data}。
+   *
+   * 点一次头像问一次适配器，同一个人来回点没必要每次都问；失败的也留一小会儿，
+   * 免得协议端不支持时每点一下都卡一下。
+   */
+  #memberLiveCache = new Map()
   #handler = null
   #attached = false
 
@@ -2248,6 +2292,117 @@ export default class ChatService extends Service {
   /** 刷新用户信息：数据跟 {@link userInfo} 一样，只是跳过缓存 */
   async refreshUserInfo({botId = '', id = ''} = {}) {
     return this.userInfo({botId, id, refresh: true})
+  }
+
+  /**
+   * 群成员信息：消息记录里点头像弹出的信息卡补的「入群时间」。
+   *
+   * 消息事件里不带入群时间，只能点开卡片时现问适配器：先走群对象上的成员
+   * （icqq 的 `getInfo()` 等），不行再退 OneBot 的标准动作 `get_group_member_info`；
+   * QQ 官方机器人走 SDK 的 `getGroupMemberInfo`。
+   *
+   * 取不到不算错 —— 返回空时间 + liveError，卡片上如实写一句，别整张卡打不开。
+   */
+  async memberInfo({botId = '', groupId = '', userId = ''} = {}) {
+    const gid = String(groupId ?? '').trim()
+    const uid = String(userId ?? '').trim()
+    if (!gid) throw new GuobaError('缺少群号')
+    if (!uid) throw new GuobaError('缺少成员 QQ')
+    const owner = String(botId ?? '').trim()
+    const bot = this.#bot(owner)
+    const cacheKey = `${owner || 'default'}:${gid}:${uid}`
+
+    const hit = this.#memberLiveCache.get(cacheKey)
+    const ttl = hit?.data?.joinTime ? MEMBER_LIVE_TTL : MEMBER_LIVE_MISS_TTL
+    if (hit && Date.now() - hit.at < ttl) return hit.data
+
+    let live = null
+    let liveError = ''
+    try {
+      live = bot && isQQBot(bot)
+        ? await this.#fetchQQBotMemberInfo(bot, gid, uid)
+        : await this.#fetchMemberInfo(bot, gid, uid)
+    } catch (err) {
+      liveError = err?.message ?? String(err)
+    }
+
+    const joinTime = joinTimeOf(live)
+    // 签名不在群成员信息里，NapCat / Lagrange 的 get_stranger_info 才有（longNick）
+    const sign = await this.#fetchSign(bot, uid)
+    const data = {
+      userId: uid,
+      /** 秒，0 表示取不到 */
+      joinTime,
+      /** 个性签名，取不到是空串 */
+      sign,
+      liveError: joinTime ? '' : (liveError || '这个适配器没给入群时间'),
+    }
+    this.#memberLiveCache.set(cacheKey, {at: Date.now(), data})
+    return data
+  }
+
+  /** 问适配器要个性签名：NapCat / Lagrange 的 get_stranger_info 会给 longNick */
+  async #fetchSign(bot, uid) {
+    if (typeof bot?.sendApi !== 'function') return ''
+    const userId = Number(uid) || uid
+    for (const action of ['get_stranger_info', 'get_friend_info']) {
+      try {
+        const res = await bot.sendApi(action, {user_id: userId, no_cache: true})
+        const data = res?.data ?? res
+        if (!data || typeof data !== 'object') continue
+        const sign = probeFields(data, MEMBER_INFO_FIELDS.sign)
+        if (sign != null) return String(sign).trim()
+      } catch {
+        // 协议端不认这个动作就试下一个；都拿不到就空着
+      }
+    }
+    return ''
+  }
+
+  /** 问适配器要一个群成员的详情，两档：群对象上的成员 → OneBot 动作 */
+  async #fetchMemberInfo(bot, gid, uid) {
+    if (!bot) throw new GuobaError('找不到这个机器人账号')
+    const groupId = Number(gid) || gid
+    const userId = Number(uid) || uid
+    let member = null
+    try {
+      const group = typeof bot.pickGroup === 'function' ? bot.pickGroup(groupId) : null
+      member = typeof group?.pickMember === 'function' ? group.pickMember(userId) : null
+    } catch {
+      member = null
+    }
+    if (member) {
+      try {
+        const info = typeof member.getInfo === 'function' ? await member.getInfo()
+          : typeof member.getGroupMemberInfo === 'function' ? await member.getGroupMemberInfo()
+            : member.info
+        if (info && typeof info === 'object') return info
+      } catch {
+        // 成员对象这条路走不通（不在群、适配器没实现），落到下面问接口
+      }
+    }
+    if (typeof bot.sendApi === 'function') {
+      const res = await bot.sendApi('get_group_member_info', {group_id: groupId, user_id: userId})
+      const data = res?.data ?? res
+      if (data && typeof data === 'object') return data
+    }
+    throw new GuobaError('当前适配器取不到成员信息')
+  }
+
+  /** QQ 官方机器人的成员信息：SDK 上是 `getGroupMemberInfo(群 openid, 成员 openid)` */
+  async #fetchQQBotMemberInfo(bot, gid, uid) {
+    const sdk = this.#qqbotSdk(bot)
+    if (typeof sdk?.getGroupMemberInfo !== 'function') {
+      throw new GuobaError('当前 QQ 机器人没接上 SDK，取不到成员信息')
+    }
+    const groupOpenid = pureOpenid(gid)
+    const memberOpenid = pureOpenid(uid)
+    if (!groupOpenid || !memberOpenid) {
+      throw new GuobaError('群或成员的 openid 是空的，取不到成员信息')
+    }
+    const data = await sdk.getGroupMemberInfo(groupOpenid, memberOpenid)
+    if (!data || typeof data !== 'object') throw new GuobaError('QQ 那边没回成员信息')
+    return data
   }
 
   /** 面板记录的那份好友信息（`bot.fl` 里的一条） */
