@@ -6,6 +6,7 @@ import {lookup as dnsLookup} from 'node:dns/promises'
 import {autowired, GuobaError, Service} from '#guoba.framework'
 import {_paths} from '../../../utils/paths.js'
 import {isPrivateIp} from './ChatService.js'
+import {MAX_ASSET_SIZE} from './model/msgSegment.js'
 
 /**
  * 消息记录页的表情。
@@ -31,8 +32,10 @@ const FACE_DIRS = [
 ]
 /** 自定义表情张数上限，够用又不至于把磁盘堆满 */
 const CUSTOM_LIMIT = 300
-/** 单张表情的大小上限 */
-const MAX_FILE = 5 * 1024 * 1024
+/** 与消息图片的资源上限保持一致，较大的动图也能收藏 */
+const MAX_FILE = MAX_ASSET_SIZE
+const FILE_TOO_LARGE = `请选择不超过 ${MAX_FILE / 1024 / 1024}MB 的表情`
+const BAD_IMAGE = '请选择 PNG、JPG、GIF、WebP 或 BMP 图片'
 /** 收藏表情缓存多久（毫秒） */
 const FAV_TTL = 60 * 1000
 /** 拉收藏表情的超时 */
@@ -212,9 +215,9 @@ export class ChatEmojiService extends Service {
       const res = await fetch(url, {signal: AbortSignal.timeout(FETCH_TIMEOUT)})
       if (!res.ok) throw new GuobaError(`表情下载失败：HTTP ${res.status}`)
       const len = Number(res.headers.get('content-length'))
-      if (len && len > MAX_FILE) throw new GuobaError('表情图片过大')
+      if (len && len > MAX_FILE) throw new GuobaError(FILE_TOO_LARGE)
       const buffer = Buffer.from(await res.arrayBuffer())
-      if (buffer.length > MAX_FILE) throw new GuobaError('表情图片过大')
+      if (buffer.length > MAX_FILE) throw new GuobaError(FILE_TOO_LARGE)
       // 缓存别无限长，收藏表情一两百张、每张百来 KB，留 100 条够用
       if (this.#fetched.size >= 100) this.#fetched.delete(this.#fetched.keys().next().value)
       this.#fetched.set(url, {at: Date.now(), buffer})
@@ -278,7 +281,7 @@ export class ChatEmojiService extends Service {
    *
    * 右键「收藏表情」走这里：QQ 自带的小黄脸从静态资源里取图，图片（表情包或普通图）
    * 优先用回显时留的字节，没有就按直链下载 —— 主人明确要求普通图片也能收成表情。
-   * 单张超过 5MB 的直接跳过，别把整条收藏打回去。
+   * 单张超限或下载失败时跳过；全都失败才提示，具体原因写日志。
    *
    * 优先用页面传上来的段：面板的内存缓冲只有 1000 条、重启还会清空，光靠 messageId
    * 去缓冲里找，翻几页历史消息就收藏不动了（主人实测踩过）。
@@ -290,17 +293,25 @@ export class ChatEmojiService extends Service {
       : this.#pickEmojiSegs(this.chatService.getBuffered(messageId)?.segments)
     if (!list.length) throw new GuobaError('这条消息里没有可收藏的图')
     const buffers = []
+    let failureMessage = '收藏失败，请稍后再试'
     for (const seg of list) {
       try {
         const buffer = seg.type === 'face'
           ? await this.#readFaceImage(seg.id)
           : await this.#readSegImage(seg)
-        if (buffer?.length) buffers.push(buffer)
-      } catch {
-        // 单张取不到（直链过期、资源没留）就跳过，别把整条收藏打回去
+        if (!buffer?.length) throw new Error('没有取到图片数据')
+        if (buffer.length > MAX_FILE) throw new GuobaError(FILE_TOO_LARGE)
+        if (!sniffMime(buffer)) throw new GuobaError(BAD_IMAGE)
+        buffers.push(buffer)
+      } catch (err) {
+        // 只把需要用户换图的提示带到面板，网络和资源错误留在日志，别一律误报过期
+        if (err instanceof GuobaError && (err.message === FILE_TOO_LARGE || err.message === BAD_IMAGE)) {
+          failureMessage = err.message
+        }
+        logger.warn(`[Guoba] 收藏消息表情失败（消息 ${messageId ?? ''}，类型 ${seg.type}）：${err?.stack ?? err}`)
       }
     }
-    if (!buffers.length) throw new GuobaError('这些表情都取不到了，链接可能已过期')
+    if (!buffers.length) throw new GuobaError(failureMessage)
     return this.#saveBuffers(buffers)
   }
 
@@ -358,9 +369,9 @@ export class ChatEmojiService extends Service {
     }
     if (!res.ok) throw new GuobaError(`表情下载失败：HTTP ${res.status}`)
     const len = Number(res.headers.get('content-length'))
-    if (len && len > MAX_FILE) throw new GuobaError('表情图片过大')
+    if (len && len > MAX_FILE) throw new GuobaError(FILE_TOO_LARGE)
     const buffer = Buffer.from(await res.arrayBuffer())
-    if (buffer.length > MAX_FILE) throw new GuobaError('表情图片过大')
+    if (buffer.length > MAX_FILE) throw new GuobaError(FILE_TOO_LARGE)
     return buffer
   }
 
@@ -370,7 +381,7 @@ export class ChatEmojiService extends Service {
     const added = []
     for (const buffer of buffers) {
       if (!buffer?.length) continue
-      if (buffer.length > MAX_FILE) throw new GuobaError('单张表情不能超过 5MB')
+      if (buffer.length > MAX_FILE) throw new GuobaError(FILE_TOO_LARGE)
       const mime = sniffMime(buffer)
       const ext = MIME_EXT[mime]
       if (!ext) continue
