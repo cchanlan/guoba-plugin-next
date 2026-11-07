@@ -313,6 +313,7 @@ export default class CustomPageService extends Service {
       apiPath: apiPathOf(owner),
       title: String(title),
       icon: def.icon || '',
+      usePluginIcon: scope.source === 'plugin' && def.usePluginIcon === true,
       html: def.html || '',
       src: def.src || '',
       style: def.style || '',
