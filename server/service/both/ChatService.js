@@ -4,7 +4,7 @@ import {lookup as dnsLookup} from 'node:dns/promises'
 import {autowired, GuobaError, Service} from '#guoba.framework'
 import {AssetStore, flattenOneBot, normalizeMsg, toBase64File} from './model/msgSegment.js'
 import {groupAvatarUrl, userAvatarUrl} from './model/avatar.js'
-import {listBots, ensureContacts} from './model/bots.js'
+import {listBots, ensureContacts, botOf, listContacts, hasContact} from './model/bots.js'
 import {getNote, isPinned, setPinned, isBlacklisted, setBlacklisted, setNote} from './model/chatPrefs.js'
 import {listTempSessions, rememberTempSession} from './model/chatTempSessions.js'
 import {mirrorGroupBlacklist} from './model/qqbotBlacklist.js'
@@ -605,9 +605,8 @@ export default class ChatService extends Service {
      * 不存的话重启就没了。好友表可能还没加载，先记下来，展示时再按好友表过滤。
      */
     if (type === 'friend' && !self) {
-      const friends = Bot.getFriendMap?.()
-      const isFriend = friends instanceof Map
-        && (friends.has(Number(id)) || friends.has(id))
+      // 按收到消息的这个账号判断：同一个人可能只是别的号的好友，拿全局表会漏记本号的临时会话
+      const isFriend = hasContact(botId, 'friend', id)
       if (!isFriend) {
         const active = this.#sessions.get(`${botId}:friend:${id}`)
         rememberTempSession({
@@ -1081,7 +1080,7 @@ export default class ChatService extends Service {
       if (!qqbot) return ''
       // 私聊：直接问好友表，别指望对方发过言
       if (!groupId) {
-        const friend = textOf(this.#friendEntry(String(uin)), USER_INFO_FIELDS.name)
+        const friend = textOf(this.#friendEntry(String(uin), botId), USER_INFO_FIELDS.name)
         if (friend) return friend
       }
       return this.#names.get(String(uin)) || ''
@@ -1300,12 +1299,17 @@ export default class ChatService extends Service {
     const isGroup = type !== 'friend'
     // 适配器连接时那次拉取可能没成功，缓存空着就先补一次，见 ensureContacts
     await ensureContacts(isGroup ? 'group' : 'friend', botId)
-    const map = (isGroup ? Bot.getGroupMap?.() : Bot.getFriendMap?.()) ?? new Map()
+    /**
+     * 按账号展开，不能用 `Bot.getGroupMap()` / `getFriendMap()`：它们是 `Map<号码, 信息>`，
+     * 几个号都在同一个群（或加了同一个人）时号码相同，后遍历到的账号会把前一个顶掉 ——
+     * 那个群就只在其中一个号下面出现，其余号里直接搜不到。
+     */
+    const contacts = listContacts(isGroup ? 'group' : 'friend')
     const kw = String(keyword ?? '').trim().toLowerCase()
     const wantBot = String(botId ?? '').trim()
 
     const list = []
-    for (const [id, info] of map) {
+    for (const [id, info] of contacts) {
       const owner = String(info?.bot_id ?? '')
       if (wantBot && owner !== wantBot) continue
       const sid = String(id)
@@ -1364,11 +1368,14 @@ export default class ChatService extends Service {
           unread: active.unread,
         })
       }
+      // 好友去重按账号：这个人可能只是别的号的好友，不能因此把本号的临时会话吞掉
+      const friendKeys = new Set()
+      for (const [id, info] of contacts) friendKeys.add(`${info.bot_id}:${id}`)
       for (const [activeKey, item] of tempMap) {
         const sid = String(item.userId ?? '')
         if (!sid) continue
-        // 已经是好友的交给上面的好友表那一路，这里不重复
-        if (map.has(Number(sid)) || map.has(sid)) continue
+        // 已经是这个账号的好友了，交给上面好友表那一路，这里不重复
+        if (friendKeys.has(`${item.botId}:${sid}`)) continue
         const name = item.name || this.#names.get(sid) || sid
         if (kw && !name.toLowerCase().includes(kw) && !sid.includes(kw)) continue
         list.push({
@@ -2209,7 +2216,7 @@ export default class ChatService extends Service {
     const owner = String(botId ?? '').trim()
     const bot = this.#bot(owner)
     const key = sessionKey(owner, 'group', gid)
-    const entry = this.#groupEntry(gid)
+    const entry = this.#groupEntry(gid, owner)
     const qqbot = isQQBot(bot)
 
     let live = null
@@ -2309,7 +2316,7 @@ export default class ChatService extends Service {
     const owner = String(botId ?? '').trim()
     const bot = this.#bot(owner)
     const key = sessionKey(owner, 'friend', uid)
-    const entry = this.#friendEntry(uid)
+    const entry = this.#friendEntry(uid, owner)
     const qqbot = isQQBot(bot)
 
     let live = null
@@ -2558,9 +2565,10 @@ export default class ChatService extends Service {
     return data
   }
 
-  /** 面板记录的那份好友信息（`bot.fl` 里的一条） */
-  #friendEntry(uid) {
-    const map = Bot.getFriendMap?.()
+  /** 面板记录的那份好友信息（`bot.fl` 里的一条）；指定账号时只读它自己那份 */
+  #friendEntry(uid, botId = '') {
+    // 多号加了同一个人时全局表只剩最后那个号的条目，按账号读才拿得对
+    const map = botId ? botOf(botId)?.fl : Bot.getFriendMap?.()
     if (!(map instanceof Map)) return null
     // 键可能是数字（OneBot 的 QQ 号）也可能是字符串（QQBot 的复合 id），两边都试一下
     const entry = map.get(Number(uid) || uid) ?? map.get(String(uid))
@@ -2674,9 +2682,10 @@ export default class ChatService extends Service {
     return {key, blacklisted: !!blacklisted, saved, mirrored, note}
   }
 
-  /** 面板记录的那份群信息（`bot.gl` 里的一条） */
-  #groupEntry(gid) {
-    const map = Bot.getGroupMap?.()
+  /** 面板记录的那份群信息（`bot.gl` 里的一条）；指定账号时只读它自己那份 */
+  #groupEntry(gid, botId = '') {
+    // 多号同群时全局表只剩最后那个号的条目，按账号读才拿得对
+    const map = botId ? botOf(botId)?.gl : Bot.getGroupMap?.()
     if (!(map instanceof Map)) return null
     const entry = map.get(Number(gid) || gid)
     return entry && typeof entry === 'object' ? entry : null

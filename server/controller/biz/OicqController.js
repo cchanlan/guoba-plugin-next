@@ -1,7 +1,7 @@
 import {autowired, Pager, Result} from '#guoba.framework'
 import {ApiController} from '#guoba.platform'
 import {groupAvatarUrl, userAvatarUrl} from '../../service/both/model/avatar.js'
-import {ensureContacts, listBots} from '../../service/both/model/bots.js'
+import {ensureContacts, listBots, listContacts} from '../../service/both/model/bots.js'
 
 /** QQ相关操作 */
 export class OicqController extends ApiController {
@@ -93,7 +93,11 @@ export class OicqController extends ApiController {
 
     // 缓存空着先补一次，否则协议端刚起来时列表是空的（见 ensureContacts）
     await ensureContacts('group', bot_id)
-    let groupList = Bot.getGroupMap?.() || Bot.getGroupList()
+    // 指定账号时直接展开它自己的那份：全局 map 是多号合并去重的 `Map<群号, 信息>`，
+    // 几个号都在同一个群时只剩最后那个号的条目，按账号滤就一无所获
+    let groupList = bot_id
+      ? listContacts('group').filter(([, it]) => String(it.bot_id) === String(bot_id))
+      : Bot.getGroupMap?.() || Bot.getGroupList()
     let list = []
     let filter = (_) => true
     // 根据 group_id 模糊查询
@@ -142,7 +146,10 @@ export class OicqController extends ApiController {
     pageSize = !pageSize ? 10 : Number.parseInt(pageSize)
 
     await ensureContacts('friend', bot_id)
-    let friendList = Bot.getFriendMap?.() || Bot.getFriendList()
+    // 同 queryGroupList：指定账号时用按账号展开的那份，别读合并去重的全局表
+    let friendList = bot_id
+      ? listContacts('friend').filter(([, it]) => String(it.bot_id) === String(bot_id))
+      : Bot.getFriendMap?.() || Bot.getFriendList()
     let list = []
     let filter = (_) => true
     // 根据 qq 模糊查询

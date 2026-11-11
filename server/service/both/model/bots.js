@@ -345,3 +345,54 @@ export function listBots() {
 export function mainBot() {
   return listBots().find((it) => !isFakeAccount(it.uin))
 }
+
+/**
+ * 账号对应的 bot 实例。
+ *
+ * V3 单账号下没有 `Bot.bots`，Bot 自己就是那个账号（判据同 {@link listBots}）。
+ */
+export function botOf(uin) {
+  const botId = String(uin ?? '').trim()
+  if (!botId) return null
+  return Bot?.bots?.[botId] ?? (String(Bot?.uin) === botId ? Bot : null)
+}
+
+/**
+ * 按账号展开的好友 / 群条目，`[id, 信息]` 数组，信息里补好 `bot_id`。
+ *
+ * 不能用 `Bot.getGroupMap()` / `getFriendMap()`：它们是 `Map<号码, 信息>`，几个账号都在
+ * 同一个群（或加了同一个人）时号码一样只能留一条，后遍历到的账号把前一个顶掉 ——
+ * 表现就是那个群只在其中一个号下面出现，其余号里直接没有。
+ *
+ * 这里按账号各读各的 `bot.gl` / `bot.fl`，同一个号码有多少个账号就有多少条。
+ *
+ * @param kind 'group' | 'friend'
+ */
+export function listContacts(kind = 'group') {
+  const isGroup = kind !== 'friend'
+  const out = []
+  for (const {uin} of listBots()) {
+    const cache = isGroup ? botOf(uin)?.gl : botOf(uin)?.fl
+    if (!(cache instanceof Map)) continue
+    for (const [id, info] of cache) {
+      if (!info || typeof info !== 'object') continue
+      // 缓存条目本身不带 bot_id，补上之后形状跟 getGroupMap 拼出来的那份一致
+      out.push([id, {...info, bot_id: uin}])
+    }
+  }
+  return out
+}
+
+/** 这个账号自己的好友 / 群表里有没有这一条 */
+export function hasContact(botId, kind, id) {
+  const cache = kind === 'friend' ? botOf(botId)?.fl : botOf(botId)?.gl
+  if (!(cache instanceof Map)) {
+    // 拿不到账号实例时退回全局表：宁可判成「是」，也别把本号真实的临时会话漏记
+    const global = kind === 'friend' ? Bot.getFriendMap?.() : Bot.getGroupMap?.()
+    if (!(global instanceof Map)) return false
+    const sid = Number(id) || id
+    return global.has(sid) || global.has(String(sid))
+  }
+  const sid = Number(id) || id
+  return cache.has(sid) || cache.has(String(sid))
+}
