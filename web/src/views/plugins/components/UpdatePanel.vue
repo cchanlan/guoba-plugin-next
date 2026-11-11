@@ -222,7 +222,7 @@ defineExpose({ openUpdate, startCheck })
           type="success"
           show-icon
           class="g-pu-alert"
-          message="所有插件都是最新的"
+          :message="task?.total === 1 ? '这个插件已是最新' : '所有插件都是最新的'"
         />
         <div v-else class="g-pu-result">
           <div v-for="it in checkedBehind" :key="it.name" class="g-pu-res-row">

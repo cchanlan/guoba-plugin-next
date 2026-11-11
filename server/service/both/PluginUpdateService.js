@@ -148,7 +148,9 @@ export class PluginUpdateService extends Service {
       Array.from({length: Math.min(FETCH_CONCURRENCY, queue.length)}, () => worker()),
     )
     const behind = items.filter((it) => it.behind > 0)
-    this.#log(behind.length ? `${behind.length} 个插件有更新` : '所有插件都是最新的')
+    // 单查一个时上面已经有「某某：已是最新」，再来一句总结只会重复
+    if (behind.length) this.#log(`${behind.length} 个插件有更新`)
+    else if (targets.length > 1) this.#log('所有插件都是最新的')
     this.#finishTask({items, checkedAt: Date.now()})
   }
 

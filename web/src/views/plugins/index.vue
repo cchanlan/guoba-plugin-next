@@ -432,7 +432,7 @@ onMounted(() => {
           </div>
 
           <div class="g-plugin-actions">
-            <!-- 按钮最多能凑到 5 个（配置 / 更新 / 日志 / 卸载 / 仓库），手机上要能换行。
+            <!-- 按钮最多能凑到 6 个（配置 / 检查更新 / 更新 / 日志 / 卸载 / 仓库），手机上要能换行。
                  用普通 flex 而非 ant Space：Space 开 wrap 会塞内联 margin-bottom:-6px 做行距，
                  换行后两排按钮会叠在一起 -->
             <div class="g-plugin-btns">
@@ -451,6 +451,13 @@ onMounted(() => {
                 @click="installFromCard(p)"
               >
                 安装
+              </Button>
+              <Button
+                v-if="p.installed && gitOf(p)?.isRepo"
+                size="small"
+                @click="updatePanel?.startCheck([gitOf(p)!.name])"
+              >
+                检查更新
               </Button>
               <Button
                 v-if="gitOf(p)?.behind"
