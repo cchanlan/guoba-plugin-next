@@ -96,6 +96,10 @@ export async function createServer({isInit}) {
 
 function appCreated(guobaApp) {
   const {app} = guobaApp
+  // 老锅巴的插件靠 globalThis.Guoba.app 往面板上挂自己的中间件
+  // （douyin-auto-spark 的模板编辑器就靠它注入脚本、提供图片上传接口），
+  // 1.x 里是这么暴露的，这里保持一致
+  globalThis.Guoba = Object.assign(globalThis.Guoba || {}, {app})
   // 外网闸门：默认只让局域网打开面板，必须排在所有锅巴路由之前
   installLanGuard(app, [mountRootWithSlash, realRoot, mountRoot])
   // 重定向根路径，用于自定义挂载路径路径

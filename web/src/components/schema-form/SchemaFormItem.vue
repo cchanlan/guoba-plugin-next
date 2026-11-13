@@ -78,6 +78,25 @@ const componentProps = computed(() => {
 const itemName = computed(() =>
   props.schema.field ? props.schema.field.split('.') : undefined,
 )
+
+/**
+ * 老锅巴的自定义组件只发 change、不发 update:value（比如插件替换掉的 InputTextArea），
+ * 这类组件用 change 把值写回；组件自己声明了 update:value 的按 v-model 处理。
+ */
+const legacyChange = computed(() => {
+  const c: any = comp.value
+  const emits = c?.emits
+  if (!emits) return true
+  const names = Array.isArray(emits) ? emits : Object.keys(emits)
+  return !names.includes('update:value')
+})
+
+/** antd 原生组件的 change 载荷是 Event / 文件对象这类，只有原始值才当成新值 */
+function onLegacyChange(payload: any) {
+  const type = typeof payload
+  if (type !== 'string' && type !== 'number' && type !== 'boolean') return
+  fieldValue.value = payload
+}
 </script>
 
 <template>
@@ -126,6 +145,7 @@ const itemName = computed(() =>
       :is="comp"
       v-model:value="fieldValue"
       v-bind="componentProps"
+      v-on="legacyChange ? { change: onLegacyChange } : {}"
     />
     <div v-else-if="isUnknown" class="g-unknown">
       当前面板暂不支持组件「{{ schema.component }}」，该项已跳过
