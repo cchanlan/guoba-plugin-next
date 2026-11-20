@@ -69,6 +69,17 @@ export default class PluginController extends ApiController {
     // 单个插件的提交历史，兼作「选版本回滚」的选项来源
     this.get('/update/log', this.updateLog)
     this.post('/update/rollback', this.updateRollback)
+    // remote 地址：看和改 .git/config 里的 remote url
+    this.get('/update/remotes', this.updateRemotes)
+    this.post('/update/remote', this.updateRemote)
+    this.post('/update/remote/add', this.updateRemoteAdd)
+    this.post('/update/remote/remove', this.updateRemoteRemove)
+    // 推送地址：一个 remote 可以挂多条（一次 push 推到多个平台）
+    this.post('/update/remote/pushurl/add', this.updateRemotePushAdd)
+    this.post('/update/remote/pushurl/remove', this.updateRemotePushRemove)
+    // 备用拉取地址：只有第一条 url 会用于 fetch，其余只是记录
+    this.post('/update/remote/url/add', this.updateRemoteUrlAdd)
+    this.post('/update/remote/url/remove', this.updateRemoteUrlRemove)
 
     // 获取plugin icon（直接显示图片）
     this.get('/s/:pluginName/icon', this.getPluginIcon)
@@ -119,6 +130,61 @@ export default class PluginController extends ApiController {
     const {name, commit, discardLocal} = req.body ?? {}
     const data = await this.pluginUpdateService.rollback(name, {commit, discardLocal})
     return Result.ok(data, `已${data.back ? '回滚' : '切换'}到 ${data.commit}，重启后生效`)
+  }
+
+  /** 一个插件配的 remote 列表（不联网，纯读 .git/config） */
+  async updateRemotes(req) {
+    const {name} = req.query ?? {}
+    return Result.ok(await this.pluginUpdateService.remotes(name))
+  }
+
+  /** 改某个 remote 的仓库地址 */
+  async updateRemote(req) {
+    const {name, remote, url} = req.body ?? {}
+    const data = await this.pluginUpdateService.setRemoteUrl(name, remote, url)
+    return Result.ok(data, `已保存 ${data.remote} 的新地址`)
+  }
+
+  /** 新增一个 remote */
+  async updateRemoteAdd(req) {
+    const {name, remote, url} = req.body ?? {}
+    const data = await this.pluginUpdateService.addRemote(name, remote, url)
+    return Result.ok(data, `已添加远端 ${data.remote}`)
+  }
+
+  /** 删除一个 remote */
+  async updateRemoteRemove(req) {
+    const {name, remote} = req.body ?? {}
+    const data = await this.pluginUpdateService.removeRemote(name, remote)
+    return Result.ok(data, `已删除远端 ${data.remote}`)
+  }
+
+  /** 给 remote 追加一条推送地址 */
+  async updateRemotePushAdd(req) {
+    const {name, remote, url} = req.body ?? {}
+    const data = await this.pluginUpdateService.addPushUrl(name, remote, url)
+    return Result.ok(data, `已添加推送地址`)
+  }
+
+  /** 按序号删掉一条推送地址 */
+  async updateRemotePushRemove(req) {
+    const {name, remote, index} = req.body ?? {}
+    const data = await this.pluginUpdateService.removePushUrl(name, remote, index)
+    return Result.ok(data, `已删除推送地址`)
+  }
+
+  /** 给 remote 追加一条备用拉取地址 */
+  async updateRemoteUrlAdd(req) {
+    const {name, remote, url} = req.body ?? {}
+    const data = await this.pluginUpdateService.addFetchUrl(name, remote, url)
+    return Result.ok(data, '已添加备用拉取地址')
+  }
+
+  /** 按序号删掉一条备用拉取地址 */
+  async updateRemoteUrlRemove(req) {
+    const {name, remote, index} = req.body ?? {}
+    const data = await this.pluginUpdateService.removeFetchUrl(name, remote, index)
+    return Result.ok(data, '已删除备用拉取地址')
   }
 
   /**

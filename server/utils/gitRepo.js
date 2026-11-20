@@ -110,6 +110,101 @@ export function isGitRepo(dir) {
   }
 }
 
+/** `git config --get-regexp` 的一行：`remote.<name>.<key> <value>` */
+const REMOTE_KEY_RE = /^remote\.(.+)\.(url|pushurl|fetch)\s+(.*)$/
+
+/**
+ * 把 url 里的密码部分打码：`https://user:token@host/x` → `https://user:***@host/x`。
+ * 只给 pushurl 这种只读展示用 —— pushurl 里常带着三平台的推送令牌，
+ * 面板截图发给别人时不能把令牌一起发出去。
+ */
+export function maskUrlCredential(url) {
+  return String(url).replace(/^([a-z][\w+.-]*:\/\/)([^/@\s]+)@/i, (_, scheme, userinfo) => {
+    const user = userinfo.split(':')[0]
+    return user ? `${scheme}${user}:***@` : `${scheme}***@`
+  })
+}
+
+/**
+ * 读仓库配的全部 remote（名字 / url / fetch refspec / push url）。**不联网**，纯读 `.git/config`。
+ *
+ * 用 `git config --get-regexp` 一次拿全，而不是 `git remote -v`：后者给不了 fetch refspec，
+ * 而「推送地址和拉取地址不一样」（`remote set-url --add --push`）恰恰是要展示的东西。
+ * remote 名字里允许有点，所以按**最后一个** `.url/.fetch/.pushurl` 段切。
+ *
+ * @param {string} dir 仓库目录
+ * @param {object} [opts]
+ * @param {boolean} [opts.mask] pushurl / 备用 url 里的令牌要不要打码。展示要打码（截图不外泄），
+ *   按地址删除时要用真值，所以删除路径要传 false。`url`（第一条，编辑框用）始终是真值
+ */
+export async function readRemotes(dir, {mask = true} = {}) {
+  const res = await runGit(['config', '--get-regexp', '^remote\\.'], {cwd: dir, timeout: 15000})
+  // 一个 remote 都没配时 git 的退出码是 1（stderr 为空），不是错误
+  if (!res.ok) return []
+  const map = new Map()
+  for (const line of String(res.stdout ?? '').split(/\r?\n/)) {
+    const m = line.match(REMOTE_KEY_RE)
+    if (!m) continue
+    const [, name, key, value] = m
+    const item = map.get(name) ?? {name, url: '', urls: [], fetch: [], pushurl: []}
+    if (key === 'url') {
+      // `remote set-url --add` 能配多条 url，但 git fetch 只认**第一条**，
+      // 其余只是记录（没配 pushurl 时 push 才用得上全部）。`url` 给编辑框，`urls` 给列表
+      item.urls.push(mask ? maskUrlCredential(value.trim()) : value.trim())
+      if (!item.url) item.url = value.trim()
+    } else if (key === 'pushurl') {
+      item.pushurl.push(mask ? maskUrlCredential(value.trim()) : value.trim())
+    } else {
+      item.fetch.push(value.trim())
+    }
+    map.set(name, item)
+  }
+  return [...map.values()]
+}
+
+/** 改一个 remote 的地址。remote 不存在时 git 自己会报错，正好挡住名字打错 */
+export async function setRemoteUrl(dir, name, url) {
+  return runGit(['remote', 'set-url', name, url], {cwd: dir, timeout: 15000})
+}
+
+/** 新增一个 remote，fetch refspec 由 git 自动配成 `+refs/heads/*:refs/remotes/<name>/*` */
+export async function addRemote(dir, name, url) {
+  return runGit(['remote', 'add', name, url], {cwd: dir, timeout: 15000})
+}
+
+/** 删掉一个 remote，连带它的 pushurl 配置一起删 */
+export async function removeRemote(dir, name) {
+  return runGit(['remote', 'remove', name], {cwd: dir, timeout: 15000})
+}
+
+/**
+ * 给一个 remote 追加推送地址（`remote set-url --add --push`）。
+ * 一旦配了 pushurl，`git push` 只走这些地址，`url` 只用于 fetch。
+ */
+export async function addPushUrl(dir, name, url) {
+  return runGit(['remote', 'set-url', '--add', '--push', name, url], {cwd: dir, timeout: 15000})
+}
+
+/**
+ * 删掉一条推送地址。git 要求按**原始地址**精确匹配，所以调用方必须传没打码的值。
+ */
+export async function removePushUrl(dir, name, url) {
+  return runGit(['remote', 'set-url', '--delete', '--push', name, url], {cwd: dir, timeout: 15000})
+}
+
+/**
+ * 给 remote 追加一条拉取地址（`remote set-url --add`，不带 --push）。
+ * 注意 git fetch 只用第一条 url，追加的这些不会自动顶上。
+ */
+export async function addFetchUrl(dir, name, url) {
+  return runGit(['remote', 'set-url', '--add', name, url], {cwd: dir, timeout: 15000})
+}
+
+/** 删掉一条非首位的拉取地址。同样要原始值精确匹配 */
+export async function removeFetchUrl(dir, name, url) {
+  return runGit(['remote', 'set-url', '--delete', name, url], {cwd: dir, timeout: 15000})
+}
+
 /** `git log` 的一条。解析单独抽出来是为了能不建仓库就测 */
 export function parseLogLines(stdout) {
   const out = []

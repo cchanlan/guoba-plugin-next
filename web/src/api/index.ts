@@ -320,6 +320,75 @@ export const apiPluginUpdateRollback = (body: {
   '/plugin/update/rollback', body, { showSuccess: true },
 )
 
+/** 一个 git remote 的配置（对应 .git/config 里的 remote.<name>.*） */
+export interface PluginRemote {
+  name: string
+  /** 第一条拉取地址（fetch 用它），编辑框显示的是真值 */
+  url: string
+  /** 全部拉取地址；第 2 条起是备用，git 不会自动切过去。展示用，可能已打码 */
+  urls: string[]
+  /** fetch refspec，例如 +refs/heads/*:refs/remotes/origin/* */
+  fetch: string[]
+  /** 单独配的推送地址（remote set-url --add --push），没有就是空数组 */
+  pushurl: string[]
+}
+
+/** 一个插件的全部 remote */
+export interface PluginRemotes {
+  name: string
+  branch: string
+  detached: boolean
+  /** 当前分支上游挂在哪个 remote 上 */
+  remote: string
+  remotes: PluginRemote[]
+}
+
+/** 插件的 remote 列表，不联网 */
+export const apiPluginRemotes = (name: string) =>
+  get<PluginRemotes>('/plugin/update/remotes', { name })
+
+/** 改一个 remote 的仓库地址 */
+export const apiPluginSetRemote = (body: { name: string; remote: string; url: string }) =>
+  post<{ name: string; remote: string; url: string }>('/plugin/update/remote', body, {
+    showSuccess: true,
+  })
+
+/** 新增一个 remote */
+export const apiPluginAddRemote = (body: { name: string; remote: string; url: string }) =>
+  post<{ name: string; remote: string; url: string }>('/plugin/update/remote/add', body, {
+    showSuccess: true,
+  })
+
+/** 删除一个 remote */
+export const apiPluginRemoveRemote = (body: { name: string; remote: string }) =>
+  post<{ name: string; remote: string; wasUpstream: boolean }>('/plugin/update/remote/remove', body, {
+    showSuccess: true,
+  })
+
+/** 给 remote 追加一条推送地址（可以带账号令牌） */
+export const apiPluginAddPushUrl = (body: { name: string; remote: string; url: string }) =>
+  post<{ name: string; remote: string; url: string }>('/plugin/update/remote/pushurl/add', body, {
+    showSuccess: true,
+  })
+
+/** 按序号删掉一条推送地址 */
+export const apiPluginRemovePushUrl = (body: { name: string; remote: string; index: number }) =>
+  post<{ name: string; remote: string; removed: string }>(
+    '/plugin/update/remote/pushurl/remove', body, { showSuccess: true },
+  )
+
+/** 给 remote 追加一条备用拉取地址（git fetch 仍然只用第一条） */
+export const apiPluginAddFetchUrl = (body: { name: string; remote: string; url: string }) =>
+  post<{ name: string; remote: string; url: string }>('/plugin/update/remote/url/add', body, {
+    showSuccess: true,
+  })
+
+/** 按序号删掉一条备用拉取地址（第一条不给删） */
+export const apiPluginRemoveFetchUrl = (body: { name: string; remote: string; index: number }) =>
+  post<{ name: string; remote: string; removed: string }>(
+    '/plugin/update/remote/url/remove', body, { showSuccess: true },
+  )
+
 export const apiGetPluginConfig = (pluginName: string) =>
   get<any>(`/plugin/s/${encodeURIComponent(pluginName)}/config`)
 

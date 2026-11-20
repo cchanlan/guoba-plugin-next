@@ -4,7 +4,10 @@ import {spawn} from 'node:child_process'
 import {GuobaError, Service} from '#guoba.framework'
 import {_paths} from '#guoba.platform'
 import {
-  fetchRepo, firstLine, isAncestor, pendingCommits, readRepoInfo, recentCommits, resetTo, resolveCommit,
+  addFetchUrl as gitAddFetchUrl, addPushUrl as gitAddPushUrl, addRemote as gitAddRemote, fetchRepo,
+  firstLine, isAncestor, isGitRepo, maskUrlCredential, pendingCommits, readRemotes, readRepoInfo,
+  recentCommits, removeFetchUrl as gitRemoveFetchUrl, removePushUrl as gitRemovePushUrl,
+  removeRemote as gitRemoveRemote, resetTo, resolveCommit, setRemoteUrl as gitSetRemoteUrl,
 } from '../../utils/gitRepo.js'
 import {UPDATE_MODES, updateRepo} from '../../utils/pluginUpdateFlow.js'
 import {installPluginDeps, PLUGIN_NAME_RE} from '../../utils/pluginDeps.js'
@@ -359,6 +362,244 @@ export class PluginUpdateService extends Service {
     const short = target.slice(0, 7)
     logger.mark(`[Guoba] 插件 ${key} 已${back ? '回滚' : '切换'}到 ${short}`)
     return {name: key, commit: short, from: info.shortCommit, back, needRestart: true}
+  }
+
+  // ------------------------------------------------------------------ remote
+
+  /**
+   * 一个插件配的 remote 列表，用来在面板上改仓库地址（原来只能进终端 `git remote set-url`）。
+   * 不联网，纯读 `.git/config`。
+   *
+   * @param {string} name 插件目录名
+   */
+  async remotes(name) {
+    const key = String(name ?? '').trim()
+    const dir = this.#dirOf(key)
+    if (!isGitRepo(dir)) throw new GuobaError('不是 git 仓库，没有 remote 可改')
+    const info = await readRepoInfo(dir)
+    return {
+      name: key,
+      branch: info.branch,
+      detached: info.detached,
+      // 当前分支的上游挂在哪个 remote 上 —— 改它的地址会直接影响「检查更新」
+      remote: info.remote,
+      remotes: await readRemotes(dir),
+    }
+  }
+
+  /**
+   * 改一个 remote 的仓库地址。只动 `.git/config`，不 fetch、不碰工作区。
+   *
+   * @param {string} name 插件目录名
+   * @param {string} remote remote 名（origin / gitee / gitcode…）
+   * @param {string} url 新地址
+   */
+  async setRemoteUrl(name, remote, url) {
+    const key = String(name ?? '').trim()
+    const dir = this.#dirOf(key)
+    if (!isGitRepo(dir)) throw new GuobaError('不是 git 仓库，没有 remote 可改')
+    const remoteName = String(remote ?? '').trim()
+    const cleanUrl = String(url ?? '').trim()
+    if (!remoteName) throw new GuobaError('remote 名不能为空')
+    if (!cleanUrl) throw new GuobaError('仓库地址不能为空')
+    // 空白和控制字符会被 git config 原样写进去，下次 fetch 就因为一个看不见的换行报错
+    if (/[\s\u0000-\u001f]/.test(cleanUrl)) throw new GuobaError('仓库地址里不能有空白字符')
+    const list = await readRemotes(dir)
+    if (!list.some((r) => r.name === remoteName)) {
+      throw new GuobaError(`没有名为 ${remoteName} 的 remote`)
+    }
+    const res = await gitSetRemoteUrl(dir, remoteName, cleanUrl)
+    if (!res.ok) {
+      throw new GuobaError(`保存失败：${firstLine(res.stderr) || `git 退出码 ${res.code}`}`)
+    }
+    logger.mark(`[Guoba] 插件 ${key} 的 remote ${remoteName} 已改为 ${cleanUrl}`)
+    return {name: key, remote: remoteName, url: cleanUrl}
+  }
+
+  /** remote 名的合法字符：git 允许的更宽，但面板里只放行这套，省得建出奇怪的 section 名 */
+  static REMOTE_NAME_RE = /^[A-Za-z0-9._-]+$/
+
+  /**
+   * 新增一个 remote（`git remote add`）。fetch refspec 由 git 自动配好，
+   * 之后它就能被「检查更新」当作上游的候选。
+   *
+   * @param {string} name 插件目录名
+   * @param {string} remote 新 remote 的名字（gitee / gitcode…）
+   * @param {string} url 仓库地址
+   */
+  async addRemote(name, remote, url) {
+    const key = String(name ?? '').trim()
+    const dir = this.#dirOf(key)
+    if (!isGitRepo(dir)) throw new GuobaError('不是 git 仓库，不能加 remote')
+    const remoteName = String(remote ?? '').trim()
+    const cleanUrl = String(url ?? '').trim()
+    if (!remoteName) throw new GuobaError('remote 名不能为空')
+    if (!PluginUpdateService.REMOTE_NAME_RE.test(remoteName)) {
+      throw new GuobaError('remote 名只能用字母、数字、点、下划线和短横线')
+    }
+    if (!cleanUrl) throw new GuobaError('仓库地址不能为空')
+    if (/[\s\u0000-\u001f]/.test(cleanUrl)) throw new GuobaError('仓库地址里不能有空白字符')
+    const list = await readRemotes(dir)
+    if (list.some((r) => r.name === remoteName)) {
+      throw new GuobaError(`已经有名为 ${remoteName} 的 remote 了`)
+    }
+    const res = await gitAddRemote(dir, remoteName, cleanUrl)
+    if (!res.ok) {
+      throw new GuobaError(`添加失败：${firstLine(res.stderr) || `git 退出码 ${res.code}`}`)
+    }
+    logger.mark(`[Guoba] 插件 ${key} 新增 remote ${remoteName} → ${cleanUrl}`)
+    return {name: key, remote: remoteName, url: cleanUrl}
+  }
+
+  /**
+   * 删掉一个 remote（`git remote remove`），它的 pushurl 配置一起走。
+   * 只动 `.git/config`，已经拉下来的代码和远端引用不受影响。
+   *
+   * @param {string} name 插件目录名
+   * @param {string} remote 要删的 remote 名
+   */
+  async removeRemote(name, remote) {
+    const key = String(name ?? '').trim()
+    const dir = this.#dirOf(key)
+    if (!isGitRepo(dir)) throw new GuobaError('不是 git 仓库，没有 remote 可删')
+    const remoteName = String(remote ?? '').trim()
+    if (!remoteName) throw new GuobaError('remote 名不能为空')
+    const list = await readRemotes(dir)
+    if (!list.some((r) => r.name === remoteName)) {
+      throw new GuobaError(`没有名为 ${remoteName} 的 remote`)
+    }
+    const info = await readRepoInfo(dir)
+    const res = await gitRemoveRemote(dir, remoteName)
+    if (!res.ok) {
+      throw new GuobaError(`删除失败：${firstLine(res.stderr) || `git 退出码 ${res.code}`}`)
+    }
+    const wasUpstream = info.remote === remoteName
+    logger.mark(`[Guoba] 插件 ${key} 已删除 remote ${remoteName}${wasUpstream ? '（它是当前分支的上游）' : ''}`)
+    return {name: key, remote: remoteName, wasUpstream}
+  }
+
+  /**
+   * 给 remote 追加一条推送地址（`remote set-url --add --push`）。
+   *
+   * 配了 pushurl 之后 `git push` 只走这些地址、`url` 只用于 fetch ——
+   * 主人那种「origin 挂 gitcode/github/gitee 三条一次推三平台」就是这么配的。
+   *
+   * @param {string} name 插件目录名
+   * @param {string} remote remote 名
+   * @param {string} url 推送地址，可以带账号令牌
+   */
+  async addPushUrl(name, remote, url) {
+    const key = String(name ?? '').trim()
+    const dir = this.#dirOf(key)
+    if (!isGitRepo(dir)) throw new GuobaError('不是 git 仓库，没有 remote 可改')
+    const remoteName = String(remote ?? '').trim()
+    const cleanUrl = String(url ?? '').trim()
+    if (!remoteName) throw new GuobaError('remote 名不能为空')
+    if (!cleanUrl) throw new GuobaError('推送地址不能为空')
+    if (/[\s\u0000-\u001f]/.test(cleanUrl)) throw new GuobaError('推送地址里不能有空白字符')
+    // 比对要用原始地址：展示层给的是打码后的，拿它比对永远不相等
+    const list = await readRemotes(dir, {mask: false})
+    const target = list.find((r) => r.name === remoteName)
+    if (!target) throw new GuobaError(`没有名为 ${remoteName} 的 remote`)
+    if (target.pushurl.includes(cleanUrl)) throw new GuobaError('这条地址已经在推送列表里了')
+    const res = await gitAddPushUrl(dir, remoteName, cleanUrl)
+    if (!res.ok) {
+      throw new GuobaError(`添加失败：${firstLine(res.stderr) || `git 退出码 ${res.code}`}`)
+    }
+    logger.mark(`[Guoba] 插件 ${key} 的 remote ${remoteName} 新增推送地址 ${maskUrlCredential(cleanUrl)}`)
+    return {name: key, remote: remoteName, url: maskUrlCredential(cleanUrl)}
+  }
+
+  /**
+   * 按序号删掉一条推送地址。
+   *
+   * 不按地址删：前端拿到的是打码值（`https://user:***@…`），`git remote set-url --delete`
+   * 又要求精确匹配原始地址，所以这里按索引回原始列表取真值再删。
+   *
+   * @param {string} name 插件目录名
+   * @param {string} remote remote 名
+   * @param {number} index 第几条（从 0 开始，按 `.git/config` 里的顺序）
+   */
+  async removePushUrl(name, remote, index) {
+    const key = String(name ?? '').trim()
+    const dir = this.#dirOf(key)
+    if (!isGitRepo(dir)) throw new GuobaError('不是 git 仓库，没有 remote 可改')
+    const remoteName = String(remote ?? '').trim()
+    if (!remoteName) throw new GuobaError('remote 名不能为空')
+    const list = await readRemotes(dir, {mask: false})
+    const target = list.find((r) => r.name === remoteName)
+    if (!target) throw new GuobaError(`没有名为 ${remoteName} 的 remote`)
+    const idx = Number(index)
+    if (!Number.isInteger(idx) || idx < 0 || idx >= target.pushurl.length) {
+      throw new GuobaError('推送地址序号不对，刷新后再试')
+    }
+    const url = target.pushurl[idx]
+    const res = await gitRemovePushUrl(dir, remoteName, url)
+    if (!res.ok) {
+      throw new GuobaError(`删除失败：${firstLine(res.stderr) || `git 退出码 ${res.code}`}`)
+    }
+    logger.mark(`[Guoba] 插件 ${key} 的 remote ${remoteName} 删除了推送地址 ${maskUrlCredential(url)}`)
+    return {name: key, remote: remoteName, removed: maskUrlCredential(url)}
+  }
+
+  /**
+   * 给 remote 追加一条备用拉取地址（`remote set-url --add`，不带 --push）。
+   *
+   * 必须知道：**git fetch 只会用第一条 url**，追加的这些不会自动顶上，
+   * 它的真实作用是记在配置里备查（没配 pushurl 时 push 会用到全部 url，这是 git 的老规则）。
+   *
+   * @param {string} name 插件目录名
+   * @param {string} remote remote 名
+   * @param {string} url 备用地址
+   */
+  async addFetchUrl(name, remote, url) {
+    const key = String(name ?? '').trim()
+    const dir = this.#dirOf(key)
+    if (!isGitRepo(dir)) throw new GuobaError('不是 git 仓库，没有 remote 可改')
+    const remoteName = String(remote ?? '').trim()
+    const cleanUrl = String(url ?? '').trim()
+    if (!remoteName) throw new GuobaError('remote 名不能为空')
+    if (!cleanUrl) throw new GuobaError('拉取地址不能为空')
+    if (/[\s\u0000-\u001f]/.test(cleanUrl)) throw new GuobaError('拉取地址里不能有空白字符')
+    const list = await readRemotes(dir, {mask: false})
+    const target = list.find((r) => r.name === remoteName)
+    if (!target) throw new GuobaError(`没有名为 ${remoteName} 的 remote`)
+    if (target.urls.includes(cleanUrl)) throw new GuobaError('这条地址已经在拉取列表里了')
+    const res = await gitAddFetchUrl(dir, remoteName, cleanUrl)
+    if (!res.ok) {
+      throw new GuobaError(`添加失败：${firstLine(res.stderr) || `git 退出码 ${res.code}`}`)
+    }
+    logger.mark(`[Guoba] 插件 ${key} 的 remote ${remoteName} 新增备用拉取地址 ${maskUrlCredential(cleanUrl)}`)
+    return {name: key, remote: remoteName, url: maskUrlCredential(cleanUrl)}
+  }
+
+  /**
+   * 删掉一条备用拉取地址。第一条是实际在用的，不给删 —— 想换拉取源就编辑它。
+   *
+   * @param {string} name 插件目录名
+   * @param {string} remote remote 名
+   * @param {number} index 第几条（从 0 开始，1 以上才允许删）
+   */
+  async removeFetchUrl(name, remote, index) {
+    const key = String(name ?? '').trim()
+    const dir = this.#dirOf(key)
+    if (!isGitRepo(dir)) throw new GuobaError('不是 git 仓库，没有 remote 可改')
+    const remoteName = String(remote ?? '').trim()
+    if (!remoteName) throw new GuobaError('remote 名不能为空')
+    const list = await readRemotes(dir, {mask: false})
+    const target = list.find((r) => r.name === remoteName)
+    if (!target) throw new GuobaError(`没有名为 ${remoteName} 的 remote`)
+    const idx = Number(index)
+    if (!Number.isInteger(idx) || idx < 1 || idx >= target.urls.length) {
+      throw new GuobaError('备用地址序号不对，刷新后再试')
+    }
+    const url = target.urls[idx]
+    const res = await gitRemoveFetchUrl(dir, remoteName, url)
+    if (!res.ok) {
+      throw new GuobaError(`删除失败：${firstLine(res.stderr) || `git 退出码 ${res.code}`}`)
+    }
+    logger.mark(`[Guoba] 插件 ${key} 的 remote ${remoteName} 删除了备用拉取地址 ${maskUrlCredential(url)}`)
+    return {name: key, remote: remoteName, removed: maskUrlCredential(url)}
   }
 
   // ------------------------------------------------------------------ 任务

@@ -23,6 +23,7 @@ import GIcon from '@/components/GIcon.vue'
 import PluginIcon from './components/PluginIcon.vue'
 import UpdatePanel from './components/UpdatePanel.vue'
 import GitLogModal from './components/GitLogModal.vue'
+import RemotesModal from './components/RemotesModal.vue'
 import {
   apiGetPlugins,
   apiInstallPlugin,
@@ -69,6 +70,7 @@ const counts = computed(() => ({
 
 const updatePanel = ref<InstanceType<typeof UpdatePanel> | null>(null)
 const gitLog = ref<InstanceType<typeof GitLogModal> | null>(null)
+const remotes = ref<InstanceType<typeof RemotesModal> | null>(null)
 /**
  * 插件目录的 git 状态，key 是小写目录名。
  * 卡片那边的 `name` 未必是目录名（插件可以在 guoba.support.js 里把自己叫「R插件」），
@@ -111,6 +113,12 @@ async function loadGit() {
 function openGitLog(p: PluginItem) {
   const info = gitOf(p)
   if (info) gitLog.value?.openLog(info.name)
+}
+
+/** 打开远端仓库：看 / 改 .git/config 里的 remote url */
+function openRemotes(p: PluginItem) {
+  const info = gitOf(p)
+  if (info) remotes.value?.openRemotes(info.name)
 }
 
 const list = computed(() => {
@@ -432,7 +440,7 @@ onMounted(() => {
           </div>
 
           <div class="g-plugin-actions">
-            <!-- 按钮最多能凑到 6 个（配置 / 检查更新 / 更新 / 日志 / 卸载 / 仓库），手机上要能换行。
+            <!-- 按钮最多能凑到 7 个（配置 / 检查更新 / 更新 / 日志 / 远端 / 卸载 / 仓库），手机上要能换行。
                  用普通 flex 而非 ant Space：Space 开 wrap 会塞内联 margin-bottom:-6px 做行距，
                  换行后两排按钮会叠在一起 -->
             <div class="g-plugin-btns">
@@ -474,6 +482,13 @@ onMounted(() => {
                 @click="openGitLog(p)"
               >
                 日志
+              </Button>
+              <Button
+                v-if="p.installed && gitOf(p)?.isRepo"
+                size="small"
+                @click="openRemotes(p)"
+              >
+                远端
               </Button>
               <Button
                 v-if="p.installed && (p.dir || p.name) !== 'miao-plugin'"
@@ -534,6 +549,9 @@ onMounted(() => {
       @refresh="loadGit"
       @check="(name) => updatePanel?.startCheck([name])"
     />
+
+    <!-- 远端仓库地址：看 / 改 .git/config 里的 remote url -->
+    <RemotesModal ref="remotes" @refresh="loadGit" />
   </div>
 </template>
 
