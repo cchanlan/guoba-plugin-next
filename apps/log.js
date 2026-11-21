@@ -1,5 +1,6 @@
 import {autowired} from '#guoba.framework'
-import {formatLogText, makeForwardMsg, mergeLogLines, renderLogImage} from '#guoba.utils'
+import {formatLogText, mergeLogLines, renderLogImage} from '#guoba.utils'
+import {sendLogMessage} from '../utils/logMessage.js'
 
 /**
  * 运行日志默认发多少条。
@@ -77,11 +78,8 @@ export class GuobaLog extends plugin {
 
     const title = isError ? '锅巴错误日志' : '锅巴日志'
     const res = await renderLogImage(items, {title})
-    if (res?.image) {
-      return this.reply(res.image)
-    }
-
-    // 渲染器不可用或出图失败，退回文本，日志本身不能因为出不了图就看不到
-    return this.reply(await makeForwardMsg(this.e, [formatLogText(items)], title))
+    const outcome = await sendLogMessage(payload => this.reply(payload), res?.image, formatLogText(items))
+    if (!outcome.ok) logger.warn(outcome.uncertain ? '[Guoba] 日志发送结果未确认' : '[Guoba] 图片和文字日志均发送失败')
+    return true
   }
 }

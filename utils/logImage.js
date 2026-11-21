@@ -2,6 +2,8 @@ import path from 'path'
 import {pathToFileURL} from 'url'
 import {_paths} from './paths.js'
 import {_version} from './package.js'
+import {formatLogDisplay, inlineLogJson, sliceLogText} from './logText.js'
+import {normalizeLogImage} from './logMessage.js'
 
 /**
  * 日志出图。
@@ -25,8 +27,7 @@ const RES_PATH = `${path.join(_paths.resources, 'fonts')}/`.replace(/\\/g, '/')
 const MAX_ROWS_PER_ITEM = 12
 /** 一条日志正文最多多少字符 */
 const MAX_TEXT_LEN = 1000
-/** 打码后填进去的字样，模板里有对应的高亮样式 */
-const CENSORED = '不给你看喵！'
+// 打码由 logText.js 统一处理，面板、图片与文字兜底使用相同口径。
 
 /** log4js 的级别名 → 徽章上显示的四字缩写，跟控制台里的 `%4.4p` 一致 */
 const LEVEL_TAGS = {
@@ -56,9 +57,9 @@ let cachedRenderer
  */
 export function mergeLogLines(lines, maxItems = 50) {
   const items = []
-  for (const line of Array.isArray(lines) ? lines : []) {
+  for (const line of Array.isArray(lines) ? lines.slice(-2000) : []) {
     if (!line) continue
-    const text = String(line.text ?? '')
+    const text = sliceLogText(line.text, 4096)
     const last = items[items.length - 1]
     if (line.cont && last) {
       last.message += `\n${text}`
@@ -77,14 +78,14 @@ export function mergeLogLines(lines, maxItems = 50) {
 
 /** 把过长的一条压到出图能承受的范围 */
 function clampItem(item) {
-  let message = maskSecrets(item.message)
+  let message = formatLogDisplay(item.message)
   const rows = message.split('\n')
   if (rows.length > MAX_ROWS_PER_ITEM) {
     const rest = rows.length - MAX_ROWS_PER_ITEM
     message = `${rows.slice(0, MAX_ROWS_PER_ITEM).join('\n')}\n…(另有 ${rest} 行未显示)`
   }
   if (message.length > MAX_TEXT_LEN) {
-    message = `${message.slice(0, MAX_TEXT_LEN)} …(已截断)`
+    message = `${sliceLogText(message, MAX_TEXT_LEN)} …(已截断)`
   }
   return {...item, message}
 }
@@ -94,24 +95,6 @@ export function formatLogText(items) {
   return items
     .map((it) => (it.time ? `[${it.time}][${it.level}] ${it.message}` : it.message))
     .join('\n')
-}
-
-/**
- * 把日志里的凭证打掉。
- *
- * 适配器建立连接时会把整个 headers 打进日志，里头的 `authorization` 就是 NapCat / OneBot
- * 的 access token；日志图一发到群里等于把 Bot 的控制权交出去。图是拿来给别人看的，
- * 默认就该打码 —— 真要查 token 请直接看控制台。
- */
-function maskSecrets(text) {
-  return String(text)
-    // 适配器的 `建立连接 { headers: { ... } }`
-    .replace(/headers:\s*\{[\s\S]*?\}/g, `headers: { ${CENSORED} }`)
-    // 零散出现的凭证字段，形如 `authorization: 'Bearer xxx'`、`"token":"xxx"`
-    .replace(
-      /(\b(?:authorization|access[_-]?token|refresh[_-]?token|token|cookie|password|passwd|secret|api[_-]?key)\b['"]?\s*[:=]\s*)(['"])(?:(?!\2).){4,}\2/gi,
-      (_m, prefix, quote) => `${prefix}${quote}${CENSORED}${quote}`,
-    )
 }
 
 function defaultFooter(count) {
@@ -132,30 +115,27 @@ function defaultFooter(count) {
  */
 export async function renderLogImage(items, options = {}) {
   if (!items?.length) return null
-  const renderer = await getRenderer()
-  if (!renderer) {
-    logger.warn('[Guoba] 没有可用的图片渲染器，日志改发文本')
-    return null
-  }
-  const data = {
-    tplFile: TPL_FILE,
-    // 固定 saveId：临时 html 每次覆盖，不在 temp 里堆垃圾
-    saveId: 'guoba-log',
-    logs: JSON.stringify(items),
-    ResPath: RES_PATH,
-    title: options.title || '锅巴日志',
-    footer: options.footer ?? defaultFooter(items.length),
-    // 日志图以文字为主：webp 同画质比 jpeg 还小一截，且小字边缘不糊（jpeg 的色度抽样会）
-    // 渲染器把 imgType 直接透传给 puppeteer 的 screenshot({type})，webp 是原生支持的类型
-    imgType: 'webp',
-    quality: 90,
-  }
   try {
-    const img = await renderer.screenshot('guoba-log', data)
+    // 探测渲染器也属于可能失败的边界，不能放在文字兜底的保护范围之外。
+    const renderer = await getRenderer()
+    if (!renderer) {
+      logger.warn('[Guoba] 没有可用的图片渲染器，日志改发文本')
+      return null
+    }
+    const data = {
+      tplFile: TPL_FILE,
+      saveId: 'guoba-log',
+      logs: inlineLogJson(items),
+      ResPath: RES_PATH,
+      title: options.title || '锅巴日志',
+      footer: options.footer ?? defaultFooter(items.length),
+      // PNG 保留小字且被各协议普遍接受，不把浏览器支持 WebP 等同于发送端支持。
+      imgType: 'png',
+    }
+    const img = normalizeLogImage(await renderer.screenshot('guoba-log', data))
     return img ? {image: img, count: items.length} : null
   } catch (err) {
-    logger.error('[Guoba] 日志出图失败')
-    logger.error(err)
+    logger.error(`[Guoba] 日志出图异常：${sliceLogText(formatLogDisplay(err?.stack || err?.message || err), 1000)}`)
     return null
   }
 }
@@ -168,7 +148,7 @@ export async function renderLogImage(items, options = {}) {
  * 绝不能因为 import 不到某个路径把整个插件的加载搞崩。
  */
 export async function getRenderer() {
-  if (cachedRenderer !== undefined) return cachedRenderer
+  if (cachedRenderer) return cachedRenderer
   cachedRenderer = await findRenderer()
   return cachedRenderer
 }

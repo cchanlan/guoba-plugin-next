@@ -1,5 +1,8 @@
 import fs from 'fs'
 import path from 'path'
+import {StringDecoder} from 'string_decoder'
+import {randomBytes} from 'crypto'
+import {formatLogDisplay, sliceLogText} from '../../../utils/logText.js'
 import {Service, GuobaError} from '#guoba.framework'
 import {hostName} from '#guoba.adapter'
 import {_paths, cfg} from '#guoba.platform'
@@ -177,7 +180,7 @@ function sliceAnsi(raw, skip, max) {
     const room = max - (vis - skip)
     if (room <= 0) break
     if (chunk.length > room) {
-      out += chunk.slice(0, room)
+      out += sliceLogText(chunk, room)
       break
     }
     out += chunk
@@ -205,10 +208,14 @@ export default class LogService extends Service {
   #seq = 1
   /** 半行缓存，stdout 的一次 write 未必刚好是整行 */
   #pending = {stdout: '', stderr: ''}
+  #decoders = {stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8')}
+  #instance = randomBytes(12).toString('hex')
+  #wrappers = {}
   /** 原始的 write，劫持前存下来 */
   #origin = {}
   /** 多行日志（异常堆栈之类）的后续行没有级别前缀，继承上一行的 */
-  #lastLevel = 'info'
+  #lastLevel = {stdout: 'info', stderr: 'error'}
+  #binaryContinuation = {stdout: false, stderr: false}
   #attached = false
   /** 清理任务的注册代次，见 {@link CLEAN_GENERATION_KEY} */
   #cleanGeneration = 0
@@ -241,7 +248,7 @@ export default class LogService extends Service {
       const origin = saved[key] ?? stream.write.bind(stream)
       this.#origin[key] = origin
       // write 的签名是 (chunk[, encoding][, callback])，原样透传，别自作主张补参数
-      stream.write = (...args) => {
+      const wrapper = (...args) => {
         try {
           this.#feed(key, args[0])
         } catch {
@@ -249,6 +256,8 @@ export default class LogService extends Service {
         }
         return origin(...args)
       }
+      this.#wrappers[key] = wrapper
+      stream.write = wrapper
     }
     process[ORIGIN_KEY] = {...this.#origin}
   }
@@ -257,22 +266,35 @@ export default class LogService extends Service {
   detach() {
     if (!this.#attached) return
     this.#attached = false
-    if (this.#origin.stdout) process.stdout.write = this.#origin.stdout
-    if (this.#origin.stderr) process.stderr.write = this.#origin.stderr
-    delete process[ORIGIN_KEY]
+    let owned = false
+    for (const key of ['stdout', 'stderr']) {
+      // 旧实例卸载时，不能拆掉新实例已经安装的采集器。
+      if (process[key].write !== this.#wrappers[key]) continue
+      owned = true
+      const tail = this.#decoders[key].end()
+      if (this.#pending[key] || tail) this.#push(key, this.#pending[key] + tail)
+      this.#pending[key] = ''
+      process[key].write = this.#origin[key]
+    }
+    if (owned) {
+      delete process[ORIGIN_KEY]
+      if (process[CLEAN_GENERATION_KEY] === this.#cleanGeneration) {
+        process[CLEAN_GENERATION_KEY]++
+        this.#cancelCleanJob()
+      }
+    }
   }
 
   /** 攒够一行就入缓冲 */
   #feed(key, chunk) {
     if (chunk == null) return
-    let text
-    if (typeof chunk === 'string') {
-      text = chunk
-    } else if (Buffer.isBuffer(chunk)) {
-      text = chunk.toString('utf8')
-    } else {
-      return
-    }
+    let bytes
+    if (typeof chunk === 'string') bytes = Buffer.from(chunk, 'utf8')
+    else if (Buffer.isBuffer(chunk)) bytes = chunk
+    else if (chunk instanceof Uint8Array) bytes = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+    else return
+    // 字符可能跨任意两个 write，分别 toString 会永久破坏 UTF-8。
+    const text = this.#decoders[key].write(bytes)
     if (!text) return
     const parts = (this.#pending[key] + text).split('\n')
     // 最后一段没遇到换行，留着等下一次 write
@@ -290,12 +312,20 @@ export default class LogService extends Service {
   #push(key, raw) {
     // Windows 上的日志文件可能是 CRLF、个别工具还会写 BOM，统一去掉再解析
     const line = String(raw).replace(/^\uFEFF/, '').replace(/\r/g, '')
-    let text = line.replace(ANSI_RE, '')
+    const originalText = line.replace(ANSI_RE, '')
+    const rawHead = matchHead(originalText)
+    if (rawHead) this.#binaryContinuation[key] = false
+    // 图片 URL 误解析会产生多行字节垃圾；只保留错误说明与真正的堆栈。
+    if (this.#binaryContinuation[key] && !rawHead && !/^\s*(?:at\s|Caused by:|\[cause\]:|code:|errno:|syscall:)/.test(originalText)) return
+    let text = formatLogDisplay(originalText)
+    if (/Failed to parse URL from/i.test(originalText) && /\[(?:PNG|JPEG|GIF|WebP) 图片数据已省略\]/.test(text)) {
+      this.#binaryContinuation[key] = true
+    }
     // 全是空白的行没有信息量，刷屏时还挺占地方
     if (!text.trim()) return
     let cut = false
     if (text.length > MAX_LINE_LEN) {
-      text = text.slice(0, MAX_LINE_LEN) + ' …(已截断)'
+      text = sliceLogText(text, MAX_LINE_LEN) + ' …(已截断)'
       cut = true
     }
     const head = matchHead(text)
@@ -308,15 +338,16 @@ export default class LogService extends Service {
       level = LEVELS[head.level.toUpperCase().slice(0, 4)] || 'info'
       skip = head.length
       text = text.slice(skip)
-      this.#lastLevel = level
+      this.#lastLevel[key] = level
     } else {
       // 没前缀，大概是堆栈或者裸 console.log，跟着上一行走
       cont = true
-      level = key === 'stderr' ? 'error' : this.#lastLevel
+      level = this.#lastLevel[key]
     }
     // 带色正文只在真有颜色时才留，纯文本的行没必要多传一份
     let ansi = ''
-    if (line.includes('\x1B')) {
+    // 脱敏/摘要改变过正文时不用原始 ANSI 副本，否则会把隐藏内容重新显示出来。
+    if (text === originalText.slice(skip) && line.includes('\x1B')) {
       ansi = sliceAnsi(line, skip, MAX_LINE_LEN - skip)
       if (cut) ansi += ' …(已截断)'
       if (!ansi.includes('\x1B')) ansi = ''
@@ -339,14 +370,16 @@ export default class LogService extends Service {
     if (!file) return
     let fd
     let text
+    let start = 0
     try {
       const {size} = fs.statSync(file)
-      const start = Math.max(0, size - PRELOAD_BYTES)
+      start = Math.max(0, size - PRELOAD_BYTES)
       const len = size - start
       const buf = Buffer.allocUnsafe(len)
       fd = fs.openSync(file, 'r')
-      fs.readSync(fd, buf, 0, len, start)
-      text = buf.toString('utf8')
+      const read = fs.readSync(fd, buf, 0, len, start)
+      // 轮转/截断可能发生在 stat 之后，只读实际字节，不能暴露 allocUnsafe 的尾部。
+      text = buf.toString('utf8', 0, read)
     } finally {
       // 日志文件在 stat / open 之间被轮转时（Windows 上 pm2 更常见）按没有历史日志处理
       if (fd != null) {
@@ -394,7 +427,9 @@ export default class LogService extends Service {
     const levels = this.#levelFilter(options.level)
     const keyword = String(options.keyword ?? '').trim().toLowerCase()
     const oldest = this.#lines.length ? this.#lines[0].seq : this.#seq
-    const from = Number(cursor)
+    const requested = Number(cursor)
+    const reset = Boolean(options.instance && options.instance !== this.#instance) || requested > this.#seq - 1
+    const from = reset ? 0 : requested
     // cursor 比缓冲里最老的还老，说明中间的行已经被挤掉了，前端要提示一下
     const missed = Number.isFinite(from) && from > 0 && from + 1 < oldest
 
@@ -415,6 +450,8 @@ export default class LogService extends Service {
     }
     return {
       lines,
+      instance: this.#instance,
+      reset,
       // 游标要跟着全量走，不能被筛选影响，否则被过滤掉的行下次还会再取一遍
       cursor: this.#seq - 1,
       truncated: total > limit ? total - limit : 0,
@@ -466,9 +503,17 @@ export default class LogService extends Service {
     const res = await renderLogImage(items, {title: '锅巴日志'})
     // 宿主没装渲染后端（或 Chromium 起不来）时退回文本，总比什么都收不到好
     const fallback = !res?.image
-    const sent = await sendToMasterList(fallback ? [formatLogText(items)] : [res.image])
-    if (!sent.length) throw new GuobaError('发送失败，请检查主人配置')
-    return {ok: true, sent, fallback}
+    let usedFallback = fallback
+    let uncertain = false
+    const sent = await sendToMasterList(res?.image ?? null, {
+      logText: formatLogText(items),
+      onOutcome(outcome) {
+        usedFallback ||= outcome.fallback
+        uncertain ||= outcome.uncertain
+      },
+    })
+    if (!sent.length) throw new GuobaError(uncertain ? '发送结果未确认，请查看私聊' : '日志发送失败，请检查主人配置')
+    return {ok: true, sent, fallback: usedFallback}
   }
 
   /** 页面上显示的状态 */
@@ -477,6 +522,7 @@ export default class LogService extends Service {
       lines: this.#lines.length,
       max: MAX_LINES,
       cursor: this.#seq - 1,
+      instance: this.#instance,
       attached: this.#attached,
       source: process.env.pm_out_log_path ? 'pm2' : 'stdout',
       logFile: this.#preloadFile() || '',

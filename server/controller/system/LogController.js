@@ -49,8 +49,8 @@ export class LogController extends ApiController {
    * `cursor` 为上次返回的游标，不传则取最后 limit 行；level / keyword 为筛选条件。
    */
   async tail(req) {
-    const {cursor, limit, level, keyword} = req.query ?? {}
-    return Result.ok(this.logService.query(cursor, {limit, level, keyword}))
+    const {cursor, limit, level, keyword, instance} = req.query ?? {}
+    return Result.ok(this.logService.query(cursor, {limit, level, keyword, instance}))
   }
 
   async status() {

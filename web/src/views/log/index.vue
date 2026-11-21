@@ -73,6 +73,10 @@ let timer: number | undefined
 let cursor = 0
 /** 请求在飞的时候不再发下一个，慢网络下别把请求堆起来 */
 let inflight = false
+let instance = ''
+let requestGeneration = 0
+let resetQueued = false
+let disposed = false
 
 const empty = computed(() => !loading.value && !lines.value.length)
 
@@ -101,27 +105,36 @@ function pruneCache() {
 }
 
 async function pull(reset = false) {
-  if (inflight) return
+  if (disposed) return
+  if (inflight) {
+    if (reset) resetQueued = true
+    return
+  }
   inflight = true
+  const generation = requestGeneration
   try {
     const data = await apiTailLog({
       cursor: reset ? undefined : cursor,
+      instance: reset ? undefined : instance || undefined,
       limit: reset ? 800 : 500,
       level: level.value,
       keyword: keyword.value.trim(),
     })
+    // 旧筛选或已卸载页面的响应不得覆盖当前状态。
+    if (disposed || generation !== requestGeneration) return
     cursor = data.cursor
-    if (reset) {
+    instance = data.instance || ''
+    if (reset || data.reset) {
       lines.value = data.lines
       spanCache.clear()
     } else if (data.lines.length) {
-      if (data.missed) {
+      if (data.missed || data.truncated > 0) {
         // 缓冲被挤掉了一段，插一条提示，免得看的人以为日志是连续的
         lines.value.push({
           seq: -Date.now(),
           time: '',
           level: 'warn',
-          text: '…… 中间有日志因缓冲上限被丢弃 ……',
+          text: data.truncated > 0 ? `…… 中间有 ${data.truncated} 行日志未显示 ……` : '…… 中间有日志因缓冲上限被丢弃 ……',
           cont: false,
         })
       }
@@ -134,10 +147,14 @@ async function pull(reset = false) {
     errMsg.value = ''
     if (follow.value) await scrollToEnd()
   } catch (e: any) {
-    errMsg.value = e?.message || '日志获取失败'
+    if (!disposed && generation === requestGeneration) errMsg.value = e?.message || '日志获取失败'
   } finally {
     inflight = false
-    loading.value = false
+    if (!disposed && generation === requestGeneration) loading.value = false
+    if (resetQueued && !disposed) {
+      resetQueued = false
+      void pull(true)
+    }
   }
 }
 
@@ -169,8 +186,11 @@ function stop() {
 
 /** 筛选条件变了，整个重新取一遍 —— 筛选在后端做，本地这份对不上了 */
 async function refresh() {
+  requestGeneration++
+  resetQueued = false
   loading.value = true
   cursor = 0
+  instance = ''
   await pull(true)
 }
 
@@ -184,6 +204,7 @@ watch(keyword, () => {
 })
 
 async function clear() {
+  requestGeneration++
   await apiClearLog()
   lines.value = []
   spanCache.clear()
@@ -250,7 +271,7 @@ async function sendImageToMaster() {
   sendingImage.value = true
   try {
     const data = await apiLogSendImage({ lines: all.slice(-150) })
-    const tip = data.fallback ? '（渲染器不可用，已改为文本）' : ''
+    const tip = data.fallback ? '（已改为文字日志）' : ''
     message.success(`已发送给 ${data.sent.length} 个主人${tip}`)
   } catch {
     // 发送失败的错误已由请求层弹出
@@ -340,6 +361,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  requestGeneration++
   stop()
   if (keywordTimer) window.clearTimeout(keywordTimer)
 })

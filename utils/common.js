@@ -8,6 +8,8 @@ import fetch from 'node-fetch'
 import {cfg, Constant} from "#guoba.platform"
 import {isV3, isV4, isTRSS} from '#guoba.adapter'
 import {isFakeAccount} from './account.js'
+import {isSendSuccess, sendLogMessage, sendWithTimeout} from './logMessage.js'
+import {formatLogDisplay, sliceLogText} from './logText.js'
 
 // 判据放在零依赖的 account.js 里，server 的 model 层也要用（见 service/both/model/bots.js）
 export {isFakeAccount}
@@ -240,11 +242,11 @@ export async function sendToBotMaster(botId, msg) {
  *
  * 与 sendToMaster 的区别：跳过 stdin 这类假账号（它收不到图片），并且返回明细而不只是数量。
  */
-export async function sendToMasterList(msg) {
+export async function sendToMasterList(msg, options = {}) {
   const masters = await getRealMasterList()
   const sent = []
   for (const master of masters) {
-    if (await replyPrivate(master, msg)) {
+    if (await replyPrivate(master, msg, options)) {
       sent.push(String(master.userId))
     }
   }
@@ -257,7 +259,7 @@ export async function sendToMasterList(msg) {
  * @param msg 消息
  * @return {Promise<boolean>} 是否发送成功
  */
-async function replyPrivate({botId, userId}, msg) {
+async function replyPrivate({botId, userId}, msg, options = {}) {
   // 数字 QQ 转 number（部分适配器只认 number），官bot 的 `appid:openid` 保持字符串
   userId = Number(userId) || userId
   try {
@@ -271,13 +273,14 @@ async function replyPrivate({botId, userId}, msg) {
     let friend = (bot ?? Bot).pickFriend(userId)
     logger.mark(`[Guoba] 发送主人私聊消息(${botId ?? Bot.uin}:${userId})`)
     // 加超时兜底，避免适配器卡住导致接口一直不返回
-    await Promise.race([
-      friend.sendMsg(msg),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('发送超时')), 20000)),
-    ])
-    return true
+    if (options.logText != null) {
+      const outcome = await sendLogMessage(payload => friend.sendMsg(payload), msg, options.logText)
+      options.onOutcome?.(outcome)
+      return outcome.ok
+    }
+    return isSendSuccess(await sendWithTimeout(payload => friend.sendMsg(payload), msg))
   } catch (err) {
-    logger.mark(`[Guoba] 给主人(${userId})发消息失败：${err.message ?? err}`)
+    logger.mark(`[Guoba] 给主人(${userId})发消息失败：${sliceLogText(formatLogDisplay(err?.message || err), 500)}`)
     return false
   }
 }
