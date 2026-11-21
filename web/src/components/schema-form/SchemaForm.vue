@@ -60,6 +60,22 @@ const groups = computed(() => splitGroups(props.schemas))
 
 const activeGroup = ref('0')
 
+// 自定义换行导航保留键盘切换，并沿用 Tabs 的面板、激活状态和表单生命周期。
+function navigateGroup(event: KeyboardEvent) {
+  const current = event.currentTarget as HTMLButtonElement
+  const tabs = Array.from(current.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? [])
+  const index = tabs.indexOf(current)
+  let next = index
+  if (event.key === 'ArrowRight') next = (index + 1) % tabs.length
+  else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = tabs.length - 1
+  else return
+  event.preventDefault()
+  tabs[next]?.focus()
+  tabs[next]?.click()
+}
+
 const labelCol = computed(() =>
   effectiveLayout.value === 'horizontal'
     ? { style: { width: `${props.labelWidth}px` } }
@@ -104,6 +120,25 @@ defineExpose({ validate, getValues, resetFields, model })
   >
     <!-- 有分组：渲染为 Tab -->
     <Tabs v-if="grouped" v-model:activeKey="activeGroup" class="g-schema-tabs">
+      <template #renderTabBar="{ id, activeKey, onTabClick }">
+        <div class="g-schema-group-nav" role="tablist" aria-label="配置目录">
+          <button
+            v-for="(group, gIdx) in groups"
+            :id="id ? `${id}-tab-${gIdx}` : undefined"
+            :key="String(gIdx)"
+            type="button"
+            role="tab"
+            class="g-schema-group-tab"
+            :aria-selected="activeKey === String(gIdx)"
+            :aria-controls="id ? `${id}-panel-${gIdx}` : undefined"
+            :tabindex="activeKey === String(gIdx) ? 0 : -1"
+            @click="onTabClick(String(gIdx), $event)"
+            @keydown="navigateGroup"
+          >
+            {{ group.title || `分组 ${gIdx + 1}` }}
+          </button>
+        </div>
+      </template>
       <TabPane
         v-for="(group, gIdx) in groups"
         :key="String(gIdx)"
@@ -139,8 +174,39 @@ defineExpose({ validate, getValues, resetFields, model })
   max-width: 900px;
 }
 
-.g-schema-tabs :deep(.ant-tabs-nav) {
-  margin-bottom: 20px;
+.g-schema-group-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.g-schema-group-tab {
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 14px;
+  max-width: 100%;
+  font: inherit;
+  line-height: 1.5;
+  color: var(--g-text-sub);
+  background: transparent;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.g-schema-group-tab:hover {
+  color: var(--g-brand);
+  background: var(--g-brand-soft);
+}
+
+.g-schema-group-tab[aria-selected='true'] {
+  color: var(--g-brand-fg);
+  background: var(--g-brand);
+}
+
+.g-schema-group-tab:focus-visible {
+  outline: 2px solid var(--g-brand);
+  outline-offset: 2px;
 }
 
 /* 窄屏：数字框/普通输入框默认不铺满，竖排下留一小截很难点，统一拉满行宽 */
