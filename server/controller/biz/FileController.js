@@ -1,14 +1,16 @@
 import fs from 'node:fs'
+import os from 'node:os'
+import multer from 'multer'
 import path from 'node:path'
 import {pipeline} from 'node:stream/promises'
-import {autowired, Result} from '#guoba.framework'
+import {autowired, GuobaError, Result} from '#guoba.framework'
 import {ApiController} from '#guoba.platform'
 
 /**
  * 文件管理。
  *
  * 所有操作限定在 Yunzai 根目录内（FileService 里校验）。入参 path 一律是相对根的路径，
- * 根本身传空串。下载要能直接写进 <a href>，token 走 query（TokenInterceptor 支持）。
+ * 根本身传空串。下载链接使用短期媒体票据。
  */
 export class FileController extends ApiController {
 
@@ -40,37 +42,37 @@ export class FileController extends ApiController {
 
   /** 读文本文件内容 */
   async read(req) {
-    return Result.ok(this.fileService.read(req.query?.path))
+    return Result.ok(await this.fileService.read(req.query?.path))
   }
 
   /** 保存文本文件 */
   async save(req) {
     const {path: rel, content} = req.body ?? {}
-    return Result.ok(this.fileService.save(rel, content))
+    return Result.ok(await this.fileService.save(rel, content, req.gateVerified))
   }
 
   /** 新建文件夹 */
   async mkdir(req) {
     const {path: rel} = req.body ?? {}
-    return Result.ok(this.fileService.mkdir(rel))
+    return Result.ok(this.fileService.mkdir(rel, req.gateVerified))
   }
 
   /** 新建文件 */
   async create(req) {
     const {path: rel, content} = req.body ?? {}
-    return Result.ok(this.fileService.create(rel, content))
+    return Result.ok(this.fileService.create(rel, content, req.gateVerified))
   }
 
   /** 重命名 */
   async rename(req) {
     const {path: rel, newName} = req.body ?? {}
-    return Result.ok(this.fileService.rename(rel, newName))
+    return Result.ok(this.fileService.rename(rel, newName, req.gateVerified))
   }
 
   /** 删除（递归） */
   async remove(req) {
     const {path: rel} = req.body ?? {}
-    return Result.ok(this.fileService.remove(rel))
+    return Result.ok(this.fileService.remove(rel, req.gateVerified))
   }
 
   /**
@@ -89,7 +91,7 @@ export class FileController extends ApiController {
     const failed = []
     for (const rel of paths) {
       try {
-        this.fileService.remove(rel)
+        this.fileService.remove(rel, req.gateVerified)
         deleted.push(rel)
       } catch (err) {
         failed.push({path: String(rel ?? ''), message: err?.message ?? String(err)})
@@ -98,42 +100,83 @@ export class FileController extends ApiController {
     return Result.ok({deleted, failed})
   }
 
-  /** 上传，multipart：path 字段 = 目标目录，文件在 req.files（multer 已处理） */
-  async upload(req) {
-    const {path: rel, relPaths} = req.body ?? {}
-    // 上传整个文件夹时前端把每个文件的相对路径打包成 JSON 数组带过来
-    let list = []
-    if (Array.isArray(relPaths)) list = relPaths
-    else if (typeof relPaths === 'string' && relPaths) {
-      try {
-        const parsed = JSON.parse(relPaths)
-        if (Array.isArray(parsed)) list = parsed
-      } catch {
-        // 解析不了就当普通上传，不因为一个坏字段整单失败
-      }
+  /** 只在鉴权之后接收 multipart；使用本次请求独享的临时目录。 */
+  async upload(req, res) {
+    if (!req.is('multipart/form-data')) throw new GuobaError('请先选择要上传的文件')
+    const tmpRoot = os.tmpdir()
+    if (Number(req.headers['content-length']) > 4 * 1024 ** 3) {
+      return Result.error('单次上传总量过大，请分批上传', 413)
     }
+    let available
     try {
-      return Result.ok(await this.fileService.upload(rel, req.files, list))
+      const stat = await fs.promises.statfs?.(tmpRoot)
+      if (stat) available = stat.bavail * stat.bsize
+    } catch {
+      // 个别平台不支持 statfs，由上传大小限制兜底。
+    }
+    if (available !== undefined && available < 2 * 1024 ** 3) {
+      return Result.error('服务器临时磁盘空间不足', 507)
+    }
+    const tmp = await fs.promises.mkdtemp(path.join(tmpRoot, 'guoba-file-upload-'))
+    try {
+      const parse = multer({
+        dest: tmp,
+        limits: {fileSize: 500 * 1024 ** 2, files: 200, fields: 100, parts: 400},
+      }).array('files', 200)
+      await new Promise((resolve, reject) => parse(req, res, err => err ? reject(err) : resolve()))
+      const {path: rel, relPaths} = req.body ?? {}
+      let list = []
+      if (relPaths != null && relPaths !== '') {
+        try {
+          list = JSON.parse(relPaths)
+          if (!Array.isArray(list)) throw new Error()
+        } catch {
+          throw new GuobaError('上传文件夹路径格式不合法')
+        }
+      }
+      return Result.ok(await this.fileService.upload(rel, req.files, list, req.gateVerified))
     } catch (err) {
-      // 这一单失败时 multer 已经把临时文件写进 data/upload_tmp 了，
-      // 不清理的话每失败一次就留一堆垃圾，攒久了同样会把磁盘撑满。
-      this.#cleanupTempFiles(req)
+      if (err instanceof multer.MulterError) throw new GuobaError('上传未完成，请检查文件大小与数量后重试')
       throw err
+    } finally {
+      await fs.promises.rm(tmp, {recursive: true, force: true}).catch(err => {
+        logger.error(`[Guoba] 文件上传临时目录清理失败：${err.code || err.message}`)
+      })
     }
   }
 
-  /** 清掉本次请求落在 upload_tmp 里的临时文件 */
-  #cleanupTempFiles(req) {
-    const files = Array.isArray(req.files) ? req.files : []
-    for (const f of files) {
-      if (f?.path) fs.rmSync(f.path, {force: true})
-    }
-  }
-
-  /** 下载 */
+  /** 使用已经校验过的描述符下载；不要交给另一层按路径重新打开。 */
   async download(req, res) {
-    const abs = this.fileService.downloadAbs(req.query?.path)
-    res.download(abs, path.basename(abs))
+    const {handle, stat, name} = await this.fileService.openDownload(req.query?.path)
+    try {
+      const lastModified = stat.mtime.toUTCString()
+      res.set({'Accept-Ranges': 'bytes', 'Last-Modified': lastModified, 'Cache-Control': 'private, no-store'})
+      const ifRange = req.get('If-Range')
+      const ranges = !ifRange || ifRange === lastModified ? req.range(stat.size) : undefined
+      if (ranges === -1 && /^bytes=/i.test(req.get('Range') || '')) {
+        res.set('Content-Range', `bytes */${stat.size}`).status(416).end()
+        return Result.VOID
+      }
+      res.attachment(name)
+      let streamOptions = {autoClose: false}
+      let length = stat.size
+      if (Array.isArray(ranges) && ranges.type === 'bytes' && ranges.length === 1) {
+        const {start, end} = ranges[0]
+        streamOptions = {...streamOptions, start, end}
+        length = end - start + 1
+        res.status(206).set('Content-Range', `bytes ${start}-${end}/${stat.size}`)
+      } else if (length > 0) {
+        streamOptions = {...streamOptions, start: 0, end: length - 1}
+      }
+      res.set('Content-Length', String(length))
+      if (!length) res.end()
+      else await pipeline(handle.createReadStream(streamOptions), res)
+    } catch (err) {
+      if (err?.code !== 'ERR_STREAM_PREMATURE_CLOSE') logger.error(`[Guoba] 下载失败：${err?.code || err?.message}`)
+      res.destroy()
+    } finally {
+      await handle.close().catch(() => {})
+    }
     return Result.VOID
   }
 

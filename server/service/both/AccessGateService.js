@@ -104,10 +104,11 @@ export class AccessGateService extends Service {
     }
   }
 
-  /** 给拦截器用的判定：是否需要密码 */
+  /** 未配置密码可以放行普通操作，但不代表此请求已通过二级验证。 */
   async checkAccess(req) {
-    if (!this.configured) return { needPassword: false }
-    return { needPassword: !(await this.isUnlocked(req)) }
+    if (!this.configured) return { needPassword: false, verified: false }
+    const verified = await this.isUnlocked(req)
+    return { needPassword: !verified, verified }
   }
 
   async getStatus(req) {

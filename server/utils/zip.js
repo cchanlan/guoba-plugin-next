@@ -131,6 +131,7 @@ function normalizeEntryName(name, isDir = false) {
     .replace(/^[a-zA-Z]:/, '')
     .split('/')
     .filter((s) => s && s !== '.')
+  if (parts.includes('..')) return ''
   let out = parts.join('/')
   if (isDir && out) out += '/'
   return out
@@ -504,6 +505,7 @@ export class ZipWriter {
  * @param {AsyncIterable<object>|Iterable<object>} entries 条目，字段同 {@link walkDir} 的产出：
  *   `{name, abs, isDir, size, mtimeMs, mode}`，`name` 是包内路径
  * @param {object} [opts]
+ * @param {Function} [opts.openFile] 检查路径并返回 {handle, stat}（文件管理用）
  * @param {number} [opts.level] deflate 级别，默认 6
  * @param {number} [opts.inlineLimit] 不超过这个大小的文件先在内存里压完再写头，
  *   这样不用 data descriptor（兼容性更好）；默认 {@link INLINE_LIMIT}
@@ -548,15 +550,22 @@ export function createZipStream(entries, opts = {}) {
 
       // 先打开再写头：没权限 / 遍历完就被删的文件直接跳过，头写出去了可就没法撤了
       let handle
+      let checked = item
       try {
-        handle = await fs.promises.open(item.abs, 'r')
+        if (opts.openFile) {
+          const opened = await opts.openFile(item.abs)
+          handle = opened.handle
+          checked = {...item, size: opened.stat.size}
+        } else {
+          handle = await fs.promises.open(item.abs, 'r')
+        }
       } catch {
         continue
       }
       try {
-        const rec = yield* item.size <= inlineLimit
-          ? inlineEntry(name, handle, item, pos, level)
-          : streamEntry(name, handle, item, pos, level, zip64Limit)
+        const rec = yield* checked.size <= inlineLimit
+          ? inlineEntry(name, handle, checked, pos, level)
+          : streamEntry(name, handle, checked, pos, level, zip64Limit)
         pos += rec.written
         names.add(name)
         records.push(rec)

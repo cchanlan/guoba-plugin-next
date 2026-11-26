@@ -82,6 +82,7 @@ export default class AccessGateInterceptor extends Interceptor {
     if (status.needPassword) {
       return this.#reject(res, Constant.GATE_REQUIRED_CODE, '此功能需要二级密码')
     }
+    req.gateVerified = status.verified === true
     next()
   }
 

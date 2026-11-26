@@ -74,8 +74,6 @@ export function useHelper(guobaApp) {
     return p
   }
 
-  const isGuobaApi = (req) => /^\/api(\/|$)/i.test(stripMount(req.originalUrl || req.url))
-
   const hasAccessToken = async (req) => {
     const token = req.headers?.[Constant.TOKEN_KEY]
     if (!token || typeof token !== 'string') return false
@@ -93,7 +91,9 @@ export function useHelper(guobaApp) {
   // 路由，body 解析不了（表现为发消息报「消息内容不能为空」）。
   // /.*/ 在两个版本里都能匹配所有 POST；multer 对非 multipart 请求直接 next，不影响 JSON 接口。
   app.post(/.*/, async (req, res, next) => {
-    if (!isGuobaApi(req) || !(await hasAccessToken(req))) {
+    const apiPath = stripMount(req.originalUrl || req.url)
+    // 文件管理必须先完成登录和二级验证，再接收文件；由其上传入口单独处理 multipart。
+    if (!/^\/api(\/|$)/i.test(apiPath) || /^\/api\/file(\/|$)/i.test(apiPath) || !(await hasAccessToken(req))) {
       next()
       return
     }

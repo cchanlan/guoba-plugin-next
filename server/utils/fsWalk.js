@@ -41,7 +41,7 @@ export async function* walkDir(root, opts = {}) {
     const dir = stack.pop()
     let dirents
     try {
-      dirents = await fs.promises.readdir(dir.abs, {withFileTypes: true})
+      dirents = await (opts.readDir ? opts.readDir(dir.abs) : fs.promises.readdir(dir.abs, {withFileTypes: true}))
     } catch {
       // 没权限 / 遍历途中被删，跳过整个目录
       continue
@@ -63,10 +63,11 @@ export async function* walkDir(root, opts = {}) {
       const rel = dir.rel ? `${dir.rel}/${dirent.name}` : dirent.name
       let stat
       try {
-        stat = await fs.promises.lstat(abs)
+        stat = await (opts.stat ? opts.stat(abs) : fs.promises.lstat(abs))
       } catch {
         continue
       }
+      if (stat.isSymbolicLink() || (isDir ? !stat.isDirectory() : !stat.isFile() || (opts.stat && stat.nlink !== 1))) continue
       count++
       yield {
         rel,
@@ -96,6 +97,8 @@ export async function dirStats(abs, opts = {}) {
   let dirs = 0
   let partial = false
   const walkOpts = {
+    readDir: opts.readDir,
+    stat: opts.stat,
     entryLimit: opts.entryLimit ?? DEFAULT_ENTRY_LIMIT,
     timeLimit: opts.timeLimit ?? DEFAULT_TIME_LIMIT,
     onTruncate: () => {

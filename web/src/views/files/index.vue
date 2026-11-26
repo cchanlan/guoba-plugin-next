@@ -26,8 +26,8 @@ const { vm, uploadEl, uploadDirEl } = useFileManager()
     <div class="g-page-head">
       <h2 class="g-page-title">文件管理</h2>
       <p class="g-page-desc">
-        浏览 / 编辑 <b>Yunzai 根目录</b>下的文件，改动直接写到磁盘，请小心操作。
-        单击文件可预览，文本编辑限 2MB，二进制文件只能下载。
+        设置并通过二级密码后，可修改 <b>云崽根目录</b>下的文件；未设置时，仅允许写入指定目录。
+        单击文件可预览，文本编辑限 2 MB，二进制文件只能下载。
         文件夹的大小要点「计算」才算，下载文件夹会打包成 zip。
       </p>
     </div>
