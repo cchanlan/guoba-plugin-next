@@ -6,7 +6,7 @@
  * 段结构完全一致。两页的差异通过 provide / inject 注入：资源地址怎么拼、按钮点了
  * 干什么、引用的那条消息去哪儿查，都由页面决定。
  */
-import { computed, inject, ref } from 'vue'
+import { computed, inject, ref, watch } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import GIcon from '@/components/GIcon.vue'
@@ -45,6 +45,7 @@ const imgPreview = ref(false)
 /** 直链失效后切服务端代理，再失败就只显示一行提示 */
 const viaProxy = ref(false)
 const imgFailed = ref(false)
+const audioFailed = ref(false)
 
 function onImgLoad(e: Event) {
   const img = e.target as HTMLImageElement
@@ -58,6 +59,7 @@ function onImgLoad(e: Event) {
 const assetUrl = inject<((assetId: string) => string) | null>('msgAssetUrl', null)
 /** QQ 直链的 rkey 会过期，页面给了代理地址就在加载失败后再试一次 */
 const proxyUrl = inject<((url: string) => string) | null>('msgProxyUrl', null)
+const audioUrl = inject<((seg: MsgSeg) => string) | null>('msgAudioUrl', null)
 /** 按钮点击交给页面处理。用 inject 是为了让转发消息里嵌套的按钮也能拿到 */
 const onButton = inject<((btn: MsgBtn) => void) | null>('msgButtonClick', null)
 /** 引用的那条消息，能查到就显示「昵称：摘要」，查不到只标一下是引用 */
@@ -68,11 +70,14 @@ const findReply = inject<((id: string) => { name: string; text: string } | null)
 
 /** 资源地址：http 直链原样用，其余走后端资源接口 */
 const src = computed(() => {
+  if (props.seg.type === 'record' && audioUrl) return audioUrl(props.seg)
   const url = props.seg.url
   if (url) return viaProxy.value && proxyUrl ? proxyUrl(url) : url
   if (props.seg.assetId && assetUrl) return assetUrl(props.seg.assetId)
   return ''
 })
+
+watch(src, () => { audioFailed.value = false })
 
 function onImgError() {
   if (props.seg.url && proxyUrl && !viaProxy.value) {
@@ -215,7 +220,11 @@ const faceSrc = computed(() => {
 
   <!-- 语音 / 视频 / 文件：能播的给播放器，其余给下载链接 -->
   <template v-else-if="seg.type === 'record' || seg.type === 'video' || seg.type === 'file'">
-    <audio v-if="seg.type === 'record' && src" :src="src" controls class="g-seg-audio" />
+    <template v-if="seg.type === 'record' && src">
+      <audio :src="src" controls preload="metadata" class="g-seg-audio"
+        @error="audioFailed = true" @loadedmetadata="audioFailed = false" />
+      <span v-if="audioFailed" class="g-seg-bad">语音加载失败，请刷新后重试</span>
+    </template>
     <video v-else-if="seg.type === 'video' && src" :src="src" controls class="g-seg-video" />
     <a v-else-if="src" :href="src" target="_blank" class="g-seg-file">
       <GIcon :icon="fileIcon[seg.type]" :size="14" />

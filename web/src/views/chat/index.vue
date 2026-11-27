@@ -28,6 +28,7 @@ import {
   apiChatEmojiImport,
   apiCreateMediaTicket,
   chatAssetUrl,
+  chatAudioUrl,
   chatProxyUrl,
   type ChatActiveItem,
   type ChatEmojiPick,
@@ -234,6 +235,7 @@ async function refreshMediaTicket() {
 provide('msgAssetUrl', (assetId: string) => chatAssetUrl(assetId, mediaTicket.value))
 // QQ 直链的 rkey 会过期，加载失败时由服务端代拉一次
 provide('msgProxyUrl', (url: string) => chatProxyUrl(url, mediaTicket.value))
+provide('msgAudioUrl', (seg: MsgSeg) => chatAudioUrl(seg, mediaTicket.value))
 
 /**
  * reply 段显示「昵称：摘要」—— 被引用的那条得在页面上还留着才查得到，

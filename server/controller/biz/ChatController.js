@@ -1,5 +1,6 @@
 import {autowired, Result} from '#guoba.framework'
 import {ApiController} from '#guoba.platform'
+import {sendAudio} from '../../service/both/model/chatAudio.js'
 
 /**
  * 消息记录。
@@ -222,6 +223,10 @@ export class ChatController extends ApiController {
 
   /** 回传自己发出去的那张图 */
   async getAsset(req, res) {
+    if (req.query?.audio === '1') {
+      sendAudio(req, res, await this.chatService.getAudio({assetId: req.params.id}))
+      return Result.VOID
+    }
     const asset = this.chatService.getAsset(req.params.id)
     res.type(asset.mime)
     // 资源 id 是内容哈希，同一 URL 内容不变，可以放心缓存
@@ -232,6 +237,10 @@ export class ChatController extends ApiController {
 
   /** QQ 直链的 rkey 过期后由服务端代拉一次，只放行消息里出现过的地址 */
   async proxy(req, res) {
+    if (req.query?.audio === '1') {
+      sendAudio(req, res, await this.chatService.getAudio({url: req.query?.url}))
+      return Result.VOID
+    }
     const {buffer, mime} = await this.chatService.proxy(req.query?.url)
     res.type(mime)
     // rkey 会过期，别缓存太久

@@ -92,6 +92,14 @@ TRSS 系宿主会自动共享宿主的 HTTP 端口，挂在 `/guoba` 路径下�
 
 兼容 Miao-Yunzai、TRSS-Yunzai 与 JiuLi；本轮真机验证在 Linux / JiuLi，跨平台解码及消息形态另有隔离测试。
 
+## 消息记录语音播放
+
+消息记录中的 QQ 语音会按实际文件格式识别，AMR / SILK 自动转换为浏览器可播放的 WAV；MP3、WAV 等格式直接播放。普通消息、合并转发及面板发送后的语音回显共用此处理。
+
+- SILK 解码依赖随插件安装；更新后提示缺少依赖时，在锅巴插件目录运行 `pnpm install`。
+- AMR 转换需要系统能运行 `ffmpeg -version`。Debian / Ubuntu 可运行 `apt-get update && apt-get install -y ffmpeg`；Windows 可运行 `winget install --id Gyan.FFmpeg -e`，安装后重启机器人以更新 PATH。已安装但不在 PATH 的，可通过环境变量 `FFMPEG_PATH` 指定可执行文件。
+- 语音链接已过期时需重新加载消息记录；无法从 QQ 获取的内容不能恢复。播放器加载失败会显示提示。
+
 ## 前端开发
 
 前端在 `web/`，`pnpm dev` 起开发服务器，`pnpm build` 产物输出到 `server/static/`。

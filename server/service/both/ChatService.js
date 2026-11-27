@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import {lookup as dnsLookup} from 'node:dns/promises'
 import {autowired, GuobaError, Service} from '#guoba.framework'
 import {AssetStore, flattenOneBot, normalizeMsg, toBase64File} from './model/msgSegment.js'
+import {AudioCache} from './model/chatAudio.js'
 import {groupAvatarUrl, userAvatarUrl} from './model/avatar.js'
 import {listBots, ensureContacts, botOf, listContacts, hasContact} from './model/bots.js'
 import {getNote, isPinned, setPinned, isBlacklisted, setBlacklisted, setNote} from './model/chatPrefs.js'
@@ -459,6 +460,7 @@ export default class ChatService extends Service {
    * 真实消息段自带 QQ 直链不用存，只有面板自己发的图是 base64，得留着才能回显。
    */
   #assets = new AssetStore()
+  #audio = new AudioCache()
   /**
    * 允许代理的图片直链白名单。
    *
@@ -1674,6 +1676,20 @@ export default class ChatService extends Service {
     const asset = this.#assets.get(assetId)
     if (!asset) throw new GuobaError('资源不存在或已过期')
     return asset
+  }
+
+  /** 语音源仍须来自消息白名单或内存资源；命中缓存也先验证访问范围。 */
+  async getAudio({url, assetId} = {}) {
+    const target = String(url ?? '')
+    const asset = assetId ? this.getAsset(assetId) : null
+    if (!asset && !this.#proxyUrls.has(target)) throw new GuobaError('该链接不在当前消息记录里')
+    try {
+      return await this.#audio.get(asset ? `asset:${assetId}` : `url:${target}`,
+        () => asset || this.proxy(target))
+    } catch (err) {
+      logger.warn(`[Guoba][语音播放] ${err?.message ?? err}`)
+      throw new GuobaError(err?.message || '语音加载失败，请稍后重试')
+    }
   }
 
   /** 按 id 取内存里的那条消息（收藏表情要按段取字节） */

@@ -1474,6 +1474,14 @@ export function chatProxyUrl(url: string, ticket: string) {
   return `${API_BASE}/chat/proxy?${q.toString()}`
 }
 
+/** QQ 语音先由服务端按真实格式转换；票据尚未就绪时不发未认证请求。 */
+export function chatAudioUrl(seg: MsgSeg, ticket: string) {
+  if (!ticket) return ''
+  const url = seg.url ? chatProxyUrl(seg.url, ticket)
+    : seg.assetId ? chatAssetUrl(seg.assetId, ticket) : ''
+  return url ? `${url}&audio=1` : ''
+}
+
 /* ---------------- 文件管理 ---------------- */
 
 /** 目录里的一项。path 用相对 Yunzai 根的路径，根本身是空串 */
